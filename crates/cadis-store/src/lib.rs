@@ -46,6 +46,8 @@ impl Default for ModelConfig {
 pub struct HudConfig {
     /// HUD theme key.
     pub theme: String,
+    /// Center avatar style key.
+    pub avatar_style: String,
     /// Background opacity percentage.
     pub background_opacity: u8,
     /// Always-on-top preference.
@@ -56,6 +58,7 @@ impl Default for HudConfig {
     fn default() -> Self {
         Self {
             theme: "arc".to_owned(),
+            avatar_style: "orb".to_owned(),
             background_opacity: 90,
             always_on_top: false,
         }
@@ -144,6 +147,7 @@ impl CadisConfig {
         serde_json::json!({
             "hud": {
                 "theme": self.hud.theme,
+                "avatar_style": self.hud.avatar_style,
                 "background_opacity": self.hud.background_opacity,
                 "always_on_top": self.hud.always_on_top
             },

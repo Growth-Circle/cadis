@@ -4,6 +4,19 @@ Tauri + React desktop HUD for the CADIS daemon. It provides the orbital agent
 view, chat routing, voice controls, model settings, approvals, and live worker
 state as a protocol client. Runtime authority stays in `cadisd`.
 
+## Avatar
+
+The center HUD avatar is configurable from Settings -> Appearance:
+
+- `CADIS Orb`: the default RamaClaw-style orb.
+- `Wulan Arc`: a contributed hologram avatar adapted from
+  `wulan-contribute/cadis-arc-avatar-sample`.
+
+The selected avatar is persisted through `cadisd` as `hud.avatar_style`. The
+Wulan Arc path lazy-loads its Three.js scene so the default HUD path stays
+lightweight. The Wulan Arc scene keeps the portrait readable inside the HUD and
+adds lightweight eye blink/gaze and mouth pulse overlays for live-state feedback.
+
 ## Run
 
 ```bash

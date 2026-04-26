@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   THEMES,
+  normalizeAvatarStyle,
   normalizeAgentName,
   useHud,
+  type AvatarStyle,
   type AgentLive,
   type ThemeKey,
   type WorkerStatus,
@@ -150,6 +152,10 @@ export function persistThemePreference(theme: ThemeKey): void {
 
 export function persistBackgroundOpacityPreference(backgroundOpacity: number): void {
   sendUiPreferencesPatch({ hud: { background_opacity: backgroundOpacity } });
+}
+
+export function persistAvatarStylePreference(avatarStyle: AvatarStyle): void {
+  sendUiPreferencesPatch({ hud: { avatar_style: avatarStyle } });
 }
 
 export function persistAlwaysOnTopPreference(alwaysOnTop: boolean): void {
@@ -350,6 +356,9 @@ function handlePreferences(payload: unknown): void {
 
   const theme = stringFrom(hud.theme);
   if (isThemeKey(theme)) useHud.getState().setTheme(theme);
+
+  const avatarStyle = normalizeAvatarStyle(stringFrom(hud.avatar_style));
+  if (avatarStyle) useHud.getState().setAvatarStyle(avatarStyle);
 
   const opacity = numberFrom(hud.background_opacity);
   if (opacity !== undefined) useHud.getState().setBackgroundOpacity(opacity);

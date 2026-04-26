@@ -73,3 +73,5 @@ apps/*/src-tauri/gen/
 *.tsbuildinfo
 playwright-report/
 test-results/
+.playwright-cli/
+output/

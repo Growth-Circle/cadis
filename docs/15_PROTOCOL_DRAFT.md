@@ -292,6 +292,7 @@ The daemon assigns the new `agent_id` and confirms with `agent.spawned`.
   "patch": {
     "hud": {
       "theme": "arc",
+      "avatar_style": "wulan_arc",
       "background_opacity": 82
     }
   }

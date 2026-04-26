@@ -176,6 +176,38 @@ Consequence:
 - Tauri + React and Dioxus remain valid future options if the project optimizes for exact RamaClaw parity or Rust-first WebView UI.
 - HUD state still belongs to `cadisd`; the UI only caches view state.
 
+### ADR-013: Adopt Wulan Arc as an optional HUD avatar
+
+Status: Accepted.
+
+Decision: The Tauri HUD can offer the contributed Wulan Arc hologram avatar as
+an optional center avatar alongside the default CADIS orb.
+
+Reason:
+
+- The existing RamaClaw-style orb remains the default visual and preserves HUD
+  parity.
+- Wulan Arc gives the center avatar a more expressive state surface for
+  listening, thinking, speaking, coding, and error states.
+- The implementation stays isolated to `apps/cadis-hud` and is lazy-loaded so
+  Three.js is not required by the daemon or the default orb path.
+- Eye blink/gaze and mouth pulse are implemented as lightweight overlay
+  animation, not as a full facial rig or lip-sync model.
+
+License review:
+
+- The sample came from the local `wulan-contribute/cadis-arc-avatar-sample`
+  contribution and does not include a separate LICENSE or NOTICE file.
+- The new runtime dependencies used by the HUD avatar path, `three`,
+  `@react-three/fiber`, and `@react-three/drei`, are MIT licensed.
+
+Consequence:
+
+- HUD avatar choice is stored as daemon-owned UI preference
+  `hud.avatar_style`.
+- Contributors should keep future avatar variants as optional HUD assets and
+  avoid moving browser/WebGL dependencies into `cadisd`.
+
 ## Pending Decisions
 
 ### ADR-P001: First model provider

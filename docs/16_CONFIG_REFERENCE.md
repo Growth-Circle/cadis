@@ -46,6 +46,7 @@ openai_base_url = "https://api.openai.com/v1"
 
 [hud]
 theme = "arc"
+avatar_style = "orb"
 background_opacity = 90
 always_on_top = false
 

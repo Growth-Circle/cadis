@@ -35,6 +35,7 @@ Durable preferences belong in daemon config/state:
 ```toml
 [hud]
 theme = "arc"
+avatar_style = "orb"
 background_opacity = 82
 hotkey = "Super+Space"
 always_on_top = false
@@ -147,6 +148,7 @@ Sent when the user changes theme, opacity, chat prefs, window prefs, or other HU
   "patch": {
     "hud": {
       "theme": "ice",
+      "avatar_style": "wulan_arc",
       "background_opacity": 75
     }
   }
@@ -394,6 +396,7 @@ Confirms settings persisted by daemon.
   "preferences": {
     "hud": {
       "theme": "arc",
+      "avatar_style": "orb",
       "background_opacity": 82
     }
   }

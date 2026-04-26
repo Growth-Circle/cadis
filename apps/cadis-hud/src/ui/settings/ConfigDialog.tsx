@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   THEMES,
   useHud,
+  type AvatarStyle,
   type ConfigTab,
   type ThemeKey,
 } from "../hudState.js";
@@ -9,6 +10,7 @@ import { VOICES } from "../../lib/voice/voices.js";
 import { stopSpeaking, testAudio } from "../../lib/voice/tts.js";
 import {
   persistBackgroundOpacityPreference,
+  persistAvatarStylePreference,
   persistChatPreferences,
   persistThemePreference,
   persistVoicePreferences,
@@ -20,6 +22,11 @@ const TABS: { id: ConfigTab; label: string }[] = [
   { id: "models", label: "Models" },
   { id: "appearance", label: "Appearance" },
   { id: "window", label: "Window" },
+];
+
+const AVATAR_STYLES: { id: AvatarStyle; label: string; detail: string }[] = [
+  { id: "orb", label: "CADIS Orb", detail: "Current RamaClaw-style core" },
+  { id: "wulan_arc", label: "Wulan Arc", detail: "Hologram avatar contribution" },
 ];
 
 export function ConfigDialog() {
@@ -286,33 +293,66 @@ function ModelsTab() {
 
 function AppearanceTab() {
   const theme = useHud((s) => s.theme);
+  const avatarStyle = useHud((s) => s.avatarStyle);
   const setTheme = useHud((s) => s.setTheme);
+  const setAvatarStyle = useHud((s) => s.setAvatarStyle);
   const pickTheme = (next: ThemeKey) => {
     setTheme(next);
     persistThemePreference(next);
   };
+  const pickAvatar = (next: AvatarStyle) => {
+    setAvatarStyle(next);
+    persistAvatarStylePreference(next);
+  };
 
   return (
-    <section className="voice-config__row">
-      <label className="voice-config__label">
-        Theme
-        <span className="voice-config__value">{THEMES[theme].label}</span>
-      </label>
-      <div className="config-theme-grid">
-        {(Object.keys(THEMES) as ThemeKey[]).map((k) => (
-          <button
-            key={k}
-            type="button"
-            className={`config-theme${k === theme ? " config-theme--active" : ""}`}
-            style={{ ["--theme-hue" as string]: String(THEMES[k].hue) }}
-            onClick={() => pickTheme(k)}
-          >
-            <span className="config-theme__swatch" />
-            {THEMES[k].label}
-          </button>
-        ))}
-      </div>
-    </section>
+    <>
+      <section className="voice-config__row">
+        <label className="voice-config__label">
+          Avatar
+          <span className="voice-config__value">
+            {AVATAR_STYLES.find((style) => style.id === avatarStyle)?.label}
+          </span>
+        </label>
+        <div className="config-avatar-grid">
+          {AVATAR_STYLES.map((style) => (
+            <button
+              key={style.id}
+              type="button"
+              className={`config-avatar${style.id === avatarStyle ? " config-avatar--active" : ""}`}
+              onClick={() => pickAvatar(style.id)}
+            >
+              <span className={`config-avatar__preview config-avatar__preview--${style.id}`} />
+              <span className="config-avatar__copy">
+                <strong>{style.label}</strong>
+                <small>{style.detail}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="voice-config__row">
+        <label className="voice-config__label">
+          Theme
+          <span className="voice-config__value">{THEMES[theme].label}</span>
+        </label>
+        <div className="config-theme-grid">
+          {(Object.keys(THEMES) as ThemeKey[]).map((k) => (
+            <button
+              key={k}
+              type="button"
+              className={`config-theme${k === theme ? " config-theme--active" : ""}`}
+              style={{ ["--theme-hue" as string]: String(THEMES[k].hue) }}
+              onClick={() => pickTheme(k)}
+            >
+              <span className="config-theme__swatch" />
+              {THEMES[k].label}
+            </button>
+          ))}
+        </div>
+      </section>
+    </>
   );
 }
 

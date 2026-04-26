@@ -29,6 +29,7 @@ export type ChatMessage = {
 export type GatewayState = "disconnected" | "connecting" | "connected";
 export type ConfigTab = "voice" | "models" | "appearance" | "window";
 export type AgentModelMap = Record<string, string>;
+export type AvatarStyle = "orb" | "wulan_arc";
 
 export type ApprovalRecord = {
   id: string;
@@ -69,6 +70,7 @@ export type HudStore = {
   approvals: ApprovalRecord[];
   workers: WorkerRecord[];
   theme: ThemeKey;
+  avatarStyle: AvatarStyle;
   voiceState: "idle" | "listening" | "thinking" | "speaking";
   voicePrefs: VoicePrefs;
   voiceConfigOpen: boolean;
@@ -83,6 +85,7 @@ export type HudStore = {
   chatPreferences: ChatPreferences;
   setGateway: (g: GatewayState) => void;
   setTheme: (t: ThemeKey) => void;
+  setAvatarStyle: (style: AvatarStyle) => void;
   pushChat: (m: ChatMessage) => void;
   upsertChat: (m: ChatMessage) => void;
   setAgentStatus: (id: string, s: AgentStatus) => void;
@@ -117,6 +120,11 @@ export const THEMES: Record<ThemeKey, { hue: number; label: string }> = {
 export function normalizeAgentName(name: string, fallback = "CADIS"): string {
   const clean = name.trim().replace(/\s+/g, " ").slice(0, 32);
   return clean || fallback;
+}
+
+export function normalizeAvatarStyle(value: string | undefined): AvatarStyle | null {
+  if (value === "orb" || value === "wulan_arc") return value;
+  return null;
 }
 
 function clampBackgroundOpacity(value: number): number {
@@ -166,6 +174,7 @@ export const useHud = create<HudStore>((set) => ({
   approvals: [],
   workers: [],
   theme: "arc",
+  avatarStyle: "orb",
   voiceState: "idle",
   voicePrefs: DEFAULT_VOICE_PREFS,
   voiceConfigOpen: false,
@@ -180,6 +189,7 @@ export const useHud = create<HudStore>((set) => ({
   chatPreferences: { thinking: false, fast: true },
   setGateway: (gateway) => set({ gateway }),
   setTheme: (theme) => set({ theme }),
+  setAvatarStyle: (avatarStyle) => set({ avatarStyle }),
   pushChat: (message) => set((s) => ({ chat: [...s.chat, message] })),
   upsertChat: (message) =>
     set((s) => {

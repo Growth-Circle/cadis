@@ -906,6 +906,7 @@ mod tests {
                 ui_preferences: serde_json::json!({
                     "hud": {
                         "theme": "arc",
+                        "avatar_style": "orb",
                         "background_opacity": 90
                     },
                     "voice": {
