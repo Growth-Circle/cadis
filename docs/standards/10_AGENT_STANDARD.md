@@ -85,6 +85,14 @@ Limit violations must produce structured errors and visible events.
 
 Delegation should be explicit. Route decisions must be observable through events such as `orchestrator.route` so users can see why work moved to another agent.
 
+Baseline orchestrator behavior:
+
+- Direct leading `@agent` mentions route to existing agents by ID, display name, or role.
+- Explicit `/route @agent ...` and `/delegate @agent ...` actions route to an existing agent and emit worker lifecycle events for the delegated unit.
+- Explicit `/worker ...` and `/spawn ...` actions create a child agent under `main`, then route the task to that child.
+- Explicit worker-spawn actions must pass the same maximum depth, maximum children, and maximum total-agent checks as `agent.spawn`.
+- Implicit model-driven recursive spawning is not enabled until a later runtime track defines policy, budget, and recovery behavior.
+
 ## 7. Model Selection
 
 Agents may use different models when configured.

@@ -1,5 +1,5 @@
 [package]
-name = "cadis-core"
+name = "cadis-avatar"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,12 +7,16 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 
+[features]
+default = []
+bevy-renderer = []
+face-tracking = []
+wgpu-renderer = []
+
 [dependencies]
-cadis-models.workspace = true
-cadis-policy.workspace = true
-cadis-protocol.workspace = true
-cadis-store.workspace = true
-chrono.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
 serde_json.workspace = true
 
 [lints]

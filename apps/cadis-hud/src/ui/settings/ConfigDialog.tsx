@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useState } from "react";
 import {
   THEMES,
   useHud,
@@ -28,6 +29,17 @@ const AVATAR_STYLES: { id: AvatarStyle; label: string; detail: string }[] = [
   { id: "orb", label: "CADIS Orb", detail: "Current RamaClaw-style core" },
   { id: "wulan_arc", label: "Wulan Arc", detail: "Hologram avatar contribution" },
 ];
+
+type VoiceDoctorCheck = {
+  name: string;
+  status: "pass" | "warn" | "fail";
+  detail: string;
+};
+
+type VoiceDoctorReport = {
+  summary: string;
+  checks: VoiceDoctorCheck[];
+};
 
 export function ConfigDialog() {
   const open = useHud((s) => s.configOpen);
@@ -94,11 +106,32 @@ function VoiceTab() {
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastEngine, setLastEngine] = useState<string | null>(null);
+  const [doctor, setDoctor] = useState<VoiceDoctorReport | null>(null);
+  const [doctorBusy, setDoctorBusy] = useState(false);
+  const [doctorError, setDoctorError] = useState<string | null>(null);
   const updateVoice = (patch: Partial<typeof prefs>) => {
     const next = { ...prefs, ...patch };
     update(patch);
     persistVoicePreferences(next);
   };
+
+  const runDoctor = async () => {
+    setDoctorBusy(true);
+    setDoctorError(null);
+    try {
+      const rendererMic = await rendererMicCheck();
+      const report = await invoke<VoiceDoctorReport>("voice_doctor_preflight", { rendererMic });
+      setDoctor(report);
+    } catch (e) {
+      setDoctorError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDoctorBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    void runDoctor();
+  }, []);
 
   const test = async () => {
     setError(null);
@@ -189,6 +222,25 @@ function VoiceTab() {
         </label>
       </section>
 
+      <section className="voice-config__row voice-doctor">
+        <label className="voice-config__label">
+          Voice doctor
+          <span className="voice-config__value">
+            {doctorBusy ? "checking" : doctor?.summary ?? "not run"}
+          </span>
+        </label>
+        {doctorError && <div className="voice-config__error">{doctorError}</div>}
+        <div className="voice-doctor__grid">
+          {(doctor?.checks ?? [rendererMicPendingCheck()]).map((check) => (
+            <div key={check.name} className="voice-doctor__item">
+              <span className={`voice-doctor__dot voice-doctor__dot--${check.status}`} />
+              <span className="voice-doctor__name">{check.name}</span>
+              <span className="voice-doctor__detail">{check.detail}</span>
+            </div>
+          ))}
+        </div>
+      </section>
+
       {error && <div className="voice-config__error">{error}</div>}
       {lastEngine && (
         <div className="voice-config__hint" style={{ color: "var(--ok)" }}>
@@ -197,6 +249,14 @@ function VoiceTab() {
       )}
 
       <div className="config-dialog__actions">
+        <button
+          type="button"
+          className="voice-config__btn"
+          onClick={runDoctor}
+          disabled={doctorBusy}
+        >
+          {doctorBusy ? "CHECKING" : "DOCTOR"}
+        </button>
         <button
           type="button"
           className="voice-config__btn"
@@ -390,6 +450,74 @@ function WindowTab() {
       </section>
     </>
   );
+}
+
+function rendererMicPendingCheck(): VoiceDoctorCheck {
+  return {
+    name: "microphone",
+    status: "warn",
+    detail: "waiting for renderer check",
+  };
+}
+
+async function rendererMicCheck(): Promise<VoiceDoctorCheck> {
+  if (typeof navigator === "undefined") {
+    return {
+      name: "microphone",
+      status: "fail",
+      detail: "renderer navigator is unavailable",
+    };
+  }
+
+  const mediaDevices = navigator.mediaDevices;
+  const hasCapture = Boolean(mediaDevices?.getUserMedia);
+  const hasRecorder = typeof window !== "undefined" && Boolean(window.MediaRecorder);
+  const hasAudioContext =
+    typeof window !== "undefined" &&
+    Boolean(window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext);
+
+  if (!hasCapture) {
+    return {
+      name: "microphone",
+      status: "fail",
+      detail: "getUserMedia is unavailable in this webview",
+    };
+  }
+  if (!hasRecorder) {
+    return {
+      name: "microphone",
+      status: "fail",
+      detail: "MediaRecorder is unavailable in this webview",
+    };
+  }
+
+  let audioInputs: number;
+  try {
+    const devices = await mediaDevices?.enumerateDevices?.();
+    audioInputs = devices?.filter((device) => device.kind === "audioinput").length ?? 0;
+  } catch {
+    return {
+      name: "microphone",
+      status: hasAudioContext ? "warn" : "fail",
+      detail: hasAudioContext
+        ? "capture APIs exist; device list needs permission"
+        : "capture APIs exist; AudioContext unavailable",
+    };
+  }
+
+  if (audioInputs > 0) {
+    return {
+      name: "microphone",
+      status: hasAudioContext ? "pass" : "warn",
+      detail: `${audioInputs} input${audioInputs === 1 ? "" : "s"} visible${hasAudioContext ? "" : "; AudioContext unavailable"}`,
+    };
+  }
+
+  return {
+    name: "microphone",
+    status: "warn",
+    detail: "capture APIs exist; no audio input visible before permission",
+  };
 }
 
 function SliderRow(props: {

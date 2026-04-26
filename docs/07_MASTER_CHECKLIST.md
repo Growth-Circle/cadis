@@ -47,6 +47,7 @@
 - [x] UI state/protocol contract.
 - [x] UI design system.
 - [x] Contributor skills guide.
+- [x] Wulan avatar engine plan.
 - [x] Large open-source project standards index.
 - [x] Contribution standard.
 - [x] Code standard.
@@ -107,6 +108,10 @@
 - [x] Add daemon health status.
 - [x] Add local transport listener.
 - [ ] Add event bus.
+- [ ] Add event fan-out to multiple clients.
+- [x] Add `session.subscribe` protocol/request baseline.
+- [ ] Add live persistent `session.subscribe` stream.
+- [ ] Avoid blocking daemon mutex during model generation.
 - [x] Add session registry.
 - [ ] Add shutdown handling.
 - [x] Add structured logging.
@@ -130,6 +135,9 @@
 - [x] Define `ModelProvider` trait.
 - [ ] Define provider capabilities.
 - [x] Define streaming event type.
+- [ ] Add real provider streaming callback support.
+- [ ] Add provider readiness and effective model metadata.
+- [ ] Apply per-agent model selection to provider routing.
 - [ ] Define cancellation behavior.
 - [x] Define provider error mapping.
 - [x] Implement first provider.
@@ -173,13 +181,17 @@
 - [x] Create `~/.cadis` layout.
 - [x] Load `config.toml`.
 - [ ] Write session metadata.
+- [ ] Write agent metadata.
+- [ ] Write worker metadata.
 - [x] Write JSONL event logs.
 - [ ] Write approval state.
-- [ ] Implement atomic writes.
+- [x] Add store-level atomic JSON state helpers under `~/.cadis/state`.
+- [x] Implement atomic writes for store-level JSON metadata.
 - [x] Implement redaction.
 - [ ] Add crash recovery metadata.
 - [x] Add redaction tests.
-- [ ] Add persistence tests.
+- [x] Add store-level recovery tests for partial and corrupt metadata files.
+- [ ] Add daemon persistence integration tests.
 
 ## 11. Agent Runtime
 
@@ -187,7 +199,12 @@
 - [ ] Define agent roles.
 - [ ] Define agent lifecycle.
 - [ ] Implement main agent.
-- [ ] Add agent status events.
+- [x] Implement daemon-owned `@agent` routing baseline.
+- [x] Implement client-driven `agent.spawn` baseline.
+- [ ] Add agent-driven spawn through daemon-approved action.
+- [x] Add request-driven spawn max depth, max children, and global cap.
+- [x] Add route-time agent status events baseline.
+- [ ] Add full lifecycle agent status events.
 - [ ] Add budget limits.
 - [ ] Add timeout limits.
 - [ ] Add cancellation.
@@ -198,8 +215,11 @@
 
 - [ ] Define worker scheduler.
 - [ ] Define worker state.
+- [ ] Implement daemon worker registry.
+- [ ] Implement `worker.tail`.
 - [ ] Create git worktree.
 - [ ] Stream worker logs.
+- [ ] Add worker cancellation.
 - [ ] Generate worker diff.
 - [ ] Run tests in worker.
 - [ ] Request patch approval.
@@ -226,6 +246,11 @@
 - [ ] Define TTS provider trait.
 - [ ] Define speech policy.
 - [ ] Add voice on/off config.
+- [ ] Add explicit TTS provider config (`edge`, `openai`, `system`).
+- [x] Separate HUD STT language from TTS voice.
+- [x] Add HUD-local voice doctor/preflight.
+- [ ] Promote voice doctor/preflight into daemon-visible status.
+- [ ] Handle daemon voice events in HUD.
 - [ ] Add provider stub.
 - [ ] Implement first provider.
 - [ ] Speak short normal answers.
@@ -236,14 +261,20 @@
 
 ## 15. HUD
 
-- [ ] Choose final UI framework.
+- [x] Choose first production-oriented HUD framework: Tauri + React.
 - [x] Create desktop app skeleton.
 - [x] Connect to daemon protocol.
 - [x] Show chat stream.
 - [x] Show agent tree.
+- [x] Add `@agent` mention picker baseline.
 - [ ] Show worker progress.
 - [x] Show approval cards.
 - [x] Add voice controls.
+- [x] Add local mic debug telemetry.
+- [x] Add voice doctor UI in Settings.
+- [x] Add Wulan Arc avatar option.
+- [x] Document CADIS-native Wulan avatar engine direction.
+- [x] Add `cadis-avatar` renderer-neutral avatar state crate.
 - [x] Add status bar.
 - [x] Add desktop packaging notes.
 - [ ] Validate HUD prototype against RamaClaw adaptation contract.
@@ -256,8 +287,29 @@
 - [x] Confirm agent rename sends `agent.rename` and updates only from `agent.renamed`.
 - [x] Confirm model changes send `agent.model.set`.
 - [x] Confirm theme and opacity changes route through `ui.preferences.set`.
+- [x] Confirm avatar style changes route through `ui.preferences.set`.
+- [x] Define renderer-neutral Wulan avatar render state.
+- [ ] Connect native Wulan renderer to `cadis-avatar` frames.
+- [ ] Spike focused Rust/wgpu Wulan renderer.
+- [ ] Reconsider Bevy only through a decision record if wgpu is insufficient.
+- [ ] Port Wulan portrait shader, particles, reticles, eye overlay, and mouth overlay from the Three.js prototype.
+- [ ] Add Wulan body gesture set: idle breath, listening lean, nod, gaze shift, approval hand cue, speaking emphasis, coding focus, thinking scan, and error recoil.
+- [ ] Add reduced-motion behavior for Wulan gestures.
+- [ ] Keep optional face tracking off by default, local-only, permission-gated, and visibly indicated when active.
+- [ ] Confirm Wulan native renderer failure falls back to the CADIS orb.
 - [ ] Capture HUD screenshot parity at 1200x760, 1600x1000, and 1920x1080.
 - [ ] Confirm no overlapping cards, status text, chat panel, approval stack, or central orb text.
+
+## 15.1 Next Multi-Agent Execution Tracks
+
+- [ ] Track A: daemon event bus and live session subscription.
+- [ ] Track B: provider readiness, effective model metadata, and provider streaming.
+- [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
+- [ ] Track D: policy-backed tools and approval persistence.
+- [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
+- [ ] Track F: durable metadata and restart recovery for sessions, agents, workers, and approvals.
+- [x] Track F store baseline: atomic JSON helpers and fail-safe metadata recovery.
+- [ ] Track G: CADIS-native Wulan avatar engine.
 
 ## 16. Code Work Window
 

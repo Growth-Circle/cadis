@@ -5,19 +5,31 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
+use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use serde_json::Value;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 const CADIS_CONFIG_RELATIVE_PATH: &str = ".cadis/config.toml";
 const CADIS_SOCKET_RELATIVE_PATH: &str = ".cadis/run/cadisd.sock";
+const CADIS_FRAME_EVENT: &str = "cadis-frame";
+const CADIS_SUBSCRIPTION_CLOSED_EVENT: &str = "cadis-subscription-closed";
 
 #[derive(Default)]
 struct TtsPlaybackState {
     active_pid: Mutex<Option<u32>>,
+}
+
+#[derive(Default)]
+struct CadisSubscriptionState {
+    generation: AtomicU64,
+    stream: Mutex<Option<UnixStream>>,
 }
 
 #[derive(serde::Serialize)]
@@ -25,6 +37,28 @@ struct TtsPlaybackState {
 struct LocalSttResult {
     text: String,
     latency_ms: u128,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceDoctorCheck {
+    name: String,
+    status: String,
+    detail: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceDoctorReport {
+    summary: String,
+    checks: Vec<VoiceDoctorCheck>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CadisSubscriptionClosed {
+    generation: u64,
+    error: Option<String>,
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -35,6 +69,29 @@ async fn cadis_request(request: Value, socket_path: Option<String>) -> Result<Ve
     })
     .await
     .map_err(|error| format!("CADIS request worker failed: {error}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn cadis_events_subscribe(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<CadisSubscriptionState>>,
+    request: Value,
+    socket_path: Option<String>,
+) -> Result<(), String> {
+    let state = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let socket_path = discover_socket_path(socket_path)?;
+        start_cadis_event_subscription(app, state, &socket_path, request)
+    })
+    .await
+    .map_err(|error| format!("CADIS subscription worker failed: {error}"))?
+}
+
+#[tauri::command]
+fn cadis_events_unsubscribe(
+    state: tauri::State<'_, Arc<CadisSubscriptionState>>,
+) -> Result<(), String> {
+    state.inner().close_active_subscription()
 }
 
 #[tauri::command]
@@ -76,6 +133,15 @@ async fn local_stt_transcribe(
     .map_err(|error| format!("STT worker failed: {error}"))?
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn voice_doctor_preflight(
+    renderer_mic: VoiceDoctorCheck,
+) -> Result<VoiceDoctorReport, String> {
+    tauri::async_runtime::spawn_blocking(move || voice_doctor_preflight_blocking(renderer_mic))
+        .await
+        .map_err(|error| format!("voice doctor worker failed: {error}"))
+}
+
 #[tauri::command]
 fn voice_tts_speak(_text: String, _voice_id: Option<String>) -> Result<(), String> {
     Ok(())
@@ -100,12 +166,16 @@ fn voice_stt_stop() -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(Arc::new(TtsPlaybackState::default()))
+        .manage(Arc::new(CadisSubscriptionState::default()))
         .invoke_handler(tauri::generate_handler![
             cadis_request,
+            cadis_events_subscribe,
+            cadis_events_unsubscribe,
             window_start_dragging,
             edge_tts_speak,
             edge_tts_stop,
             local_stt_transcribe,
+            voice_doctor_preflight,
             voice_tts_speak,
             voice_tts_stop,
             voice_stt_start,
@@ -139,11 +209,16 @@ fn install_microphone_permission_handler(window: &tauri::WebviewWindow) {
     let _ = window.with_webview(|webview| {
         use webkit2gtk::glib::prelude::Cast;
         use webkit2gtk::{
-            PermissionRequestExt, UserMediaPermissionRequest, UserMediaPermissionRequestExt,
-            WebViewExt,
+            PermissionRequestExt, SettingsExt, UserMediaPermissionRequest,
+            UserMediaPermissionRequestExt, WebViewExt,
         };
 
-        webview.inner().connect_permission_request(|_, request| {
+        let inner = webview.inner();
+        if let Some(settings) = inner.settings() {
+            settings.set_enable_media_stream(true);
+        }
+
+        inner.connect_permission_request(|_, request| {
             let Some(user_media) = request.dynamic_cast_ref::<UserMediaPermissionRequest>() else {
                 return false;
             };
@@ -160,6 +235,153 @@ fn install_microphone_permission_handler(window: &tauri::WebviewWindow) {
 
 #[cfg(not(target_os = "linux"))]
 fn install_microphone_permission_handler(_window: &tauri::WebviewWindow) {}
+
+fn voice_doctor_preflight_blocking(renderer_mic: VoiceDoctorCheck) -> VoiceDoctorReport {
+    let mut checks = vec![renderer_mic];
+    checks.push(whisper_binary_check());
+    checks.push(whisper_model_check());
+    checks.push(node_helper_check());
+    checks.push(audio_player_check());
+
+    let failures = checks.iter().filter(|check| check.status == "fail").count();
+    let warnings = checks.iter().filter(|check| check.status == "warn").count();
+    let summary = if failures > 0 {
+        format!("{failures} blocking issue{}", plural(failures))
+    } else if warnings > 0 {
+        format!("{warnings} warning{}", plural(warnings))
+    } else {
+        "ready".to_owned()
+    };
+
+    VoiceDoctorReport { summary, checks }
+}
+
+fn whisper_binary_check() -> VoiceDoctorCheck {
+    for candidate in whisper_cli_candidates() {
+        if let Some(path) = resolve_candidate_path(&candidate) {
+            return doctor_check(
+                "whisper binary",
+                "pass",
+                format!("found {}", path.display()),
+            );
+        }
+    }
+
+    let searched = whisper_cli_candidates()
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    doctor_check("whisper binary", "fail", format!("not found ({searched})"))
+}
+
+fn whisper_model_check() -> VoiceDoctorCheck {
+    match whisper_model_path() {
+        Ok(path) => doctor_check("whisper model", "pass", format!("found {}", path.display())),
+        Err(error) => doctor_check("whisper model", "fail", error),
+    }
+}
+
+fn node_helper_check() -> VoiceDoctorCheck {
+    let project_root = match project_root() {
+        Ok(path) => path,
+        Err(error) => return doctor_check("node helper", "fail", error),
+    };
+
+    let script = "await import('edge-tts-universal')";
+    let mut found_node = None;
+    let mut last_error = String::new();
+    for node in node_candidates() {
+        let Some(path) = resolve_candidate_path(&node) else {
+            continue;
+        };
+        found_node = Some(path.clone());
+        match Command::new(&path)
+            .arg("--input-type=module")
+            .arg("-e")
+            .arg(script)
+            .current_dir(&project_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                return doctor_check("node helper", "pass", format!("node {}", path.display()));
+            }
+            Ok(output) => {
+                last_error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                if last_error.is_empty() {
+                    last_error = format!("node exited with status {}", output.status);
+                }
+            }
+            Err(error) => {
+                last_error = error.to_string();
+            }
+        }
+    }
+
+    if let Some(path) = found_node {
+        doctor_check(
+            "node helper",
+            "fail",
+            format!(
+                "{} cannot load edge-tts-universal ({})",
+                path.display(),
+                concise_error(&last_error)
+            ),
+        )
+    } else {
+        doctor_check("node helper", "fail", "node not found".to_owned())
+    }
+}
+
+fn audio_player_check() -> VoiceDoctorCheck {
+    let mut players = Vec::new();
+    for program in ["ffplay", "mpv"] {
+        if let Some(path) = resolve_program_path(program) {
+            players.push(format!("{program}: {}", path.display()));
+        }
+    }
+
+    if players.is_empty() {
+        doctor_check(
+            "audio player",
+            "fail",
+            "install ffmpeg/ffplay or mpv".to_owned(),
+        )
+    } else {
+        doctor_check("audio player", "pass", players.join("; "))
+    }
+}
+
+fn doctor_check(name: &str, status: &str, detail: String) -> VoiceDoctorCheck {
+    VoiceDoctorCheck {
+        name: name.to_owned(),
+        status: status.to_owned(),
+        detail,
+    }
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+fn concise_error(error: &str) -> String {
+    let compact = error.lines().next().unwrap_or(error).trim();
+    if compact.chars().count() > 180 {
+        let prefix = compact.chars().take(177).collect::<String>();
+        format!("{prefix}...")
+    } else if compact.is_empty() {
+        "unknown error".to_owned()
+    } else {
+        compact.to_owned()
+    }
+}
 
 fn edge_tts_speak_blocking(
     state: &Arc<TtsPlaybackState>,
@@ -559,12 +781,38 @@ fn audio_player_command(path: &Path) -> Result<AudioPlayerCommand, String> {
 }
 
 fn command_exists(program: &str) -> bool {
-    Command::new("sh")
+    resolve_program_path(program).is_some()
+}
+
+fn resolve_candidate_path(candidate: &Path) -> Option<PathBuf> {
+    if candidate.components().count() > 1 {
+        if candidate.exists() {
+            return Some(candidate.to_path_buf());
+        }
+        return None;
+    }
+    candidate.to_str().and_then(resolve_program_path)
+}
+
+fn resolve_program_path(program: &str) -> Option<PathBuf> {
+    let output = Command::new("sh")
         .arg("-c")
-        .arg(format!("command -v {program} >/dev/null 2>&1"))
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .arg("command -v \"$1\"")
+        .arg("sh")
+        .arg(program)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
 }
 
 fn project_root() -> Result<PathBuf, String> {
@@ -605,6 +853,122 @@ fn temp_audio_path(prefix: &str, ext: &str) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())?
         .as_millis();
     Ok(env::temp_dir().join(format!("{prefix}-{}-{stamp}.{ext}", std::process::id())))
+}
+
+impl CadisSubscriptionState {
+    fn next_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation.load(Ordering::SeqCst) == generation
+    }
+
+    fn replace_active_subscription(&self, stream: UnixStream) -> Result<(), String> {
+        let mut active = self
+            .stream
+            .lock()
+            .map_err(|_| "CADIS subscription state lock was poisoned".to_owned())?;
+        if let Some(existing) = active.take() {
+            let _ = existing.shutdown(Shutdown::Both);
+        }
+        *active = Some(stream);
+        Ok(())
+    }
+
+    fn close_active_subscription(&self) -> Result<(), String> {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let stream = self
+            .stream
+            .lock()
+            .map_err(|_| "CADIS subscription state lock was poisoned".to_owned())?
+            .take();
+        if let Some(stream) = stream {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        Ok(())
+    }
+
+    fn clear_active_subscription_if_current(&self, generation: u64) {
+        if !self.is_current(generation) {
+            return;
+        }
+        if let Ok(mut active) = self.stream.lock() {
+            active.take();
+        }
+    }
+}
+
+fn start_cadis_event_subscription(
+    app: tauri::AppHandle,
+    state: Arc<CadisSubscriptionState>,
+    socket_path: &Path,
+    request: Value,
+) -> Result<(), String> {
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
+        format!(
+            "could not connect to cadisd at {}: {error}",
+            socket_path.display()
+        )
+    })?;
+
+    serde_json::to_writer(&mut stream, &request)
+        .map_err(|error| format!("could not encode CADIS subscription request: {error}"))?;
+    stream
+        .write_all(b"\n")
+        .map_err(|error| format!("could not send CADIS subscription request: {error}"))?;
+
+    let active_stream = stream
+        .try_clone()
+        .map_err(|error| format!("could not track CADIS subscription socket: {error}"))?;
+    let generation = state.next_generation();
+    state.replace_active_subscription(active_stream)?;
+
+    thread::spawn(move || {
+        let result = read_subscription_frames(stream, |frame| {
+            app.emit(CADIS_FRAME_EVENT, frame)
+                .map_err(|error| io::Error::other(error.to_string()))
+        });
+
+        if state.is_current(generation) {
+            state.clear_active_subscription_if_current(generation);
+            let error = result.err().map(|error| error.to_string());
+            let _ = app.emit(
+                CADIS_SUBSCRIPTION_CLOSED_EVENT,
+                CadisSubscriptionClosed { generation, error },
+            );
+        }
+    });
+
+    Ok(())
+}
+
+fn read_subscription_frames<F>(stream: UnixStream, mut emit: F) -> io::Result<()>
+where
+    F: FnMut(Value) -> io::Result<()>,
+{
+    let reader = BufReader::new(stream);
+
+    for (index, line) in reader.lines().enumerate() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let value = serde_json::from_str::<Value>(line).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cadisd returned invalid subscription JSON on line {}: {error}",
+                    index + 1
+                ),
+            )
+        })?;
+        emit(value)?;
+    }
+
+    Ok(())
 }
 
 fn send_cadis_request(socket_path: &Path, request: Value) -> io::Result<Vec<Value>> {
@@ -873,6 +1237,32 @@ mod tests {
             ]
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn subscription_reader_emits_each_json_line() {
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || {
+            writer
+                .write_all(
+                    b"{\"frame\":\"response\",\"payload\":{\"type\":\"request.accepted\"}}\n\
+                      \n\
+                      {\"frame\":\"event\",\"payload\":{\"event_id\":\"evt_1\",\"type\":\"agent.list.response\",\"payload\":{\"agents\":[]}}}\n",
+                )
+                .unwrap();
+        });
+
+        let mut frames = Vec::new();
+        read_subscription_frames(reader, |frame| {
+            frames.push(frame);
+            Ok(())
+        })
+        .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["frame"], "response");
+        assert_eq!(frames[1]["payload"]["event_id"], "evt_1");
     }
 
     fn unique_temp_dir() -> PathBuf {

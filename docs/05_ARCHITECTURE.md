@@ -72,10 +72,18 @@ flowchart TD
 - HUD
 - code work window
 - voice
+- optional Wulan avatar renderer
 - model provider implementations
 - optional MCP bridge later
 
 Adapters may format, display, and relay events. They must not own business logic for tools, policy, or agent orchestration.
+
+The Wulan avatar state engine is a library boundary, not runtime authority.
+`crates/cadis-avatar` converts daemon-derived HUD state into renderable
+`AvatarFrame` values, including body gesture state, face pose, material hints,
+privacy metadata, and direct-wgpu uniform data. A concrete `wgpu` renderer may
+consume that contract later; Bevy remains optional and deferred. The HUD must
+fall back to the default CADIS orb if native avatar rendering fails.
 
 ## 4. Request Flow
 

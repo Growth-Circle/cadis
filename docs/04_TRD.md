@@ -24,6 +24,7 @@ client request -> local protocol -> daemon session -> event bus -> model/tool st
 ```text
 crates/
 |-- cadis-protocol/       # typed requests, responses, events
+|-- cadis-avatar/         # renderer-independent Wulan avatar state engine
 |-- cadis-core/           # session, event bus, orchestration contracts
 |-- cadis-daemon/         # cadisd binary/runtime
 |-- cadis-cli/            # cadis CLI
@@ -51,6 +52,15 @@ The workspace starts empty and adds crates only when implementation begins. This
 - Public types documented when exported.
 - No core dependency on Node.js.
 - Optional integrations behind features or separate crates.
+
+Avatar-specific rule:
+
+- `cadis-avatar` may define renderer-neutral Wulan state, body gesture state,
+  face pose inputs, privacy config, and a direct-wgpu renderer contract.
+- `cadis-avatar` must not depend on HUD frameworks, Tauri, `wgpu`, Bevy, camera
+  APIs, microphone APIs, model providers, or daemon internals.
+- Concrete `wgpu` or Bevy renderer adapters must live behind separate features
+  or crates once implementation starts.
 
 ## 5. Transport Requirements
 
@@ -242,6 +252,10 @@ When implemented:
 - HUD does not execute tools directly.
 - Code work window uses structured events for diffs, logs, and tests.
 - UI must show approval risk clearly.
+- Optional Wulan avatar rendering consumes daemon-derived HUD state through
+  `cadis-avatar` frames. The default orb must remain available as fallback.
+- Bevy is deferred for Wulan unless a separate decision accepts a broader 3D
+  scene engine.
 
 ## 14. Testing Requirements
 

@@ -31,6 +31,16 @@ Initial tools:
 - `git.worktree.create`
 - `git.worktree.remove`
 
+Current implementation baseline:
+
+- `file.read`, `file.search`, and `git.status` are native safe-read tools.
+- `shell.run`, `file.write`, `file.patch`, `git.diff`,
+  `git.worktree.create`, and `git.worktree.remove` are classified and
+  approval-gated placeholders.
+- Unknown tool names are denied before execution.
+- Approval-gated placeholders fail closed after approval resolution until their
+  execution backends are implemented.
+
 ## 3. Naming
 
 Tool names must be stable protocol identifiers.
@@ -132,6 +142,11 @@ Commands that mutate system state, use `sudo`, install packages, delete files, a
 
 `file.read` and `file.search` should be safe by default only inside allowed workspaces and after secret policy checks.
 
+The initial `file.read` and `file.search` implementation resolves paths with
+canonical filesystem paths and rejects reads outside the request workspace.
+Search skips unreadable files and large files, redacts result lines, and bounds
+the returned match list.
+
 `file.patch` requirements:
 
 - patch must be previewable
@@ -150,6 +165,9 @@ Git tools must prefer explicit commands or library calls with clear output.
 Rules:
 
 - `git.status` and `git.diff` are safe-read by default.
+- The current native baseline implements only `git.status` and runs
+  `git status --short --branch` under the daemon after workspace path
+  normalization.
 - Worktree creation must validate repository state.
 - Worktree cleanup must avoid deleting paths not created by CADIS.
 - Push, force-push, rebase, reset, and branch deletion are not initial native tool actions unless policy and approval coverage exist.

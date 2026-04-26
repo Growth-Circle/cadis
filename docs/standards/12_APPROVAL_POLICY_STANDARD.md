@@ -107,6 +107,18 @@ Recommended default behavior:
 
 Open-source defaults should be conservative and understandable.
 
+Current implementation baseline:
+
+- `file.read`, `file.search`, and `git.status` are auto-allowed only after
+  daemon-side tool classification and workspace path validation.
+- `shell.run`, write tools, and mutating git/worktree placeholders require
+  approval and are persisted under daemon-owned state.
+- Unknown tools are denied.
+- Approved risky placeholders still fail closed with `tool.failed` until the
+  corresponding execution backend is implemented.
+- `approval.respond` uses daemon state and persisted approval records; the first
+  valid pending response wins, later responses are rejected as already resolved.
+
 ## 8. Configuration
 
 Policy configuration belongs in `~/.cadis/config.toml`.
@@ -148,6 +160,10 @@ When persistence is enabled, CADIS must persist:
 - linked session, agent, and tool call IDs
 
 Persisted data must be redacted. Raw provider keys, auth headers, and environment secrets must never be written to approval logs.
+
+The baseline persists one JSON approval record per approval under
+`~/.cadis/state/approvals`. Records include request metadata, risk class,
+expiration, decision, redacted reason, and resolution timestamp.
 
 ## 11. UX Requirements
 

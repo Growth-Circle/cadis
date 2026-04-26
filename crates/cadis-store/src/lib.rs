@@ -1,22 +1,31 @@
-//! Local CADIS configuration, state layout, redaction, and JSONL logs.
+//! Local CADIS configuration, state layout, redaction, durable state, and JSONL logs.
 
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use cadis_protocol::{EventEnvelope, SessionId};
+use cadis_protocol::{
+    AgentId, ApprovalDecision, ApprovalId, EventEnvelope, RiskClass, SessionId, Timestamp,
+    ToolCallId,
+};
 use regex::Regex;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Runtime model provider configuration.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
-    /// Provider label. Supported values for the desktop MVP are `auto`, `codex-cli`, `echo`, `ollama`, and `openai`.
+    /// Default provider label. Per-agent selections may use `provider/model`.
+    /// Supported provider values for the desktop MVP are `auto`, `codex-cli`, `echo`, `ollama`, and `openai`.
     pub provider: String,
     /// Ollama model name.
     pub ollama_model: String,
@@ -96,6 +105,47 @@ impl Default for VoiceConfig {
     }
 }
 
+/// Daemon limits for request-driven `agent.spawn`.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AgentSpawnConfig {
+    /// Maximum child depth below a root agent.
+    pub max_depth: usize,
+    /// Maximum direct children any one parent may own.
+    pub max_children_per_parent: usize,
+    /// Maximum total registered agents, including built-in agents.
+    pub max_total_agents: usize,
+}
+
+impl Default for AgentSpawnConfig {
+    fn default() -> Self {
+        Self {
+            max_depth: 2,
+            max_children_per_parent: 4,
+            max_total_agents: 32,
+        }
+    }
+}
+
+/// Daemon-owned orchestration settings.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct OrchestratorConfig {
+    /// Enables explicit `/worker`, `/spawn`, `/route`, and `/delegate` message actions.
+    pub worker_delegation_enabled: bool,
+    /// Role used by `/worker` when the message does not include `Role: task`.
+    pub default_worker_role: String,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            worker_delegation_enabled: true,
+            default_worker_role: "Worker".to_owned(),
+        }
+    }
+}
+
 /// CADIS daemon configuration loaded from env and `config.toml`.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -112,6 +162,10 @@ pub struct CadisConfig {
     pub hud: HudConfig,
     /// Voice settings.
     pub voice: VoiceConfig,
+    /// Request-driven agent spawn limits.
+    pub agent_spawn: AgentSpawnConfig,
+    /// Daemon-owned orchestrator settings.
+    pub orchestrator: OrchestratorConfig,
 }
 
 impl Default for CadisConfig {
@@ -123,6 +177,8 @@ impl Default for CadisConfig {
             model: ModelConfig::default(),
             hud: HudConfig::default(),
             voice: VoiceConfig::default(),
+            agent_spawn: AgentSpawnConfig::default(),
+            orchestrator: OrchestratorConfig::default(),
         }
     }
 }
@@ -158,6 +214,15 @@ impl CadisConfig {
                 "pitch": self.voice.pitch,
                 "volume": self.voice.volume,
                 "auto_speak": self.voice.auto_speak
+            },
+            "agent_spawn": {
+                "max_depth": self.agent_spawn.max_depth,
+                "max_children_per_parent": self.agent_spawn.max_children_per_parent,
+                "max_total_agents": self.agent_spawn.max_total_agents
+            },
+            "orchestrator": {
+                "worker_delegation_enabled": self.orchestrator.worker_delegation_enabled,
+                "default_worker_role": self.orchestrator.default_worker_role
             }
         })
     }
@@ -170,7 +235,7 @@ pub enum StoreError {
     Io(std::io::Error),
     /// Configuration TOML failed to parse.
     Toml(toml::de::Error),
-    /// Event failed to serialize.
+    /// JSON failed to serialize or parse.
     Json(serde_json::Error),
     /// Home directory could not be discovered.
     MissingHome,
@@ -181,7 +246,7 @@ impl fmt::Display for StoreError {
         match self {
             Self::Io(error) => write!(formatter, "store I/O failed: {error}"),
             Self::Toml(error) => write!(formatter, "config TOML is invalid: {error}"),
-            Self::Json(error) => write!(formatter, "event JSON serialization failed: {error}"),
+            Self::Json(error) => write!(formatter, "store JSON failed: {error}"),
             Self::MissingHome => formatter.write_str("HOME is not set"),
         }
     }
@@ -204,6 +269,130 @@ impl From<toml::de::Error> for StoreError {
 impl From<serde_json::Error> for StoreError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error)
+    }
+}
+
+/// Persisted approval lifecycle state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalState {
+    /// Approval is waiting for a response.
+    Pending,
+    /// Approval has been resolved by a client response.
+    Resolved,
+    /// Approval expired before it could be approved.
+    Expired,
+}
+
+/// Persisted approval request and resolution record.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ApprovalRecord {
+    /// Approval ID.
+    pub approval_id: ApprovalId,
+    /// Session ID.
+    pub session_id: SessionId,
+    /// Tool call ID guarded by this approval.
+    pub tool_call_id: ToolCallId,
+    /// Tool name guarded by this approval.
+    pub tool_name: String,
+    /// Risk class assigned by policy.
+    pub risk_class: RiskClass,
+    /// UI title.
+    pub title: String,
+    /// Redacted summary.
+    pub summary: String,
+    /// Optional redacted command or operation details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Optional workspace or cwd.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    /// Request timestamp.
+    pub requested_at: Timestamp,
+    /// Expiration timestamp.
+    pub expires_at: Timestamp,
+    /// Current state.
+    pub state: ApprovalState,
+    /// Final decision, when resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ApprovalDecision>,
+    /// Redacted resolver reason, when supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Resolution timestamp, when resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<Timestamp>,
+}
+
+/// Durable approval record store rooted under `~/.cadis/state/approvals`.
+#[derive(Clone, Debug)]
+pub struct ApprovalStore {
+    approvals_dir: PathBuf,
+}
+
+impl ApprovalStore {
+    /// Creates an approval store rooted under CADIS home.
+    pub fn new(cadis_home: impl AsRef<Path>) -> Self {
+        Self {
+            approvals_dir: cadis_home.as_ref().join("state").join("approvals"),
+        }
+    }
+
+    /// Saves one redacted approval record.
+    pub fn save(&self, record: &ApprovalRecord) -> Result<(), StoreError> {
+        create_private_dir(&self.approvals_dir)?;
+        let mut json = redact(&serde_json::to_string_pretty(record)?);
+        json.push('\n');
+        let path = self.approval_path(&record.approval_id);
+        let tmp_path = self.temporary_path(&record.approval_id);
+
+        let write_result = (|| -> Result<(), StoreError> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            set_private_file_permissions(&tmp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&tmp_path, &path)?;
+            sync_parent_dir(&self.approvals_dir)?;
+            Ok(())
+        })();
+
+        if write_result.is_err() {
+            let _ = fs::remove_file(&tmp_path);
+        }
+
+        write_result
+    }
+
+    /// Loads one approval record by ID.
+    pub fn load(&self, approval_id: &ApprovalId) -> Result<Option<ApprovalRecord>, StoreError> {
+        let path = self.approval_path(approval_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(path)?;
+        Ok(Some(serde_json::from_str(&content)?))
+    }
+
+    fn approval_path(&self, approval_id: &ApprovalId) -> PathBuf {
+        self.approvals_dir
+            .join(format!("{}.json", safe_file_stem(approval_id.as_str())))
+    }
+
+    fn temporary_path(&self, approval_id: &ApprovalId) -> PathBuf {
+        let process = std::process::id();
+        let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        self.approvals_dir.join(format!(
+            ".{}.json.tmp.{process}.{counter}.{nanos}",
+            safe_file_stem(approval_id.as_str())
+        ))
     }
 }
 
@@ -257,6 +446,11 @@ pub fn ensure_layout(config: &CadisConfig) -> Result<(), StoreError> {
         "run",
         "tokens",
         "approvals",
+        "state",
+        "state/sessions",
+        "state/agents",
+        "state/workers",
+        "state/approvals",
     ] {
         create_private_dir(&config.cadis_home.join(path))?;
     }
@@ -298,6 +492,280 @@ pub fn redact(input: &str) -> String {
         output = regex.replace_all(&output, "[REDACTED]").into_owned();
     }
     output
+}
+
+/// Durable JSON state helper rooted under `~/.cadis/state`.
+#[derive(Clone, Debug)]
+pub struct StateStore {
+    state_dir: PathBuf,
+}
+
+impl StateStore {
+    /// Creates a durable state helper rooted under the configured CADIS home.
+    pub fn new(config: &CadisConfig) -> Self {
+        Self {
+            state_dir: config.cadis_home.join("state"),
+        }
+    }
+
+    /// Returns the root durable state directory.
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
+    }
+
+    /// Ensures all durable state directories exist with private permissions.
+    pub fn ensure_layout(&self) -> Result<(), StoreError> {
+        for kind in StateKind::all() {
+            create_private_dir(&self.kind_dir(kind))?;
+        }
+        Ok(())
+    }
+
+    /// Returns the session metadata file path for a session ID.
+    pub fn session_path(&self, session_id: &SessionId) -> PathBuf {
+        self.metadata_path(StateKind::Session, session_id.as_str())
+    }
+
+    /// Returns the agent metadata file path for an agent ID.
+    pub fn agent_path(&self, agent_id: &AgentId) -> PathBuf {
+        self.metadata_path(StateKind::Agent, agent_id.as_str())
+    }
+
+    /// Returns the worker metadata file path for a worker ID.
+    pub fn worker_path(&self, worker_id: &str) -> PathBuf {
+        self.metadata_path(StateKind::Worker, worker_id)
+    }
+
+    /// Returns the approval metadata file path for an approval ID.
+    pub fn approval_path(&self, approval_id: &ApprovalId) -> PathBuf {
+        self.metadata_path(StateKind::Approval, approval_id.as_str())
+    }
+
+    /// Atomically writes one redacted session metadata JSON file.
+    pub fn write_session_metadata<T: Serialize>(
+        &self,
+        session_id: &SessionId,
+        metadata: &T,
+    ) -> Result<(), StoreError> {
+        self.write_metadata(StateKind::Session, session_id.as_str(), metadata)
+    }
+
+    /// Atomically writes one redacted agent metadata JSON file.
+    pub fn write_agent_metadata<T: Serialize>(
+        &self,
+        agent_id: &AgentId,
+        metadata: &T,
+    ) -> Result<(), StoreError> {
+        self.write_metadata(StateKind::Agent, agent_id.as_str(), metadata)
+    }
+
+    /// Atomically writes one redacted worker metadata JSON file.
+    pub fn write_worker_metadata<T: Serialize>(
+        &self,
+        worker_id: &str,
+        metadata: &T,
+    ) -> Result<(), StoreError> {
+        self.write_metadata(StateKind::Worker, worker_id, metadata)
+    }
+
+    /// Atomically writes one redacted approval metadata JSON file.
+    pub fn write_approval_metadata<T: Serialize>(
+        &self,
+        approval_id: &ApprovalId,
+        metadata: &T,
+    ) -> Result<(), StoreError> {
+        self.write_metadata(StateKind::Approval, approval_id.as_str(), metadata)
+    }
+
+    /// Recovers valid session metadata files and reports invalid files as diagnostics.
+    pub fn recover_session_metadata<T: DeserializeOwned>(
+        &self,
+    ) -> Result<StateRecovery<T>, StoreError> {
+        self.recover_metadata(StateKind::Session)
+    }
+
+    /// Recovers valid agent metadata files and reports invalid files as diagnostics.
+    pub fn recover_agent_metadata<T: DeserializeOwned>(
+        &self,
+    ) -> Result<StateRecovery<T>, StoreError> {
+        self.recover_metadata(StateKind::Agent)
+    }
+
+    /// Recovers valid worker metadata files and reports invalid files as diagnostics.
+    pub fn recover_worker_metadata<T: DeserializeOwned>(
+        &self,
+    ) -> Result<StateRecovery<T>, StoreError> {
+        self.recover_metadata(StateKind::Worker)
+    }
+
+    /// Recovers valid approval metadata files and reports invalid files as diagnostics.
+    pub fn recover_approval_metadata<T: DeserializeOwned>(
+        &self,
+    ) -> Result<StateRecovery<T>, StoreError> {
+        self.recover_metadata(StateKind::Approval)
+    }
+
+    fn write_metadata<T: Serialize>(
+        &self,
+        kind: StateKind,
+        id: &str,
+        metadata: &T,
+    ) -> Result<(), StoreError> {
+        let dir = self.kind_dir(kind);
+        create_private_dir(&dir)?;
+
+        let path = self.metadata_path(kind, id);
+        let tmp_path = self.temporary_path(kind, id);
+        let mut json = redact(&serde_json::to_string_pretty(metadata)?);
+        json.push('\n');
+
+        let write_result = (|| -> Result<(), StoreError> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)?;
+            set_private_file_permissions(&tmp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&tmp_path, &path)?;
+            sync_parent_dir(&dir)?;
+            Ok(())
+        })();
+
+        if write_result.is_err() {
+            let _ = fs::remove_file(&tmp_path);
+        }
+
+        write_result
+    }
+
+    fn recover_metadata<T: DeserializeOwned>(
+        &self,
+        kind: StateKind,
+    ) -> Result<StateRecovery<T>, StoreError> {
+        let dir = self.kind_dir(kind);
+        create_private_dir(&dir)?;
+
+        let mut records = Vec::new();
+        let mut diagnostics = Vec::new();
+
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("json")
+            {
+                continue;
+            }
+
+            let id = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("unknown")
+                .to_owned();
+
+            match fs::read_to_string(&path) {
+                Ok(content) => match serde_json::from_str::<T>(&content) {
+                    Ok(metadata) => records.push(RecoveredMetadata { id, path, metadata }),
+                    Err(error) => diagnostics.push(StateRecoveryDiagnostic {
+                        path,
+                        reason: format!("invalid {} metadata JSON: {error}", kind.label()),
+                    }),
+                },
+                Err(error) => diagnostics.push(StateRecoveryDiagnostic {
+                    path,
+                    reason: format!("could not read {} metadata: {error}", kind.label()),
+                }),
+            }
+        }
+
+        Ok(StateRecovery {
+            records,
+            diagnostics,
+        })
+    }
+
+    fn kind_dir(&self, kind: StateKind) -> PathBuf {
+        self.state_dir.join(kind.dir_name())
+    }
+
+    fn metadata_path(&self, kind: StateKind, id: &str) -> PathBuf {
+        self.kind_dir(kind)
+            .join(format!("{}.json", safe_file_stem(id)))
+    }
+
+    fn temporary_path(&self, kind: StateKind, id: &str) -> PathBuf {
+        let process = std::process::id();
+        let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        self.kind_dir(kind).join(format!(
+            ".{}.json.tmp.{process}.{counter}.{nanos}",
+            safe_file_stem(id)
+        ))
+    }
+}
+
+/// Durable state files successfully recovered from one metadata directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateRecovery<T> {
+    /// Valid metadata records.
+    pub records: Vec<RecoveredMetadata<T>>,
+    /// Invalid state files skipped during recovery.
+    pub diagnostics: Vec<StateRecoveryDiagnostic>,
+}
+
+/// One recovered durable metadata record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveredMetadata<T> {
+    /// Redaction-safe ID derived from the metadata file name.
+    pub id: String,
+    /// Metadata path under `~/.cadis/state`.
+    pub path: PathBuf,
+    /// Parsed metadata payload.
+    pub metadata: T,
+}
+
+/// Recovery diagnostic for a state file that failed safe.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateRecoveryDiagnostic {
+    /// Invalid metadata path under `~/.cadis/state`.
+    pub path: PathBuf,
+    /// Short parse or read error.
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StateKind {
+    Session,
+    Agent,
+    Worker,
+    Approval,
+}
+
+impl StateKind {
+    fn all() -> [Self; 4] {
+        [Self::Session, Self::Agent, Self::Worker, Self::Approval]
+    }
+
+    fn dir_name(self) -> &'static str {
+        match self {
+            Self::Session => "sessions",
+            Self::Agent => "agents",
+            Self::Worker => "workers",
+            Self::Approval => "approvals",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Agent => "agent",
+            Self::Worker => "worker",
+            Self::Approval => "approval",
+        }
+    }
 }
 
 /// Append-only JSONL event log writer.
@@ -362,6 +830,27 @@ fn create_private_dir(path: &Path) -> Result<(), StoreError> {
 }
 
 #[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(path, permissions)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
+fn sync_parent_dir(path: &Path) -> Result<(), StoreError> {
+    let dir = File::open(path)?;
+    dir.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn set_private_permissions(path: &Path) -> Result<(), StoreError> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -418,6 +907,15 @@ fn safe_file_component(value: &str) -> String {
         .collect()
 }
 
+fn safe_file_stem(value: &str) -> String {
+    let component = safe_file_component(value);
+    if component.is_empty() {
+        "unnamed".to_owned()
+    } else {
+        component
+    }
+}
+
 fn openai_api_key_from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Option<String> {
     ["CADIS_OPENAI_API_KEY", "OPENAI_API_KEY"]
         .into_iter()
@@ -471,6 +969,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_agent_spawn_limits() {
+        let config = toml::from_str::<CadisConfig>(
+            r#"
+            [agent_spawn]
+            max_depth = 1
+            max_children_per_parent = 2
+            max_total_agents = 16
+            "#,
+        )
+        .expect("agent spawn config should parse");
+
+        assert_eq!(config.agent_spawn.max_depth, 1);
+        assert_eq!(config.agent_spawn.max_children_per_parent, 2);
+        assert_eq!(config.agent_spawn.max_total_agents, 16);
+        assert_eq!(
+            config.ui_preferences()["agent_spawn"]["max_children_per_parent"],
+            serde_json::json!(2)
+        );
+    }
+
+    #[test]
+    fn parses_orchestrator_config() {
+        let config = toml::from_str::<CadisConfig>(
+            r#"
+            [orchestrator]
+            worker_delegation_enabled = false
+            default_worker_role = "Reviewer"
+            "#,
+        )
+        .expect("orchestrator config should parse");
+
+        assert!(!config.orchestrator.worker_delegation_enabled);
+        assert_eq!(config.orchestrator.default_worker_role, "Reviewer");
+        assert_eq!(
+            config.ui_preferences()["orchestrator"]["default_worker_role"],
+            serde_json::json!("Reviewer")
+        );
+    }
+
+    #[test]
     fn openai_api_key_helper_uses_supported_env_names_only() {
         let key = openai_api_key_from_lookup(|name| match name {
             "CADIS_OPENAI_API_KEY" => Some("cadis-key".to_owned()),
@@ -498,5 +1036,178 @@ mod tests {
     #[test]
     fn safe_component_replaces_path_separators() {
         assert_eq!(safe_file_component("ses/../1"), "ses____1");
+    }
+
+    #[test]
+    fn approval_store_persists_redacted_records() {
+        let config = test_config("approval-record");
+        let store = ApprovalStore::new(&config.cadis_home);
+        let record = ApprovalRecord {
+            approval_id: ApprovalId::from("apr_1"),
+            session_id: SessionId::from("ses_1"),
+            tool_call_id: ToolCallId::from("tool_1"),
+            tool_name: "shell.run".to_owned(),
+            risk_class: RiskClass::SystemChange,
+            title: "Approval needed".to_owned(),
+            summary: "Run command".to_owned(),
+            command: Some("OPENAI_API_KEY=sk-testsecretvalue123456".to_owned()),
+            workspace: Some("/tmp/project".to_owned()),
+            requested_at: Timestamp::new_utc("2026-04-26T00:00:00Z")
+                .expect("timestamp should parse"),
+            expires_at: Timestamp::new_utc("2026-04-26T00:05:00Z").expect("timestamp should parse"),
+            state: ApprovalState::Pending,
+            decision: None,
+            reason: None,
+            resolved_at: None,
+        };
+
+        store.save(&record).expect("record should save");
+
+        let loaded = store
+            .load(&ApprovalId::from("apr_1"))
+            .expect("record should load")
+            .expect("record should exist");
+        assert_eq!(loaded.command.as_deref(), Some("OPENAI_API_KEY=[REDACTED]"));
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+    struct TestMetadata {
+        id: String,
+        status: String,
+        api_key: Option<String>,
+    }
+
+    fn test_config(name: &str) -> CadisConfig {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock should be after Unix epoch")
+            .as_nanos();
+        CadisConfig {
+            cadis_home: env::temp_dir()
+                .join(format!("cadis-store-{name}-{}-{nanos}", std::process::id())),
+            ..CadisConfig::default()
+        }
+    }
+
+    #[test]
+    fn state_store_uses_redaction_safe_state_paths() {
+        let config = test_config("paths");
+        ensure_layout(&config).expect("layout should be created");
+        let store = StateStore::new(&config);
+
+        assert_eq!(
+            store.session_path(&SessionId::from("ses/../1")),
+            config.cadis_home.join("state/sessions/ses____1.json")
+        );
+        assert!(config.cadis_home.join("state/agents").is_dir());
+        assert!(config.cadis_home.join("state/workers").is_dir());
+        assert!(config.cadis_home.join("state/approvals").is_dir());
+    }
+
+    #[test]
+    fn atomic_state_write_round_trips_and_redacts_secret_values() {
+        let config = test_config("write");
+        let store = StateStore::new(&config);
+        let agent_id = AgentId::from("agent/main");
+        let metadata = TestMetadata {
+            id: "agent/main".to_owned(),
+            status: "ready".to_owned(),
+            api_key: Some("sk-testsecretvalue123456".to_owned()),
+        };
+
+        store
+            .write_agent_metadata(&agent_id, &metadata)
+            .expect("agent metadata should write");
+
+        let raw =
+            fs::read_to_string(store.agent_path(&agent_id)).expect("metadata should be readable");
+        assert!(raw.contains("[REDACTED]"));
+        assert!(!raw.contains("sk-testsecretvalue123456"));
+
+        let recovered = store
+            .recover_agent_metadata::<TestMetadata>()
+            .expect("agent metadata should recover");
+        assert_eq!(recovered.diagnostics, Vec::new());
+        assert_eq!(recovered.records.len(), 1);
+        assert_eq!(recovered.records[0].id, "agent_main");
+        assert_eq!(recovered.records[0].metadata.status, "ready");
+        assert_eq!(
+            recovered.records[0].metadata.api_key.as_deref(),
+            Some("[REDACTED]")
+        );
+    }
+
+    #[test]
+    fn recovery_skips_corrupt_json_and_ignores_partial_temp_files() {
+        let config = test_config("recover");
+        let store = StateStore::new(&config);
+        let session_id = SessionId::from("ses_1");
+        let metadata = TestMetadata {
+            id: "ses_1".to_owned(),
+            status: "active".to_owned(),
+            api_key: None,
+        };
+
+        store
+            .write_session_metadata(&session_id, &metadata)
+            .expect("session metadata should write");
+        let sessions_dir = config.cadis_home.join("state/sessions");
+        fs::write(sessions_dir.join("corrupt.json"), "{").expect("corrupt test state should write");
+        fs::write(sessions_dir.join(".ses_2.json.tmp.1"), "{")
+            .expect("partial temp state should write");
+
+        let recovered = store
+            .recover_session_metadata::<TestMetadata>()
+            .expect("session recovery should fail safe");
+
+        assert_eq!(recovered.records.len(), 1);
+        assert_eq!(recovered.records[0].id, "ses_1");
+        assert_eq!(recovered.records[0].metadata, metadata);
+        assert_eq!(recovered.diagnostics.len(), 1);
+        assert!(recovered.diagnostics[0]
+            .path
+            .ends_with("state/sessions/corrupt.json"));
+        assert!(recovered.diagnostics[0]
+            .reason
+            .contains("invalid session metadata JSON"));
+    }
+
+    #[test]
+    fn recovery_helpers_cover_worker_and_approval_metadata() {
+        let config = test_config("worker-approval");
+        let store = StateStore::new(&config);
+
+        store
+            .write_worker_metadata(
+                "worker/1",
+                &TestMetadata {
+                    id: "worker/1".to_owned(),
+                    status: "running".to_owned(),
+                    api_key: None,
+                },
+            )
+            .expect("worker metadata should write");
+        store
+            .write_approval_metadata(
+                &ApprovalId::from("approval/1"),
+                &TestMetadata {
+                    id: "approval/1".to_owned(),
+                    status: "pending".to_owned(),
+                    api_key: None,
+                },
+            )
+            .expect("approval metadata should write");
+
+        let workers = store
+            .recover_worker_metadata::<TestMetadata>()
+            .expect("worker metadata should recover");
+        let approvals = store
+            .recover_approval_metadata::<TestMetadata>()
+            .expect("approval metadata should recover");
+
+        assert_eq!(workers.records[0].id, "worker_1");
+        assert_eq!(workers.records[0].metadata.status, "running");
+        assert_eq!(approvals.records[0].id, "approval_1");
+        assert_eq!(approvals.records[0].metadata.status, "pending");
     }
 }

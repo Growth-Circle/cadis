@@ -28,6 +28,7 @@ This threat model covers the local CADIS runtime:
 | Future memory store | May preserve user facts, project facts, summaries, embeddings, or tool history |
 | Approval state | Incorrect state can allow risky actions |
 | Model context | May contain private code or user data |
+| Optional face tracking data | Camera-derived signals may reveal biometric or environmental information |
 
 ## 3. Trust Boundaries
 
@@ -66,6 +67,8 @@ Important boundaries:
 | T-011 | UI bypasses policy | UI clients cannot execute tools directly |
 | T-012 | Local protocol exposed beyond machine | Local-only transport by default |
 | T-013 | Future memory stores sensitive facts or stale secrets | Redact before memory persistence, enforce ACL, keep provider memory optional |
+| T-014 | Optional avatar face tracking leaks camera frames, landmarks, or biometrics | Face tracking is off by default, explicit opt-in, local-only, non-persistent, and guarded by visible active-camera UI plus one-click disable |
+| T-015 | Risky native tool executes after malformed or missing approval state | Unknown tools are denied, risky placeholders create persisted approvals, expired or missing approvals fail closed, and approved risky placeholders do not execute in the baseline |
 
 ## 5. Security Requirements
 
@@ -78,6 +81,10 @@ Important boundaries:
 - Keep audit events for approvals and tools.
 - Future memory writes must be daemon-owned, provenance-backed, and redacted
   before Markdown, JSONL, SQLite, or vector indexing. See `25_MEMORY_CONCEPT.md`.
+- Optional Wulan face tracking must remain local to the renderer process. Raw
+  frames, landmarks, embeddings, identity labels, and biometric templates must
+  not be sent to model providers, remote relays, logs, diagnostics, crash
+  reports, or telemetry by default.
 
 ## 6. Pre-Alpha Security Gates
 
@@ -87,6 +94,14 @@ Important boundaries:
 - Shell tool cannot run without policy decision.
 - Outside-workspace write is blocked or approval-gated.
 - Logs contain event IDs and session IDs.
+
+Current baseline status:
+
+- Safe-read native tools are limited to `file.read`, `file.search`, and
+  `git.status`.
+- Safe file tools resolve canonical paths and reject outside-workspace reads.
+- `shell.run` and write/mutating placeholders require persisted approval but
+  still fail closed after approval until execution backends are implemented.
 
 ## 7. Public Alpha Security Gates
 

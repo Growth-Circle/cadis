@@ -9,7 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cadis_protocol::{
     AgentEventPayload, AgentId, AgentSpawnRequest, ApprovalDecision, ApprovalId,
     ApprovalResponseRequest, ClientId, ClientRequest, ContentKind, DaemonResponse, EmptyPayload,
-    ErrorPayload, MessageSendRequest, ModelsListPayload, RequestEnvelope, RequestId, ServerFrame,
+    ErrorPayload, EventId, EventSubscriptionRequest, EventsSnapshotRequest, MessageSendRequest,
+    ModelsListPayload, RequestEnvelope, RequestId, ServerFrame, SessionId, ToolCallRequest,
 };
 use cadis_store::load_config;
 
@@ -46,6 +47,31 @@ fn run() -> Result<(), Box<dyn Error>> {
         Command::Agents => {
             let frames = send_request(&cli, ClientRequest::AgentList(EmptyPayload::default()))?;
             render_agents(&frames, cli.json)
+        }
+        Command::Events {
+            replay_limit,
+            since_event_id,
+            include_snapshot,
+            snapshot_only,
+        } => {
+            if *snapshot_only {
+                let frames = send_request(
+                    &cli,
+                    ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+                )?;
+                render_events(&frames, cli.json)
+            } else {
+                stream_events(
+                    &cli,
+                    EventSubscriptionRequest {
+                        since_event_id: since_event_id
+                            .as_ref()
+                            .map(|value| EventId::from(value.clone())),
+                        replay_limit: *replay_limit,
+                        include_snapshot: *include_snapshot,
+                    },
+                )
+            }
         }
         Command::Spawn {
             role,
@@ -91,6 +117,28 @@ fn run() -> Result<(), Box<dyn Error>> {
                 }),
             )?;
             render_chat(&frames, cli.json)
+        }
+        Command::Tool {
+            session_id,
+            cwd,
+            tool_name,
+            input,
+        } => {
+            let mut input = input.clone();
+            if let Some(cwd) = cwd {
+                input["workspace"] = serde_json::json!(cwd);
+            }
+            let frames = send_request(
+                &cli,
+                ClientRequest::ToolCall(ToolCallRequest {
+                    session_id: session_id
+                        .as_ref()
+                        .map(|value| SessionId::from(value.clone())),
+                    tool_name: tool_name.clone(),
+                    input,
+                }),
+            )?;
+            render_tool(&frames, cli.json)
         }
         Command::Approve(approval_id) => {
             send_approval(&cli, approval_id.clone(), ApprovalDecision::Approved)
@@ -170,6 +218,44 @@ fn send_request(cli: &Cli, request: ClientRequest) -> Result<Vec<ServerFrame>, B
     Ok(frames)
 }
 
+fn stream_events(cli: &Cli, request: EventSubscriptionRequest) -> Result<(), Box<dyn Error>> {
+    let socket_path = cli.socket_path()?;
+    let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "could not connect to cadisd at {}: {error}. Start it with `cadisd`.",
+                socket_path.display()
+            ),
+        )
+    })?;
+
+    let envelope = RequestEnvelope::new(
+        next_request_id(),
+        client_id(),
+        ClientRequest::EventsSubscribe(request),
+    );
+    serde_json::to_writer(&mut stream, &envelope)?;
+    stream.write_all(b"\n")?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let frame = serde_json::from_str::<ServerFrame>(&line)?;
+        if cli.json {
+            println!("{}", serde_json::to_string(&frame)?);
+        } else {
+            render_event_frame(&frame)?;
+        }
+    }
+
+    Ok(())
+}
+
 fn render_status(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {
     if json {
         return print_json_frames(frames);
@@ -247,6 +333,55 @@ fn render_agents(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+fn render_events(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {
+    if json {
+        return print_json_frames(frames);
+    }
+
+    render_rejections(frames)?;
+    for frame in frames {
+        render_event_frame(frame)?;
+    }
+    Ok(())
+}
+
+fn render_event_frame(frame: &ServerFrame) -> Result<(), Box<dyn Error>> {
+    match frame {
+        ServerFrame::Response(response) => {
+            if let DaemonResponse::RequestRejected(error) = &response.response {
+                return Err(invalid_data(format_error(error)).into());
+            }
+        }
+        ServerFrame::Event(event) => {
+            let session_id = event
+                .session_id
+                .as_ref()
+                .map(|session_id| session_id.as_str())
+                .unwrap_or("-");
+            println!(
+                "{}\t{}\t{}",
+                event.event_id,
+                event_type_name(frame),
+                session_id
+            );
+        }
+    }
+    Ok(())
+}
+
+fn event_type_name(frame: &ServerFrame) -> String {
+    serde_json::to_value(frame)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("payload")
+                .and_then(|payload| payload.get("type"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "event.unknown".to_owned())
+}
+
 fn print_agent(agent: &AgentEventPayload) {
     let name = agent
         .display_name
@@ -294,6 +429,48 @@ fn render_chat(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>>
                 _ => {}
             },
             ServerFrame::Response(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn render_tool(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {
+    if json {
+        return print_json_frames(frames);
+    }
+
+    render_rejections(frames)?;
+    for frame in frames {
+        let ServerFrame::Event(event) = frame else {
+            continue;
+        };
+        match &event.event {
+            cadis_protocol::CadisEvent::ToolCompleted(payload) => {
+                if let Some(summary) = &payload.summary {
+                    println!("{summary}");
+                } else if let Some(output) = &payload.output {
+                    println!("{}", serde_json::to_string_pretty(output)?);
+                }
+            }
+            cadis_protocol::CadisEvent::ToolFailed(payload) => {
+                return Err(invalid_data(format_error(&payload.error)).into());
+            }
+            cadis_protocol::CadisEvent::ApprovalRequested(payload) => {
+                println!(
+                    "approval required: {} ({:?})",
+                    payload.approval_id, payload.risk_class
+                );
+                if let Some(command) = &payload.command {
+                    println!("command: {command}");
+                }
+            }
+            cadis_protocol::CadisEvent::ApprovalResolved(payload) => {
+                println!(
+                    "approval resolved: {} {:?}",
+                    payload.approval_id, payload.decision
+                );
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -421,11 +598,13 @@ impl Cli {
             Some("doctor") => Command::Doctor,
             Some("models") => Command::Models,
             Some("agents") => Command::Agents,
+            Some("events") => parse_events(args.collect())?,
             Some("spawn") => parse_spawn(args.collect())?,
             Some("chat") => {
                 Command::Chat(required_text(args.collect(), "chat requires a message")?)
             }
             Some("run") => parse_run(args.collect())?,
+            Some("tool") => parse_tool(args.collect())?,
             Some("approve") => Command::Approve(
                 args.next()
                     .ok_or_else(|| invalid_input("approve requires an ID"))?,
@@ -462,6 +641,12 @@ enum Command {
     Doctor,
     Models,
     Agents,
+    Events {
+        replay_limit: Option<u32>,
+        since_event_id: Option<String>,
+        include_snapshot: bool,
+        snapshot_only: bool,
+    },
     Spawn {
         role: String,
         name: Option<String>,
@@ -473,8 +658,51 @@ enum Command {
         cwd: Option<PathBuf>,
         task: String,
     },
+    Tool {
+        session_id: Option<String>,
+        cwd: Option<PathBuf>,
+        tool_name: String,
+        input: serde_json::Value,
+    },
     Approve(String),
     Deny(String),
+}
+
+fn parse_events(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    let mut replay_limit = Some(128);
+    let mut since_event_id = None;
+    let mut include_snapshot = true;
+    let mut snapshot_only = false;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--replay" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| invalid_input("--replay requires a count"))?;
+                replay_limit = Some(value.parse::<u32>().map_err(|error| {
+                    invalid_input(format!("--replay requires a non-negative integer: {error}"))
+                })?);
+            }
+            "--since" => {
+                since_event_id = Some(
+                    args.next()
+                        .ok_or_else(|| invalid_input("--since requires an event ID"))?,
+                );
+            }
+            "--no-snapshot" => include_snapshot = false,
+            "--snapshot" => snapshot_only = true,
+            value => return Err(invalid_input(format!("unknown events option: {value}")).into()),
+        }
+    }
+
+    Ok(Command::Events {
+        replay_limit,
+        since_event_id,
+        include_snapshot,
+        snapshot_only,
+    })
 }
 
 fn parse_spawn(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
@@ -543,6 +771,74 @@ fn parse_run(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
     })
 }
 
+fn parse_tool(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    let mut session_id = None;
+    let mut cwd = None;
+    let mut explicit_input = None;
+    let mut args = args.into_iter();
+    let mut rest = Vec::new();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--session" => {
+                session_id = Some(
+                    args.next()
+                        .ok_or_else(|| invalid_input("--session requires an ID"))?,
+                );
+            }
+            "--cwd" => {
+                cwd = Some(PathBuf::from(
+                    args.next()
+                        .ok_or_else(|| invalid_input("--cwd requires a path"))?,
+                ));
+            }
+            "--input" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| invalid_input("--input requires JSON"))?;
+                explicit_input = Some(serde_json::from_str::<serde_json::Value>(&value)?);
+            }
+            value => {
+                rest.push(value.to_owned());
+                rest.extend(args);
+                break;
+            }
+        }
+    }
+
+    let tool_name = rest
+        .first()
+        .ok_or_else(|| invalid_input("tool requires a tool name"))?
+        .clone();
+    let input = explicit_input.unwrap_or_else(|| tool_input_from_args(&tool_name, &rest[1..]));
+
+    Ok(Command::Tool {
+        session_id,
+        cwd,
+        tool_name,
+        input,
+    })
+}
+
+fn tool_input_from_args(tool_name: &str, args: &[String]) -> serde_json::Value {
+    match tool_name {
+        "file.read" => serde_json::json!({
+            "path": args.first().cloned().unwrap_or_default()
+        }),
+        "file.search" => serde_json::json!({
+            "query": args.first().cloned().unwrap_or_default(),
+            "path": args.get(1).cloned().unwrap_or_else(|| ".".to_owned())
+        }),
+        "git.status" => serde_json::json!({
+            "path": args.first().cloned().unwrap_or_else(|| ".".to_owned())
+        }),
+        "shell.run" => serde_json::json!({
+            "command": args.join(" ")
+        }),
+        _ => serde_json::json!({}),
+    }
+}
+
 fn required_text(parts: Vec<String>, message: &str) -> Result<String, Box<dyn Error>> {
     let text = parts.join(" ");
     if text.trim().is_empty() {
@@ -562,7 +858,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn print_help() {
     println!(
-        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
+        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
         env!("CARGO_PKG_VERSION")
     );
 }

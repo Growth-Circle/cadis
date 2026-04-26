@@ -75,12 +75,15 @@ frames are `ServerFrame` values with `response` or `event`.
 ## 3. Request Types
 
 ```text
+events.subscribe
+events.snapshot
 daemon.status
 session.create
 session.cancel
 session.subscribe
 session.unsubscribe
 message.send
+tool.call
 approval.respond
 agent.list
 agent.rename
@@ -94,6 +97,59 @@ ui.preferences.set
 voice.preview
 voice.stop
 config.reload
+```
+
+`events.subscribe` keeps the connection open after the immediate
+`request.accepted` response. The daemon sends, in order:
+
+1. current snapshot events when `include_snapshot` is true
+2. up to `replay_limit` retained events after `since_event_id`, when available
+3. live runtime events fanned out from requests handled after subscription
+
+Example:
+
+```json
+{
+  "protocol_version": "0.1",
+  "request_id": "req_...",
+  "client_id": "hud_...",
+  "type": "events.subscribe",
+  "payload": {
+    "since_event_id": "evt_000120",
+    "replay_limit": 128,
+    "include_snapshot": true
+  }
+}
+```
+
+`events.snapshot` is a one-shot request for daemon-owned state. The desktop MVP
+snapshot is represented as normal event frames, currently including
+`agent.list.response`, `ui.preferences.updated`, and `session.updated` for known
+sessions.
+
+`tool.call` requests daemon-owned native tool execution. The initial baseline
+supports safe read-only execution for `file.read`, `file.search`, and
+`git.status`; risky placeholders such as `shell.run`, `file.write`, and
+`file.patch` create an approval request and do not execute until a later runtime
+implements the gated action.
+
+Example:
+
+```json
+{
+  "protocol_version": "0.1",
+  "request_id": "req_...",
+  "client_id": "cli_...",
+  "type": "tool.call",
+  "payload": {
+    "session_id": "ses_...",
+    "tool_name": "file.read",
+    "input": {
+      "workspace": "/home/user/project",
+      "path": "README.md"
+    }
+  }
+}
 ```
 
 ## 3.1 Response Types
@@ -160,6 +216,54 @@ voice.started
 voice.completed
 ```
 
+`models.list.response` payloads include conservative provider readiness metadata:
+
+```json
+{
+  "models": [
+    {
+      "provider": "echo",
+      "model": "cadis-local-fallback",
+      "display_name": "CADIS local fallback",
+      "capabilities": ["offline"],
+      "readiness": "fallback",
+      "effective_provider": "echo",
+      "effective_model": "cadis-local-fallback",
+      "fallback": true
+    }
+  ]
+}
+```
+
+`readiness` is one of `ready`, `fallback`, `requires_configuration`, or
+`unavailable`. `fallback: true` means the entry is not a real model provider.
+For `auto`, CADIS reports the primary effective provider as `ollama` and marks
+the entry as fallback-capable because runtime requests can still fall back to
+`echo` if Ollama is not ready.
+
+Model-backed `message.delta` and `message.completed` payloads may include a
+`model` object:
+
+```json
+{
+  "content_kind": "chat",
+  "content": "Done",
+  "agent_id": "codex",
+  "agent_name": "Codex",
+  "model": {
+    "requested_model": "echo/cadis-local-fallback",
+    "effective_provider": "echo",
+    "effective_model": "cadis-local-fallback",
+    "fallback": false
+  }
+}
+```
+
+`requested_model` is the agent-selected provider/model ID when present.
+`effective_provider` and `effective_model` are the provider and model that
+actually served the request. When fallback occurs, `fallback` is true and
+`fallback_reason` may contain a redacted reason suitable for logs and clients.
+
 ## 5. Content Kind
 
 ```text
@@ -201,6 +305,19 @@ tool.started
 tool.completed or tool.failed
 ```
 
+Safe-read tools emit `tool.requested`, `tool.started`, and then
+`tool.completed` or `tool.failed`. Approval-gated placeholders emit
+`tool.requested` and `approval.requested`; `approval.respond` emits
+`approval.resolved` and `tool.failed` because risky execution is intentionally
+blocked in this baseline.
+
+`tool.completed` may include a redacted structured `output` object. The current
+safe-read outputs are:
+
+- `file.read`: `path`, `content`, `truncated`
+- `file.search`: `query`, `matches[]`, `truncated`
+- `git.status`: `cwd`, `status`
+
 ## 8. Compatibility Rules
 
 - Protocol version is required.
@@ -212,6 +329,12 @@ tool.completed or tool.failed
 ## 9. Transport Candidates
 
 Initial:
+
+- Unix socket NDJSON request/response frames
+- `events.subscribe` over the same socket for long-lived local event streams
+
+The desktop daemon keeps an in-memory bounded replay buffer for recent runtime
+events. The baseline buffer is process-local and is not a durable event store.
 
 - Unix socket for Linux.
 - Stdio for tests.
@@ -236,8 +359,27 @@ Later:
 ```
 
 `target_agent_id` is optional. If it is absent, `cadisd` may resolve a leading
-`@agent` mention against agent ID, display name, or role. The original
-`content` remains canonical for auditability.
+`@agent` mention against agent ID, display name, or role. If a client supplies
+`target_agent_id` from a matching leading mention, `cadisd` strips that mention
+from the prompt sent to the provider while preserving the request `content` as
+the client-authored input.
+
+When the resolved target is the main orchestrator, `cadisd` also recognizes
+explicit, text-level routing actions without changing protocol version `0.1`:
+
+```text
+/route @codex run focused tests
+/delegate @codex review the patch
+/worker Reviewer: inspect the patch
+/spawn Tester: run the focused tests
+```
+
+`/route` and `/delegate` route to an existing agent and emit
+`orchestrator.route` plus worker lifecycle events for the delegated unit.
+`/worker` and `/spawn` create a child agent under `main`, subject to the same
+spawn limits as `agent.spawn`, then route the task to that child. Direct leading
+`@agent` mentions keep their existing behavior and do not require these explicit
+actions.
 
 ### `approval.respond`
 
@@ -283,6 +425,16 @@ Later:
 ```
 
 The daemon assigns the new `agent_id` and confirms with `agent.spawned`.
+Client-requested spawning and explicit `/worker` or `/spawn` orchestration are
+bounded by daemon config. The desktop MVP defaults allow child depth 2, 4 direct
+children per parent, and 32 total registered agents including built-in agents.
+Rejections use:
+
+- `agent_spawn_depth_limit_exceeded`
+- `agent_spawn_children_limit_exceeded`
+- `agent_spawn_total_limit_exceeded`
+
+Implicit model-driven spawning is reserved for a later runtime track.
 
 ### `ui.preferences.set`
 

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   _resetCadisActionsForTest,
+  _emitCadisSubscriptionFrameForTest,
   computeBackoffMs,
   connect,
   handleCadisFrameForTest,
@@ -9,9 +10,14 @@ import {
 import { useHud } from "./hudState.js";
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const listenMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: invokeMock,
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: listenMock,
 }));
 
 const INITIAL_AGENTS = useHud.getState().agents;
@@ -23,6 +29,8 @@ beforeEach(() => {
   _resetCadisActionsForTest();
   invokeMock.mockReset();
   invokeMock.mockResolvedValue([]);
+  listenMock.mockReset();
+  listenMock.mockResolvedValue(vi.fn());
   useHud.setState({
     agents: INITIAL_AGENTS,
     agentModels: INITIAL_AGENT_MODELS,
@@ -87,14 +95,14 @@ describe("cadisActions", () => {
         payload: {
           agent_id: "agent_42",
           display_name: "Builder",
-          role: "Coding",
+          role: "Build Ops",
           parent_agent_id: "main",
           model: "openai/gpt-5.2",
         },
       },
     });
     connect();
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
     invokeMock.mockClear();
 
     expect(sendUserMessage("@Builder run tests")).toBe(true);
@@ -103,6 +111,44 @@ describe("cadisActions", () => {
     expect(sentRequest().type).toBe("message.send");
     expect(sentRequest().payload).toMatchObject({
       content: "@Builder run tests",
+      content_kind: "chat",
+      target_agent_id: "agent_42",
+    });
+  });
+
+  it("resolves leading @mentions by agent role before sending target_agent_id", async () => {
+    connect();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
+    useHud.setState({
+      agents: [
+        ...useHud.getState().agents,
+        {
+          spec: {
+            id: "agent_42",
+            name: "Builder",
+            role: "Build Ops",
+            icon: "B",
+            hue: 200,
+            tasks: [],
+          },
+          status: "idle",
+          currentTask: {
+            verb: "ready",
+            target: "Builder agent",
+            detail: "openai/gpt-5.2",
+          },
+          uptimeSeconds: 0,
+          parentAgentId: "main",
+        },
+      ],
+    });
+    invokeMock.mockClear();
+
+    expect(sendUserMessage("@BuildOps run tests")).toBe(true);
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(sentRequest().payload).toMatchObject({
+      content: "@BuildOps run tests",
       content_kind: "chat",
       target_agent_id: "agent_42",
     });
@@ -131,6 +177,30 @@ describe("cadisActions", () => {
       currentTask: { detail: "openai/gpt-5.2" },
     });
     expect(state.agentModels.agent_42).toBe("openai/gpt-5.2");
+  });
+
+  it("starts an events.subscribe bridge with bounded replay from the last event id", async () => {
+    _emitCadisSubscriptionFrameForTest({
+      frame: "event",
+      payload: {
+        event_id: "evt_000120",
+        type: "ui.preferences.updated",
+        payload: { preferences: { hud: { theme: "ice" } } },
+      },
+    });
+
+    connect();
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalled());
+    expect(invokeMock.mock.calls[0]?.[0]).toBe("cadis_events_subscribe");
+    expect(sentRequest(0)).toMatchObject({
+      type: "events.subscribe",
+      payload: {
+        since_event_id: "evt_000120",
+        replay_limit: 128,
+        include_snapshot: true,
+      },
+    });
   });
 
   it("records orchestrator route events as chat rows", () => {
@@ -208,8 +278,8 @@ describe("cadisActions", () => {
   });
 });
 
-function sentRequest(): { type: string; payload: Record<string, unknown> } {
-  const args = invokeMock.mock.calls[0]?.[1] as
+function sentRequest(index = 0): { type: string; payload: Record<string, unknown> } {
+  const args = invokeMock.mock.calls[index]?.[1] as
     | { request?: { type?: unknown; payload?: unknown } }
     | undefined;
   return {

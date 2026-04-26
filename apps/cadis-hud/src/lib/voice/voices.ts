@@ -45,7 +45,7 @@ export const DEFAULT_VOICE_PREFS: VoicePrefs = {
   rate: 0,
   pitch: 0,
   volume: 0,
-  autoSpeak: true,
+  autoSpeak: false,
   /** Cloud Edge TTS is the default — local webkit2gtk often lacks speechSynthesis. */
   useCloudTts: true,
 };

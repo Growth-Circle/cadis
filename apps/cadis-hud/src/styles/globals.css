@@ -1572,6 +1572,48 @@ html, body, #root {
 
 .voice-config__slider { width: 100%; accent-color: var(--accent); }
 
+.voice-doctor {
+  padding: 9px 10px;
+  border: 1px solid var(--border-d);
+  border-radius: 6px;
+  background: oklch(0.07 0.014 var(--hue) / 0.46);
+}
+.voice-doctor__grid {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.voice-doctor__item {
+  display: grid;
+  grid-template-columns: 10px 104px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  font-size: 10px;
+}
+.voice-doctor__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  box-shadow: 0 0 8px currentColor;
+}
+.voice-doctor__dot--pass { background: var(--ok); color: var(--ok); }
+.voice-doctor__dot--warn { background: var(--warn); color: var(--warn); }
+.voice-doctor__dot--fail { background: var(--err); color: var(--err); }
+.voice-doctor__name {
+  color: var(--dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.voice-doctor__detail {
+  min-width: 0;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .voice-config__error {
   background: oklch(0.18 0.10 25 / 0.5);
   border: 1px solid var(--err);

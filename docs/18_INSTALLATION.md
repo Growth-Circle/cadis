@@ -13,13 +13,20 @@ cd cadis
 cargo build --release
 ```
 
-Expected binaries:
+Core binaries:
 
 ```text
 target/release/cadis
 target/release/cadisd
-target/release/cadis-hud
 ```
+
+The primary desktop HUD lives in `apps/cadis-hud` and is built with pnpm and
+Tauri. The Rust workspace may also build older native HUD prototype artifacts,
+but packaged HUD work should use the Tauri app unless a decision record changes
+that.
+
+The renderer-neutral Wulan avatar state engine is a library crate,
+`crates/cadis-avatar`; it is not an installed binary.
 
 ## First Run
 
@@ -39,27 +46,37 @@ target/release/cadis models
 target/release/cadis chat "hello"
 ```
 
-Launch the native desktop HUD:
+Launch the native desktop HUD from source:
 
 ```bash
-target/release/cadis-hud
+cd apps/cadis-hud
+corepack enable
+pnpm install
+pnpm tauri:dev
 ```
 
 For a custom socket:
 
 ```bash
 target/release/cadisd --socket /tmp/cadis-hud.sock --dev-echo
-target/release/cadis-hud --socket /tmp/cadis-hud.sock
+cd apps/cadis-hud
+CADIS_HUD_SOCKET=/tmp/cadis-hud.sock pnpm tauri:dev
 ```
 
-Equivalent env-based launch:
+To build the HUD frontend and native Tauri app locally:
 
 ```bash
-CADIS_HUD_SOCKET=/tmp/cadis-hud.sock target/release/cadis-hud
+cd apps/cadis-hud
+pnpm build
+pnpm tauri:build
 ```
 
 The HUD is a client of `cadisd`; it does not store credentials or execute tools
 directly.
+
+Voice dependencies are optional unless you use HUD speech or mic input. The HUD
+Voice settings include a local doctor that checks mic status, `whisper-cli`, the
+Whisper model path, the Node helper used for Edge TTS, and local audio players.
 
 The default provider mode is `auto`: CADIS tries Ollama at
 `http://127.0.0.1:11434` and falls back to a local credential-free response if
@@ -120,6 +137,9 @@ approvals/
 The daemon socket defaults to `$XDG_RUNTIME_DIR/cadis/cadisd.sock` when
 `XDG_RUNTIME_DIR` exists, otherwise `~/.cadis/run/cadisd.sock`.
 
+Do not copy local `.env` files, Codex auth JSON, logs, sockets, crash dumps,
+HAR traces, or Tauri bundle output into commits or release source archives.
+
 ## Optional Ollama Config
 
 Create `~/.cadis/config.toml`:
@@ -143,7 +163,11 @@ target/release/cadis chat "hello"
 - No packaged installer yet.
 - No native file/shell tool runtime yet.
 - Approval commands exist in the CLI protocol surface but approval storage and tool gating are not implemented yet.
-- Telegram, production voice output, full HUD parity, and code work window are not implemented yet.
+- Protocol types exist for orchestrator route, `session.subscribe`, and worker
+  events, but live multi-client event fan-out and worker execution are not
+  implemented yet.
+- Telegram, production daemon-owned voice output, full HUD parity, and code work window are not implemented yet.
+- The Tauri HUD is source-built for now; packaged desktop artifacts are not published yet.
 
 ## Package Targets Later
 

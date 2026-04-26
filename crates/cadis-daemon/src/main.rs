@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -5,17 +6,20 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use cadis_core::{Runtime, RuntimeOptions};
 use cadis_models::provider_from_config;
 use cadis_protocol::{
-    DaemonResponse, ErrorPayload, RequestEnvelope, RequestId, ResponseEnvelope, ServerFrame,
+    ClientRequest, DaemonResponse, ErrorPayload, EventEnvelope, EventId, EventSubscriptionRequest,
+    RequestEnvelope, RequestId, ResponseEnvelope, ServerFrame,
 };
 use cadis_store::{
     ensure_layout, load_config, openai_api_key_from_env, redact, CadisConfig, EventLog,
 };
+
+const EVENT_REPLAY_LIMIT: usize = 256;
 
 fn main() {
     if let Err(error) = run() {
@@ -47,15 +51,16 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let runtime = build_runtime(&config, Some(socket_path.clone()));
     let event_log = EventLog::new(&config);
+    let event_bus = EventBus::new(EVENT_REPLAY_LIMIT);
 
     if args.stdio {
         let stdin = io::stdin();
         let stdout = io::stdout();
-        serve_lines(stdin.lock(), stdout.lock(), runtime, event_log)?;
+        serve_lines(stdin.lock(), stdout.lock(), runtime, event_log, event_bus)?;
         return Ok(());
     }
 
-    run_socket(socket_path, runtime, event_log)
+    run_socket(socket_path, runtime, event_log, event_bus)
 }
 
 fn build_runtime(config: &CadisConfig, socket_path: Option<PathBuf>) -> Arc<Mutex<Runtime>> {
@@ -83,6 +88,7 @@ fn run_socket(
     socket_path: PathBuf,
     runtime: Arc<Mutex<Runtime>>,
     event_log: EventLog,
+    event_bus: EventBus,
 ) -> Result<(), Box<dyn Error>> {
     prepare_socket_path(&socket_path)?;
     let listener = UnixListener::bind(&socket_path)?;
@@ -93,8 +99,9 @@ fn run_socket(
             Ok(stream) => {
                 let runtime = Arc::clone(&runtime);
                 let event_log = event_log.clone();
+                let event_bus = event_bus.clone();
                 thread::spawn(move || {
-                    if let Err(error) = serve_unix_stream(stream, runtime, event_log) {
+                    if let Err(error) = serve_unix_stream(stream, runtime, event_log, event_bus) {
                         eprintln!("cadisd client error: {error}");
                     }
                 });
@@ -110,10 +117,11 @@ fn serve_unix_stream(
     stream: UnixStream,
     runtime: Arc<Mutex<Runtime>>,
     event_log: EventLog,
+    event_bus: EventBus,
 ) -> Result<(), Box<dyn Error>> {
     let reader = BufReader::new(stream.try_clone()?);
     let writer = BufWriter::new(stream);
-    serve_lines(reader, writer, runtime, event_log)
+    serve_lines(reader, writer, runtime, event_log, event_bus)
 }
 
 fn serve_lines<R, W>(
@@ -121,6 +129,7 @@ fn serve_lines<R, W>(
     writer: W,
     runtime: Arc<Mutex<Runtime>>,
     event_log: EventLog,
+    event_bus: EventBus,
 ) -> Result<(), Box<dyn Error>>
 where
     R: BufRead,
@@ -136,6 +145,11 @@ where
 
         match serde_json::from_str::<RequestEnvelope>(&line) {
             Ok(envelope) => {
+                let subscription = match &envelope.request {
+                    ClientRequest::EventsSubscribe(request) => Some(request.clone()),
+                    _ => None,
+                };
+                let snapshot_only = matches!(envelope.request, ClientRequest::EventsSnapshot(_));
                 let outcome = runtime
                     .lock()
                     .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
@@ -143,10 +157,33 @@ where
 
                 write_frame(&mut writer, &ServerFrame::Response(outcome.response))?;
 
+                if let Some(subscription) = subscription {
+                    for event in outcome.events {
+                        write_frame(&mut writer, &ServerFrame::Event(event))?;
+                    }
+
+                    let (replay, receiver) = event_bus.subscribe(&subscription);
+                    for event in replay {
+                        write_frame(&mut writer, &ServerFrame::Event(event))?;
+                    }
+                    for event in receiver {
+                        write_frame(&mut writer, &ServerFrame::Event(event))?;
+                    }
+                    return Ok(());
+                }
+
+                if snapshot_only {
+                    for event in outcome.events {
+                        write_frame(&mut writer, &ServerFrame::Event(event))?;
+                    }
+                    continue;
+                }
+
                 for event in outcome.events {
                     if let Err(error) = event_log.append_event(&event) {
                         eprintln!("cadisd log error: {error}");
                     }
+                    event_bus.publish(event.clone());
                     write_frame(&mut writer, &ServerFrame::Event(event))?;
                 }
             }
@@ -165,6 +202,137 @@ where
     }
 
     Ok(())
+}
+
+#[derive(Clone)]
+struct EventBus {
+    inner: Arc<Mutex<EventBusInner>>,
+    max_replay: usize,
+}
+
+struct EventBusInner {
+    replay: VecDeque<EventEnvelope>,
+    subscribers: Vec<mpsc::Sender<EventEnvelope>>,
+}
+
+impl EventBus {
+    fn new(max_replay: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(EventBusInner {
+                replay: VecDeque::with_capacity(max_replay),
+                subscribers: Vec::new(),
+            })),
+            max_replay,
+        }
+    }
+
+    fn publish(&self, event: EventEnvelope) {
+        let Ok(mut inner) = self.inner.lock() else {
+            eprintln!("cadisd event bus error: event bus mutex was poisoned");
+            return;
+        };
+
+        if self.max_replay > 0 {
+            while inner.replay.len() >= self.max_replay {
+                inner.replay.pop_front();
+            }
+            inner.replay.push_back(event.clone());
+        }
+
+        inner
+            .subscribers
+            .retain(|subscriber| subscriber.send(event.clone()).is_ok());
+    }
+
+    fn subscribe(
+        &self,
+        request: &EventSubscriptionRequest,
+    ) -> (Vec<EventEnvelope>, mpsc::Receiver<EventEnvelope>) {
+        let (sender, receiver) = mpsc::channel();
+        let Ok(mut inner) = self.inner.lock() else {
+            eprintln!("cadisd event bus error: event bus mutex was poisoned");
+            return (Vec::new(), receiver);
+        };
+
+        let replay = bounded_replay(
+            &inner.replay,
+            request.since_event_id.as_ref(),
+            request.replay_limit,
+            self.max_replay,
+        );
+        inner.subscribers.push(sender);
+        (replay, receiver)
+    }
+}
+
+fn bounded_replay(
+    replay: &VecDeque<EventEnvelope>,
+    since_event_id: Option<&EventId>,
+    replay_limit: Option<u32>,
+    max_replay: usize,
+) -> Vec<EventEnvelope> {
+    let limit = replay_limit
+        .and_then(|limit| usize::try_from(limit).ok())
+        .unwrap_or(max_replay)
+        .min(max_replay);
+    if limit == 0 || replay.is_empty() {
+        return Vec::new();
+    }
+
+    let start_index = since_event_id
+        .and_then(|event_id| replay.iter().position(|event| &event.event_id == event_id))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let available = replay.iter().skip(start_index).cloned().collect::<Vec<_>>();
+    let start = available.len().saturating_sub(limit);
+    available[start..].to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cadis_protocol::{CadisEvent, EmptyPayload, Timestamp};
+
+    #[test]
+    fn bounded_replay_returns_events_after_retained_event_id() {
+        let replay = VecDeque::from(vec![
+            event("evt_000001"),
+            event("evt_000002"),
+            event("evt_000003"),
+        ]);
+
+        let events = bounded_replay(&replay, Some(&EventId::from("evt_000001")), Some(1), 8);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id.as_str(), "evt_000003");
+    }
+
+    #[test]
+    fn event_bus_fans_out_published_runtime_events() {
+        let bus = EventBus::new(8);
+        let (_replay, receiver) = bus.subscribe(&EventSubscriptionRequest {
+            include_snapshot: false,
+            replay_limit: Some(8),
+            since_event_id: None,
+        });
+
+        bus.publish(event("evt_000001"));
+
+        let received = receiver
+            .try_recv()
+            .expect("subscriber should receive event");
+        assert_eq!(received.event_id.as_str(), "evt_000001");
+    }
+
+    fn event(event_id: &str) -> EventEnvelope {
+        EventEnvelope::new(
+            EventId::from(event_id),
+            Timestamp::new_utc("2026-04-26T00:00:00Z").expect("timestamp should parse"),
+            "cadisd",
+            None,
+            CadisEvent::DaemonStarted(EmptyPayload::default()),
+        )
+    }
 }
 
 fn write_frame(writer: &mut impl Write, frame: &ServerFrame) -> Result<(), Box<dyn Error>> {

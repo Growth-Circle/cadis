@@ -65,6 +65,52 @@ coder = "openai/gpt-5.5"
 
 ## 5. Requests
 
+### `events.subscribe`
+
+Sent when the HUD establishes a daemon connection that should receive runtime
+events without polling.
+
+```json
+{
+  "type": "events.subscribe",
+  "since_event_id": "evt_000120",
+  "replay_limit": 128,
+  "include_snapshot": true
+}
+```
+
+The daemon responds with `request.accepted`, then sends snapshot events, bounded
+replay, and live events on the same connection. HUD should rebuild
+`event_derived_snapshot` from those events and keep the last seen `event_id` for
+reconnect.
+
+In the Tauri HUD, the renderer remains a protocol client and does not open the
+Unix socket directly. It calls the native `cadis_events_subscribe` command with
+the same protocol request envelope. The native side keeps the socket open,
+reads newline-delimited `ServerFrame` JSON from `cadisd`, and emits each frame
+to the renderer as a `cadis-frame` Tauri event. If the socket closes
+unexpectedly, native emits `cadis-subscription-closed`; the renderer marks the
+gateway disconnected and reconnects with bounded backoff using the last seen
+`event_id` as `since_event_id`.
+
+The HUD may still use `cadis_request` for one-shot commands such as
+`models.list`, `daemon.status`, `message.send`, and preference or approval
+requests. Authoritative state changes must arrive through daemon events before
+the UI treats them as applied.
+
+### `events.snapshot`
+
+Sent when the HUD needs a one-shot daemon-owned state snapshot.
+
+```json
+{
+  "type": "events.snapshot"
+}
+```
+
+The current desktop MVP snapshot is encoded as event frames, including
+`agent.list.response`, `ui.preferences.updated`, and `session.updated`.
+
 ### `message.send`
 
 Sent when the user submits text in the chat panel.
@@ -439,7 +485,7 @@ HUD connection behavior should preserve RamaClaw's operational feel:
 
 - connect to local daemon only
 - perform protocol handshake
-- subscribe to event stream
+- send `events.subscribe` with the last seen event ID when available
 - request model list after handshake
 - reconnect with exponential backoff
 - keep last subscription set
@@ -448,13 +494,17 @@ HUD connection behavior should preserve RamaClaw's operational feel:
 CADIS replacement discovery:
 
 ```text
-1. --socket CLI argument for cadis-hud
+1. explicit socketPath argument passed to the Tauri cadis_request command
 2. CADIS_HUD_SOCKET
-3. socket_path in ~/.cadis/config.toml
-4. $XDG_RUNTIME_DIR/cadis/cadisd.sock when XDG_RUNTIME_DIR exists
-5. ~/.cadis/run/cadisd.sock
-6. Future CADIS_HUD_URL or hud-gateway.port if WebSocket mode is enabled
+3. CADIS_SOCKET
+4. socket_path in ~/.cadis/config.toml
+5. $XDG_RUNTIME_DIR/cadis/cadisd.sock when XDG_RUNTIME_DIR exists
+6. ~/.cadis/run/cadisd.sock
+7. Future CADIS_HUD_URL or hud-gateway.port if WebSocket mode is enabled
 ```
+
+`VITE_CADIS_SOCKET_PATH` may seed browser-preview development state, but it is
+not an authoritative runtime configuration source.
 
 ## 9. Voice Routing Policy
 
@@ -481,3 +531,5 @@ Protocol adaptation is valid when:
 - Approval card lifecycle is server-confirmed.
 - Rename and model selection survive HUD restart.
 - Disconnection and reconnect behavior are visible and tested.
+- `apps/cadis-hud` passes pnpm lint, typecheck, unit tests, frontend build, and
+  `src-tauri` cargo check in CI.

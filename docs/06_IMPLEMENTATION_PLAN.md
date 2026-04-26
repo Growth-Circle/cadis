@@ -18,9 +18,9 @@ This order prevents the project from becoming a UI shell before the core runtime
 | P0 | Repository Foundation | Publishable open-source baseline |
 | P1 | Rust Workspace Skeleton | Workspace and crate boundaries exist |
 | P2 | Protocol and Events | Typed protocol and event log model |
-| P3 | Daemon Core | `cadisd` lifecycle, sessions, event bus |
+| P3 | Daemon Core | `cadisd` lifecycle, sessions, request-scoped events |
 | P4 | CLI Client | `cadis` can talk to daemon |
-| P5 | Model Streaming | One provider streams through runtime |
+| P5 | Model Provider Path | Providers answer through runtime |
 | P6 | Tool Runtime | Native tool registry and first tools |
 | P7 | Policy and Approvals | Central risk policy and CLI approvals |
 | P8 | Persistence | Config, state, JSONL logs, redaction |
@@ -39,19 +39,192 @@ Implemented in the first runnable baseline:
 - P1 workspace skeleton crates: `cadis-core`, `cadis-daemon`, `cadis-cli`, `cadis-store`, `cadis-policy`, and `cadis-models`.
 - P3 daemon subset: `cadisd --version`, `cadisd --check`, Unix socket transport, stdio test mode, config load, health status, session registry, and event emission.
 - P4 CLI subset: `cadis status`, `cadis doctor`, `cadis models`, `cadis chat`, JSON frame output, and `cadis daemon` launcher.
-- P5 model subset: local fallback provider plus optional Ollama adapter.
-- P8 persistence subset: `~/.cadis` layout, JSONL event logs, and redaction before persistence.
-- P13 HUD prototype subset: native Rust `cadis-hud` window, orbital shell, status bar, chat command panel, config tabs, six themes, model controls, rename dialog, voice preview hooks, and approval stack rendering.
+- P5 model subset: local fallback provider plus optional Ollama, OpenAI API, and Codex CLI adapters.
+- P8 persistence subset: `~/.cadis` layout, JSONL event logs, redaction before
+  persistence, and store-level atomic JSON metadata helpers under
+  `~/.cadis/state`.
+- Orchestrator baseline: daemon-owned `@agent` routing, `orchestrator.route`
+  events, route-time `agent.status.changed` events, request-driven
+  `agent.spawn`, and spawn limits.
+- P13 HUD subset: Tauri + React `apps/cadis-hud` desktop app, orbital shell,
+  chat command panel, agent cards, mention picker, config dialog, six themes,
+  model controls, rename dialog, local mic debug, HUD-local voice doctor,
+  Edge TTS hooks, approval stack rendering, and optional Wulan Arc avatar.
+- Wulan avatar subset: native engine direction in
+  `docs/26_WULAN_AVATAR_ENGINE.md` plus `crates/cadis-avatar` for
+  renderer-neutral avatar modes, gestures, face-tracking privacy state, renderer
+  backend intent, and renderable frame contracts.
 
 Still pending:
 
 - Native file/shell tools.
 - Approval storage and tool gating.
-- Agent runtime beyond the main chat path.
-- Worker isolation, Telegram, production voice output, full HUD parity, and code work window.
+- Agent runtime beyond the current route-and-answer path; existing
+  `agent.spawn` is client-requested, not agent-driven.
+- Event bus fan-out and true live streaming from daemon to HUD; current
+  `session.subscribe` is a protocol/request baseline, not a persistent stream.
+- Daemon startup wiring for durable session, agent, worker, and approval
+  recovery. The store-level atomic write and fail-safe recovery helpers exist.
+- Worker lifecycle, isolated worktrees, Telegram/mobile adapters, daemon-owned
+  production voice output, and code work window.
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
   memory records, scoped retrieval, provenance ledger, candidate promotion, and
   memory capsules.
+
+## 2.2 Next Execution Plan
+
+The next work should run as parallel tracks with clear ownership. Each track must
+keep `cadisd` as runtime authority and keep the HUD as a protocol client.
+
+### Track A - Protocol and Event Bus
+
+Owner: core/protocol agents.
+
+Tasks:
+
+- Add a daemon event bus with fan-out to connected clients.
+- Add a persistent `session.subscribe` stream for HUD and CLI clients.
+- Stop holding the runtime mutex while model providers are generating.
+- Emit `session.started`, `orchestrator.route`, `agent.status.changed`,
+  `message.delta`, and `message.completed` as they happen.
+- Add integration tests for two clients receiving the same session events.
+
+Exit criteria:
+
+- HUD receives visible progress before model completion.
+- CLI can subscribe to a live session.
+- One slow request does not block unrelated status or agent list requests.
+
+### Track B - Model Provider Readiness and Streaming
+
+Owner: model-provider agents.
+
+Tasks:
+
+- Add provider readiness and capability metadata to the model catalog.
+- Make effective provider/model visible to clients.
+- Route agent-selected model IDs into provider selection instead of treating
+  `agent.model.set` as UI-only state.
+- Add streaming callback support for providers that can stream.
+- Keep echo provider available only as an explicit fallback state.
+
+Exit criteria:
+
+- HUD can show whether the active model is real, fallback, or unavailable.
+- Per-agent model selection changes which provider/model answers.
+- OpenAI/Ollama/Codex CLI errors surface as structured daemon errors.
+
+### Track C - Orchestrator, Agents, and Workers
+
+Owner: agent-runtime and worker agents.
+
+Tasks:
+
+- Introduce an `AgentSession` state machine with route, task, result, timeout,
+  budget, cancellation, and parent-child metadata.
+- Extend the current request-driven spawn limits into agent-driven spawn:
+  max depth, max children per agent, and global agent cap.
+- Implement agent-driven spawn as a daemon-authorized action, not HUD logic.
+- Add a worker registry with `worker.started`, `worker.log.delta`,
+  `worker.completed`, `worker.failed`, and `worker.cancelled`.
+- Implement `worker.tail` from daemon-owned worker logs.
+
+Exit criteria:
+
+- An agent can request a subagent through the orchestrator and the daemon enforces
+  limits.
+- HUD worker tree is driven by daemon worker events.
+- Worker logs can be tailed from CLI and HUD.
+
+### Track D - Policy, Approval, and Tool Runtime
+
+Owner: policy/tool agents.
+
+Tasks:
+
+- Implement approval persistence and `approval.respond`.
+- Gate shell/file write/git apply operations through central policy.
+- Add first native tools: `file.search`, `file.read`, `shell.run`, `git.status`,
+  `git.diff`.
+- Add timeouts, cancellation, and redaction boundaries.
+
+Exit criteria:
+
+- Risky tools fail closed without approval.
+- Approval decisions survive client reconnects.
+- Tool events are visible in CLI/HUD and redacted in JSONL logs.
+
+### Track E - Voice as a Daemon-Owned Capability
+
+Owner: voice agents.
+
+Tasks:
+
+- Define voice provider config for `edge`, `openai`, and `system` providers.
+- Move `voice.preview` and `voice.stop` toward daemon-owned execution while HUD
+  remains a local capture/playback bridge where platform APIs require it.
+- Separate STT language from TTS voice selection.
+- Add a voice doctor covering mic permission, MediaRecorder, whisper binary,
+  whisper model, Node helper, and audio player.
+- Promote the current HUD-local voice doctor results into daemon-visible status
+  once voice becomes daemon-owned.
+- Handle daemon voice events in HUD.
+
+Exit criteria:
+
+- Empty transcript, missing dependency, and blocked mic states are visible and
+  actionable.
+- Voice preview behavior matches daemon protocol events.
+- Speech policy can block code, diffs, logs, and long tool output.
+
+### Track F - Persistence and Recovery
+
+Owner: store/recovery agents.
+
+Tasks:
+
+- Store session metadata, agent metadata, worker metadata, and approval metadata
+  with atomic writes. Store-level helpers are implemented under
+  `~/.cadis/state`; daemon runtime integration remains pending.
+- Load durable state on daemon start.
+- Keep append-only JSONL as audit log, not the only runtime state.
+- Add recovery tests for partial writes and stale worker/session records.
+
+Exit criteria:
+
+- Spawned agents, selected models, active sessions, and pending approvals survive
+  daemon restart.
+- Corrupt or partial state files fail safe with clear diagnostics.
+
+### Track G - Wulan Native Avatar Engine
+
+Owner: HUD/native-renderer agents.
+
+Tasks:
+
+- Keep the current Three.js Wulan Arc avatar as a lazy-loaded prototype and
+  fallback reference.
+- Define a renderer-neutral avatar render state derived from daemon events and
+  daemon-owned `hud.avatar_style` preferences.
+- Extend `crates/cadis-avatar` from a renderer-neutral state engine into an
+  adapter-ready renderer contract.
+- Spike a focused Rust/wgpu renderer before considering Bevy.
+- Port prototype primitives: portrait texture, alpha cutoff, hologram shader,
+  particles, reticles, eye overlay, mouth overlay, and state colors.
+- Add body gestures for idle breath, listening lean, nod, gaze shift, approval
+  hand cue, speaking emphasis, coding focus, thinking scan, and error recoil.
+- Keep face tracking optional, off by default, local-only, permission-gated, and
+  disabled without breaking scripted gestures.
+- Add reduced-motion and renderer-failure fallback to the default CADIS orb.
+
+Exit criteria:
+
+- Native Wulan can render idle, listening, thinking, speaking, coding, waiting,
+  and error states from mock and daemon-derived HUD state.
+- Avatar choice remains daemon-backed and no avatar engine code executes tools,
+  approvals, model calls, memory retrieval, or policy decisions.
+- Bevy is only reconsidered through a decision record if the focused wgpu path
+  cannot meet accepted avatar requirements.
 
 ## 3. P0 - Repository Foundation
 
@@ -278,6 +451,10 @@ Tasks:
 - Create `~/.cadis` directory structure.
 - Load `config.toml`.
 - Append JSONL event logs.
+- Provide store-level durable metadata files:
+  `state/sessions/<session-id>.json`, `state/agents/<agent-id>.json`,
+  `state/workers/<worker-id>.json`, and
+  `state/approvals/<approval-id>.json`.
 - Store session metadata.
 - Store approval metadata.
 - Implement redaction.
@@ -287,7 +464,7 @@ Exit criteria:
 
 - Session events survive daemon restart as logs.
 - Secret redaction tests pass.
-- Partial state write tests pass where feasible.
+- Store-level partial and corrupt state recovery tests pass.
 
 ## 12. P9 - Agent Sessions
 
@@ -376,7 +553,8 @@ Goal: provide a Linux desktop control surface.
 
 Tasks:
 
-- Create Dioxus desktop app.
+- Maintain the Tauri + React desktop app as the production-oriented HUD while
+  the Rust-native prototype remains a reference path.
 - Connect to daemon protocol.
 - Show chat stream.
 - Show daemon status.
@@ -384,11 +562,17 @@ Tasks:
 - Show worker cards.
 - Show approval cards.
 - Show voice controls.
+- Keep the default CADIS orb available.
+- Keep the current Three.js Wulan Arc avatar optional while native Wulan is
+  developed.
+- Implement the CADIS-native Wulan avatar engine according to
+  `docs/26_WULAN_AVATAR_ENGINE.md`.
 
 Exit criteria:
 
 - HUD can monitor and control active session.
 - HUD approval resolves daemon approval.
+- Wulan rendering failures fall back to the CADIS orb without blocking the HUD.
 
 ## 17. P14 - Code Work Window
 

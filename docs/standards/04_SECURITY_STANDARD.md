@@ -29,6 +29,7 @@ CADIS must protect:
 - logs and persisted events
 - worktrees and generated patches
 - local protocol socket
+- optional local face tracking signals and camera-derived avatar controls
 
 ## 4. Trust Boundaries
 
@@ -104,7 +105,28 @@ Every tool declares risk class, expected side effects, workspace behavior, netwo
 - Debug protocol logging is opt-in and redacted.
 - Remote relay or WebSocket modes require a security review before public alpha.
 
-## 10. Supply Chain Security
+## 10. Avatar and Face Tracking Privacy
+
+Wulan face tracking is optional and must be treated as privacy-sensitive local
+camera processing.
+
+Rules:
+
+- Face tracking is off by default and must not be required for Wulan
+  expressiveness.
+- Camera access requires explicit user permission, a visible active-camera
+  indicator, and a one-click disable action.
+- Face tracking data must remain local to the renderer process unless a future
+  security decision explicitly changes that boundary.
+- Raw frames, derived landmarks, embeddings, identity labels, biometric
+  templates, and confidence traces must not be written to logs, diagnostics,
+  crash reports, telemetry, memory, or provider context by default.
+- Permission denial, camera unavailable, and low-confidence frames must fall
+  back to scripted avatar gestures.
+- `crates/cadis-avatar` privacy validation must reject non-local,
+  persisted-by-default, or identity-recognition face tracking config.
+
+## 11. Supply Chain Security
 
 Before public alpha:
 
@@ -124,7 +146,7 @@ Preferred checks align with OpenSSF Scorecard categories where practical:
 - vulnerability reporting
 - secret scanning
 
-## 11. Security Gates
+## 12. Security Gates
 
 Pre-alpha gates:
 
@@ -142,7 +164,7 @@ Public alpha gates:
 - dependency license and security audit completed
 - documented limitations published
 
-## 12. Review Requirements
+## 13. Review Requirements
 
 Changes require security-focused review when they touch:
 

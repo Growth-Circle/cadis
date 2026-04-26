@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   THEMES,
   normalizeAvatarStyle,
@@ -15,6 +16,8 @@ import type { VoicePrefs } from "../lib/voice/voices.js";
 const CLIENT_ID = "cadis-hud";
 const PROTOCOL_VERSION = "0.1";
 const SOCKET_PATH_STORAGE_KEY = "cadis.socketPath";
+const CADIS_FRAME_EVENT = "cadis-frame";
+const CADIS_SUBSCRIPTION_CLOSED_EVENT = "cadis-subscription-closed";
 const FALLBACK_MAIN_MODEL = "openai/gpt-5.5";
 const AGENT_ROSTER_BY_ID = new Map(AGENT_ROSTER.map((agent) => [agent.id, agent]));
 
@@ -30,12 +33,18 @@ type CadisEnvelope = {
   type?: unknown;
   payload?: unknown;
   session_id?: unknown;
+  event_id?: unknown;
 };
 
 type CadisFrame = {
   frame?: unknown;
   payload?: unknown;
   type?: unknown;
+};
+
+type CadisSubscriptionClosed = {
+  generation?: unknown;
+  error?: unknown;
 };
 
 type RawModelDescriptor = {
@@ -55,6 +64,9 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempt = 0;
 let intentionalDisconnect = false;
 let generation = 0;
+let lastEventId: string | null = null;
+let unlistenCadisFrame: (() => void) | null = null;
+let unlistenCadisSubscriptionClosed: (() => void) | null = null;
 
 export function connect(): void {
   const activeGeneration = ++generation;
@@ -63,16 +75,15 @@ export function connect(): void {
   useHud.getState().setGateway("connecting");
 
   void (async () => {
-    const ok = await callCadis("daemon.status", {}, activeGeneration);
-    if (!ok || activeGeneration !== generation) {
+    const subscribed = await startEventSubscription(activeGeneration);
+    if (!subscribed || activeGeneration !== generation) {
       scheduleReconnect();
       return;
     }
 
     await Promise.all([
-      callCadis("agent.list", {}, activeGeneration),
       callCadis("models.list", {}, activeGeneration),
-      callCadis("ui.preferences.get", {}, activeGeneration),
+      callCadis("daemon.status", {}, activeGeneration),
     ]);
   })();
 }
@@ -83,6 +94,7 @@ export function disconnect(): void {
   generation += 1;
   clearReconnect();
   streamingBySession.clear();
+  stopEventSubscription();
   useHud.getState().setGateway("disconnected");
 }
 
@@ -183,6 +195,11 @@ export function _resetCadisActionsForTest(): void {
   disconnect();
   intentionalDisconnect = false;
   reconnectAttempt = 0;
+  lastEventId = null;
+}
+
+export function _emitCadisSubscriptionFrameForTest(frame: CadisFrame): void {
+  handleSubscriptionFrame(frame);
 }
 
 async function callCadis(
@@ -221,6 +238,69 @@ function buildRequest(type: string, payload: Record<string, unknown>): CadisRequ
   };
 }
 
+async function startEventSubscription(activeGeneration: number): Promise<boolean> {
+  try {
+    await ensureEventListeners();
+    const request = buildRequest("events.subscribe", buildSubscriptionPayload());
+    const socketPath = readSocketPath();
+    const args = socketPath ? { request, socketPath } : { request };
+    await invoke("cadis_events_subscribe", args);
+    if (activeGeneration !== generation) return false;
+    markConnected();
+    return true;
+  } catch {
+    if (activeGeneration === generation) markDisconnected();
+    return false;
+  }
+}
+
+function buildSubscriptionPayload(): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    replay_limit: 128,
+    include_snapshot: true,
+  };
+  if (lastEventId) payload.since_event_id = lastEventId;
+  return payload;
+}
+
+async function ensureEventListeners(): Promise<void> {
+  if (!unlistenCadisFrame) {
+    unlistenCadisFrame = await listen<CadisFrame>(CADIS_FRAME_EVENT, (event) => {
+      if (intentionalDisconnect) return;
+      handleSubscriptionFrame(event.payload);
+    });
+  }
+  if (!unlistenCadisSubscriptionClosed) {
+    unlistenCadisSubscriptionClosed = await listen<CadisSubscriptionClosed>(
+      CADIS_SUBSCRIPTION_CLOSED_EVENT,
+      (event) => {
+        if (intentionalDisconnect) return;
+        const payload = asRecord(event.payload);
+        const error = stringFrom(payload.error);
+        generation += 1;
+        markDisconnected();
+        if (error) pushSystem(`(CADIS event stream ended: ${error})`);
+        scheduleReconnect();
+      },
+    );
+  }
+}
+
+function stopEventSubscription(): void {
+  const frameUnlisten = unlistenCadisFrame;
+  const closedUnlisten = unlistenCadisSubscriptionClosed;
+  unlistenCadisFrame = null;
+  unlistenCadisSubscriptionClosed = null;
+  frameUnlisten?.();
+  closedUnlisten?.();
+  void Promise.resolve(invoke("cadis_events_unsubscribe")).catch(() => undefined);
+}
+
+function handleSubscriptionFrame(frame: CadisFrame): void {
+  handleFrame(frame);
+  markConnected();
+}
+
 function readSocketPath(): string | undefined {
   const envPath = (import.meta as unknown as { env?: Record<string, string | undefined> }).env
     ?.VITE_CADIS_SOCKET_PATH;
@@ -243,6 +323,7 @@ export function handleCadisFrameForTest(frame: CadisFrame): void {
 function handleFrame(frame: CadisFrame): void {
   const envelope = unwrapEnvelope(frame);
   if (!envelope || typeof envelope.type !== "string") return;
+  if (typeof envelope.event_id === "string" && envelope.event_id) lastEventId = envelope.event_id;
   handleMessage(envelope.type, envelope.payload, readSessionId(envelope));
 }
 
@@ -554,7 +635,7 @@ function parseMentionTargetAgentId(text: string): string | undefined {
 function resolveMentionTargetAgentId(token: string): string {
   const target = normalizeMentionToken(token);
   const known = useHud.getState().agents.find((agent) => {
-    const names = [agent.spec.id, agent.spec.name];
+    const names = [agent.spec.id, agent.spec.name, agent.spec.role];
     return names.some((name) => normalizeMentionToken(name) === target);
   });
   return known?.spec.id ?? token;

@@ -15,6 +15,14 @@
   <img alt="Linux desktop MVP" src="https://img.shields.io/badge/target-Linux%20desktop-6f42c1.svg">
 </p>
 
+<p align="center">
+  <img src="docs/assets/readme/cadis-hud-desktop.png" alt="CADIS desktop HUD with orbital agents, voice chat, and model routing" width="920" />
+</p>
+
+<p align="center">
+  <sub>CADIS HUD: local daemon status, orbital agents, voice I/O, model routing, and approval-ready desktop control.</sub>
+</p>
+
 CADIS is a Rust-first, local-first, model-agnostic runtime for coordinating AI
 agents across a desktop HUD, CLI, tools, voice, approvals, and isolated coding
 workflows.
@@ -51,15 +59,18 @@ CADIS is an early desktop MVP. The repository includes:
 - `cadisd`: local daemon and protocol authority
 - `cadis`: CLI client for status, models, agents, spawn, chat, and doctor checks
 - `apps/cadis-hud`: Tauri + React RamaClaw-style HUD
-- typed protocol events for messages, models, agents, approvals, and workers
+- `crates/cadis-avatar`: renderer-neutral Wulan avatar state engine contract
+- typed protocol events for messages, models, agents, approvals, orchestrator
+  routing, and workers
 - JSONL event persistence with redaction boundaries
-- optional Ollama/OpenAI model adapters
+- optional Ollama, OpenAI API, and Codex CLI model adapters
 - official Codex CLI adapter for ChatGPT Plus/Pro login flows
-- Edge TTS playback and local `whisper-cli` voice input path
+- HUD-local Edge TTS playback, `whisper-cli` voice input, and voice doctor
+  preflight
 
 Planned work still includes production-grade tool execution, full policy
-coverage, richer worker isolation, Telegram/mobile clients, and code work
-windows.
+coverage, event fan-out/live streaming, richer worker isolation,
+Telegram/mobile clients, daemon-owned production voice, and code work windows.
 
 ## Quick Start
 
@@ -90,6 +101,7 @@ Run the desktop HUD:
 
 ```bash
 cd apps/cadis-hud
+corepack enable
 pnpm install
 pnpm tauri:dev
 ```
@@ -135,6 +147,10 @@ On Linux, CADIS installs a WebKitGTK audio permission handler for the HUD. If
 your desktop portal blocks the mic, allow microphone access for CADIS in system
 settings and click the mic again.
 
+The HUD Settings -> Voice tab includes a local voice doctor that checks renderer
+mic status, `whisper-cli`, the configured Whisper model, Node helper execution,
+and available audio players.
+
 ## Repository Layout
 
 ```text
@@ -165,6 +181,7 @@ cadis/
 - [UI State Protocol Contract](docs/22_UI_STATE_PROTOCOL_CONTRACT.md)
 - [UI Design System](docs/23_UI_DESIGN_SYSTEM.md)
 - [Memory Concept](docs/25_MEMORY_CONCEPT.md)
+- [Wulan Avatar Engine](docs/26_WULAN_AVATAR_ENGINE.md)
 - [Open Source Standard](docs/09_OPEN_SOURCE_STANDARD.md)
 
 ## Security

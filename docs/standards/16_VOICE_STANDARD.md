@@ -141,10 +141,29 @@ The HUD voice UI must include:
 - stop test button
 - error message
 - last engine success hint
+- microphone debug capture with permission, device, stream, recorder, analyser RMS/peak, and silence reason
 
 Voice preview should use the main agent display name in the sample text.
 
-## 10. Protocol
+## 10. HUD STT Capture
+
+The HUD may capture microphone audio locally for STT, but it remains a protocol client. It must not move durable voice ownership, policy, or core agent routing out of `cadisd`.
+
+Tauri/WebKitGTK builds must explicitly enable WebKit media streams before handling microphone permission requests. The Linux HUD setup must call WebKit settings `enable-media-stream` for the main webview and then allow audio-only `UserMediaPermissionRequest` requests. Video capture must not be allowed by this path.
+
+The renderer STT path must expose deterministic microphone diagnosis:
+
+- microphone permission state when available
+- visible audio input count and selected input label
+- media stream active/inactive state
+- track enabled, muted, ready state, channel count, and sample rate when provided by WebKit
+- `MediaRecorder` state and MIME type for transcription capture
+- analyser state, sample rate, RMS, peak, and frame count
+- silence reason, including no signal, muted track, suspended audio context, below voice threshold, trailing silence, or max duration
+
+The HUD visualizer must be driven from actual analyser time-domain samples. It must not show synthetic movement that can hide a silent or disconnected input.
+
+## 11. Protocol
 
 Voice requests:
 
@@ -165,7 +184,7 @@ ui.preferences.updated
 
 Voice preview failure must be visible in the HUD and structured in logs.
 
-## 11. Privacy and Logging
+## 12. Privacy and Logging
 
 Voice logs must not store unnecessary spoken text.
 
@@ -176,7 +195,9 @@ Rules:
 - Redact before persistence.
 - Prefer metadata such as content kind, character count, provider, voice ID, and outcome.
 
-## 12. Testing Requirements
+Microphone debug output should stay renderer-local unless the user explicitly runs a diagnostic command. Device IDs must be shortened or omitted in UI/debug output; labels, counts, states, RMS/peak, and failure reasons are sufficient for normal diagnosis.
+
+## 13. Testing Requirements
 
 Required tests:
 
@@ -190,3 +211,5 @@ Required tests:
 - preview started/completed/failed events
 - stop behavior
 - HUD control state mapping
+- HUD microphone debug state mapping
+- visualizer sample mapping from analyser input

@@ -355,6 +355,12 @@ pub struct EmptyPayload {}
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum ClientRequest {
+    /// Subscribe to daemon runtime events.
+    #[serde(rename = "events.subscribe")]
+    EventsSubscribe(EventSubscriptionRequest),
+    /// Request a daemon-owned runtime state snapshot.
+    #[serde(rename = "events.snapshot")]
+    EventsSnapshot(EventsSnapshotRequest),
     /// Ask daemon for health and runtime status.
     #[serde(rename = "daemon.status")]
     DaemonStatus(EmptyPayload),
@@ -373,6 +379,9 @@ pub enum ClientRequest {
     /// Send a user message.
     #[serde(rename = "message.send")]
     MessageSend(MessageSendRequest),
+    /// Request daemon-owned tool execution.
+    #[serde(rename = "tool.call")]
+    ToolCall(ToolCallRequest),
     /// Respond to a pending approval.
     #[serde(rename = "approval.respond")]
     ApprovalRespond(ApprovalResponseRequest),
@@ -412,6 +421,38 @@ pub enum ClientRequest {
     /// Reload daemon configuration.
     #[serde(rename = "config.reload")]
     ConfigReload(EmptyPayload),
+}
+
+/// Payload for subscribing to daemon runtime events.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct EventSubscriptionRequest {
+    /// Optional event ID. Buffered replay starts after this ID when still retained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since_event_id: Option<EventId>,
+    /// Maximum buffered events to replay before live events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_limit: Option<u32>,
+    /// Whether the daemon should send a current runtime snapshot before replay.
+    #[serde(default = "default_true")]
+    pub include_snapshot: bool,
+}
+
+impl Default for EventSubscriptionRequest {
+    fn default() -> Self {
+        Self {
+            since_event_id: None,
+            replay_limit: Some(128),
+            include_snapshot: true,
+        }
+    }
+}
+
+/// Payload for requesting a one-shot daemon-owned runtime state snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct EventsSnapshotRequest {}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Payload for creating a session.
@@ -457,6 +498,19 @@ pub struct ApprovalResponseRequest {
     /// Optional redacted reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Payload for requesting daemon-owned tool execution.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct ToolCallRequest {
+    /// Optional session this tool call belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    /// Stable tool name, for example `file.read`.
+    pub tool_name: String,
+    /// Structured tool input.
+    #[serde(default)]
+    pub input: serde_json::Value,
 }
 
 /// Payload for agent rename.
@@ -671,6 +725,9 @@ pub struct MessageDeltaPayload {
     /// Display name for the producing agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Provider/model metadata for this model invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelInvocationPayload>,
 }
 
 /// Message completion payload.
@@ -687,6 +744,27 @@ pub struct MessageCompletedPayload {
     /// Display name for the producing agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Provider/model metadata for this model invocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelInvocationPayload>,
+}
+
+/// Provider/model metadata attached to model-backed events.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ModelInvocationPayload {
+    /// Requested provider/model ID, when supplied by an agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    /// Provider that actually served the request.
+    pub effective_provider: String,
+    /// Model that actually served the request.
+    pub effective_model: String,
+    /// Whether this response came from a fallback provider.
+    #[serde(default)]
+    pub fallback: bool,
+    /// Redacted fallback reason, when fallback occurred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 /// Agent event payload.
@@ -766,6 +844,32 @@ pub struct ModelDescriptor {
     pub display_name: String,
     /// Capability labels.
     pub capabilities: Vec<String>,
+    /// Conservative readiness state for this provider/model entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ModelReadiness>,
+    /// Provider that will actually serve requests when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_provider: Option<String>,
+    /// Model that will actually serve requests when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    /// Whether this entry is a local fallback rather than a real provider.
+    #[serde(default)]
+    pub fallback: bool,
+}
+
+/// Conservative model catalog readiness state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelReadiness {
+    /// Entry is usable without known additional setup.
+    Ready,
+    /// Entry is usable as a local fallback, not a real model provider.
+    Fallback,
+    /// Entry requires daemon, credential, login, or local service setup.
+    RequiresConfiguration,
+    /// Entry is known unavailable in the current daemon configuration.
+    Unavailable,
 }
 
 /// UI preference event payload.
@@ -800,6 +904,12 @@ pub struct ToolEventPayload {
     /// Optional redacted summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Risk class assigned by daemon policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_class: Option<RiskClass>,
+    /// Structured redacted result for completed tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<serde_json::Value>,
 }
 
 /// Tool failure payload.
@@ -811,6 +921,9 @@ pub struct ToolFailedPayload {
     pub tool_name: String,
     /// Redacted error.
     pub error: ErrorPayload,
+    /// Risk class assigned by daemon policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_class: Option<RiskClass>,
 }
 
 /// Approval request payload.
@@ -1034,6 +1147,95 @@ mod tests {
     }
 
     #[test]
+    fn event_subscription_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSubscribe(EventSubscriptionRequest {
+                since_event_id: Some(EventId::from("evt_000007")),
+                replay_limit: Some(32),
+                include_snapshot: true,
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_1",
+                "client_id": "hud_1",
+                "type": "events.subscribe",
+                "payload": {
+                    "since_event_id": "evt_000007",
+                    "replay_limit": 32,
+                    "include_snapshot": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn tool_call_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: Some(SessionId::from("ses_1")),
+                tool_name: "file.read".to_owned(),
+                input: json!({
+                    "workspace": "/home/user/project",
+                    "path": "README.md"
+                }),
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_1",
+                "client_id": "cli_1",
+                "type": "tool.call",
+                "payload": {
+                    "session_id": "ses_1",
+                    "tool_name": "file.read",
+                    "input": {
+                        "workspace": "/home/user/project",
+                        "path": "README.md"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn event_subscription_defaults_include_snapshot() {
+        let value = json!({
+            "protocol_version": CURRENT_PROTOCOL_VERSION,
+            "request_id": "req_1",
+            "client_id": "hud_1",
+            "type": "events.subscribe",
+            "payload": {}
+        });
+
+        let envelope =
+            serde_json::from_value::<RequestEnvelope>(value).expect("request should parse");
+
+        match envelope.request {
+            ClientRequest::EventsSubscribe(payload) => {
+                assert!(payload.include_snapshot);
+                assert_eq!(payload.since_event_id, None);
+                assert_eq!(payload.replay_limit, None);
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+    }
+
+    #[test]
     fn event_envelope_matches_documented_shape() {
         let envelope = EventEnvelope::new(
             EventId::from("evt_1"),
@@ -1045,6 +1247,7 @@ mod tests {
                 content_kind: ContentKind::Chat,
                 agent_id: None,
                 agent_name: None,
+                model: None,
             }),
         );
 
@@ -1157,6 +1360,89 @@ mod tests {
         assert!(
             error.to_string().contains("invalid UTC timestamp"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn model_descriptor_serializes_readiness_metadata() {
+        let descriptor = ModelDescriptor {
+            provider: "echo".to_owned(),
+            model: "cadis-local-fallback".to_owned(),
+            display_name: "CADIS local fallback".to_owned(),
+            capabilities: vec!["offline".to_owned()],
+            readiness: Some(ModelReadiness::Fallback),
+            effective_provider: Some("echo".to_owned()),
+            effective_model: Some("cadis-local-fallback".to_owned()),
+            fallback: true,
+        };
+
+        let value = serde_json::to_value(&descriptor).expect("descriptor should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "provider": "echo",
+                "model": "cadis-local-fallback",
+                "display_name": "CADIS local fallback",
+                "capabilities": ["offline"],
+                "readiness": "fallback",
+                "effective_provider": "echo",
+                "effective_model": "cadis-local-fallback",
+                "fallback": true
+            })
+        );
+    }
+
+    #[test]
+    fn model_descriptor_deserializes_legacy_shape() {
+        let value = json!({
+            "provider": "ollama",
+            "model": "configured",
+            "display_name": "Ollama local model",
+            "capabilities": ["streaming", "local_model"]
+        });
+
+        let descriptor =
+            serde_json::from_value::<ModelDescriptor>(value).expect("legacy shape should parse");
+
+        assert_eq!(descriptor.readiness, None);
+        assert_eq!(descriptor.effective_provider, None);
+        assert_eq!(descriptor.effective_model, None);
+        assert!(!descriptor.fallback);
+    }
+
+    #[test]
+    fn message_completed_serializes_model_invocation_metadata() {
+        let payload = MessageCompletedPayload {
+            content_kind: ContentKind::Chat,
+            content: Some("done".to_owned()),
+            agent_id: Some(AgentId::from("codex")),
+            agent_name: Some("Codex".to_owned()),
+            model: Some(ModelInvocationPayload {
+                requested_model: Some("echo/cadis-local-fallback".to_owned()),
+                effective_provider: "echo".to_owned(),
+                effective_model: "cadis-local-fallback".to_owned(),
+                fallback: false,
+                fallback_reason: None,
+            }),
+        };
+
+        let value = serde_json::to_value(&payload).expect("payload should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "content_kind": "chat",
+                "content": "done",
+                "agent_id": "codex",
+                "agent_name": "Codex",
+                "model": {
+                    "requested_model": "echo/cadis-local-fallback",
+                    "effective_provider": "echo",
+                    "effective_model": "cadis-local-fallback",
+                    "fallback": false
+                }
+            })
         );
     }
 }

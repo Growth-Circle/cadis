@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 
 const CODEX_CLI_DEFAULT_BIN: &str = "codex";
 const CODEX_CLI_TIMEOUT: Duration = Duration::from_secs(300);
+const CONFIGURED_MODEL: &str = "configured";
+const ECHO_MODEL: &str = "cadis-local-fallback";
+const CODEX_CLI_PLAN_MODEL: &str = "chatgpt-plan";
 
 /// Streaming-oriented model provider interface used by the runtime.
 pub trait ModelProvider: Send + Sync {
@@ -20,25 +23,185 @@ pub trait ModelProvider: Send + Sync {
 
     /// Returns model output split into display deltas.
     fn chat(&self, prompt: &str) -> Result<Vec<String>, ModelError>;
+
+    /// Returns model output plus normalized provider/model invocation metadata.
+    fn chat_with_request(&self, request: ModelRequest<'_>) -> Result<ModelResponse, ModelError> {
+        let deltas = self.chat(request.prompt)?;
+        Ok(ModelResponse {
+            deltas,
+            invocation: ModelInvocation {
+                requested_model: request.selected_model.map(ToOwned::to_owned),
+                effective_provider: self.name().to_owned(),
+                effective_model: request
+                    .selected_model
+                    .unwrap_or(CONFIGURED_MODEL)
+                    .to_owned(),
+                fallback: false,
+                fallback_reason: None,
+            },
+        })
+    }
+
+    /// Streams normalized provider events. Providers without native streaming use chunk simulation.
+    fn stream_chat(
+        &self,
+        request: ModelRequest<'_>,
+        callback: &mut ModelStreamCallback<'_>,
+    ) -> Result<ModelResponse, ModelError> {
+        match self.chat_with_request(request) {
+            Ok(response) => {
+                callback(ModelStreamEvent::Started(response.invocation.clone()))?;
+                for delta in &response.deltas {
+                    callback(ModelStreamEvent::Delta(delta.clone()))?;
+                }
+                callback(ModelStreamEvent::Completed(response.invocation.clone()))?;
+                Ok(response)
+            }
+            Err(error) => {
+                callback(ModelStreamEvent::Failed(ModelFailure {
+                    code: error.code.clone(),
+                    message: error.message.clone(),
+                    retryable: error.retryable,
+                    invocation: error.invocation.as_deref().cloned(),
+                }))?;
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Callback used by providers to stream normalized model events.
+pub type ModelStreamCallback<'a> = dyn FnMut(ModelStreamEvent) -> Result<(), ModelError> + 'a;
+
+/// Model request context supplied by the runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModelRequest<'a> {
+    /// Prompt text sent to the selected provider.
+    pub prompt: &'a str,
+    /// Optional provider/model ID selected on the routed agent.
+    pub selected_model: Option<&'a str>,
+}
+
+impl<'a> ModelRequest<'a> {
+    /// Creates a model request without an explicit selected model.
+    pub fn new(prompt: &'a str) -> Self {
+        Self {
+            prompt,
+            selected_model: None,
+        }
+    }
+
+    /// Adds an optional selected model ID.
+    pub fn with_selected_model(mut self, selected_model: Option<&'a str>) -> Self {
+        self.selected_model = selected_model;
+        self
+    }
+}
+
+/// Normalized provider/model invocation metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelInvocation {
+    /// Requested provider/model ID, when supplied by an agent.
+    pub requested_model: Option<String>,
+    /// Provider that actually served the request.
+    pub effective_provider: String,
+    /// Model that actually served the request.
+    pub effective_model: String,
+    /// Whether the response came from a fallback provider.
+    pub fallback: bool,
+    /// Redacted fallback reason, when fallback occurred.
+    pub fallback_reason: Option<String>,
+}
+
+/// Completed model response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelResponse {
+    /// Display deltas in order.
+    pub deltas: Vec<String>,
+    /// Provider/model metadata for this response.
+    pub invocation: ModelInvocation,
+}
+
+/// Normalized streaming event emitted by model providers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelStreamEvent {
+    /// Provider invocation started.
+    Started(ModelInvocation),
+    /// Provider emitted a text delta.
+    Delta(String),
+    /// Provider invocation completed.
+    Completed(ModelInvocation),
+    /// Provider invocation failed.
+    Failed(ModelFailure),
+}
+
+/// Structured model failure metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelFailure {
+    /// Stable error code.
+    pub code: String,
+    /// Redacted human-readable message.
+    pub message: String,
+    /// Whether retrying may help.
+    pub retryable: bool,
+    /// Provider/model metadata when resolution happened before failure.
+    pub invocation: Option<ModelInvocation>,
 }
 
 /// Model provider error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelError {
+    code: String,
     message: String,
+    retryable: bool,
+    invocation: Option<Box<ModelInvocation>>,
 }
 
 impl ModelError {
     /// Creates a redaction-ready provider error.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
+            code: "model_error".to_owned(),
             message: message.into(),
+            retryable: true,
+            invocation: None,
         }
+    }
+
+    /// Creates a structured provider error.
+    pub fn with_code(code: impl Into<String>, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retryable,
+            invocation: None,
+        }
+    }
+
+    /// Attaches provider/model invocation metadata.
+    pub fn with_invocation(mut self, invocation: ModelInvocation) -> Self {
+        self.invocation = Some(Box::new(invocation));
+        self
+    }
+
+    /// Returns the stable error code.
+    pub fn code(&self) -> &str {
+        &self.code
     }
 
     /// Returns the error message.
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Returns whether retrying may help.
+    pub fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    /// Returns provider/model invocation metadata when available.
+    pub fn invocation(&self) -> Option<&ModelInvocation> {
+        self.invocation.as_deref()
     }
 }
 
@@ -49,6 +212,100 @@ impl fmt::Display for ModelError {
 }
 
 impl Error for ModelError {}
+
+/// Conservative provider readiness exposed by the model catalog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderReadiness {
+    /// Provider is expected to be usable without known additional setup.
+    Ready,
+    /// Provider entry is a local fallback rather than a real model provider.
+    Fallback,
+    /// Provider requires credentials, login, or a local service.
+    RequiresConfiguration,
+    /// Provider is known unavailable.
+    Unavailable,
+}
+
+/// Metadata for one model catalog entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderCatalogEntry {
+    /// Provider name clients can select.
+    pub provider: String,
+    /// Model identifier clients can select.
+    pub model: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Capability labels.
+    pub capabilities: Vec<String>,
+    /// Conservative readiness state.
+    pub readiness: ProviderReadiness,
+    /// Provider expected to serve requests for this entry.
+    pub effective_provider: String,
+    /// Model expected to serve requests for this entry.
+    pub effective_model: String,
+    /// Whether this entry is a local fallback rather than a real provider.
+    pub fallback: bool,
+}
+
+/// Returns the conservative built-in provider catalog.
+pub fn provider_catalog() -> Vec<ProviderCatalogEntry> {
+    vec![
+        ProviderCatalogEntry {
+            provider: "auto".to_owned(),
+            model: "ollama-or-echo".to_owned(),
+            display_name: "Auto (Ollama, then local fallback)".to_owned(),
+            capabilities: vec!["streaming".to_owned(), "local_fallback".to_owned()],
+            readiness: ProviderReadiness::Fallback,
+            effective_provider: "ollama".to_owned(),
+            effective_model: "configured".to_owned(),
+            fallback: true,
+        },
+        ProviderCatalogEntry {
+            provider: "ollama".to_owned(),
+            model: "configured".to_owned(),
+            display_name: "Ollama local model".to_owned(),
+            capabilities: vec!["streaming".to_owned(), "local_model".to_owned()],
+            readiness: ProviderReadiness::RequiresConfiguration,
+            effective_provider: "ollama".to_owned(),
+            effective_model: "configured".to_owned(),
+            fallback: false,
+        },
+        ProviderCatalogEntry {
+            provider: "codex-cli".to_owned(),
+            model: "chatgpt-plan".to_owned(),
+            display_name: "Codex CLI (ChatGPT Plus/Pro login)".to_owned(),
+            capabilities: vec![
+                "codex_cli".to_owned(),
+                "chatgpt_login".to_owned(),
+                "read_only_sandbox".to_owned(),
+            ],
+            readiness: ProviderReadiness::RequiresConfiguration,
+            effective_provider: "codex-cli".to_owned(),
+            effective_model: "chatgpt-plan".to_owned(),
+            fallback: false,
+        },
+        ProviderCatalogEntry {
+            provider: "openai".to_owned(),
+            model: "configured".to_owned(),
+            display_name: "OpenAI API model".to_owned(),
+            capabilities: vec!["api_key".to_owned()],
+            readiness: ProviderReadiness::RequiresConfiguration,
+            effective_provider: "openai".to_owned(),
+            effective_model: "configured".to_owned(),
+            fallback: false,
+        },
+        ProviderCatalogEntry {
+            provider: "echo".to_owned(),
+            model: "cadis-local-fallback".to_owned(),
+            display_name: "CADIS local fallback".to_owned(),
+            capabilities: vec!["offline".to_owned()],
+            readiness: ProviderReadiness::Fallback,
+            effective_provider: "echo".to_owned(),
+            effective_model: "cadis-local-fallback".to_owned(),
+            fallback: true,
+        },
+    ]
+}
 
 /// Local provider that requires no network or credentials.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -64,6 +321,19 @@ impl ModelProvider for EchoProvider {
             "CADIS runtime is online. I received: {prompt}\n\nConfigure Ollama in ~/.cadis/config.toml to use a local model for real assistant responses."
         );
         Ok(chunk_text(&response))
+    }
+
+    fn chat_with_request(&self, request: ModelRequest<'_>) -> Result<ModelResponse, ModelError> {
+        Ok(ModelResponse {
+            deltas: self.chat(request.prompt)?,
+            invocation: ModelInvocation {
+                requested_model: request.selected_model.map(ToOwned::to_owned),
+                effective_provider: "echo".to_owned(),
+                effective_model: ECHO_MODEL.to_owned(),
+                fallback: false,
+                fallback_reason: None,
+            },
+        })
     }
 }
 
@@ -121,6 +391,22 @@ impl ModelProvider for OllamaProvider {
         }
 
         Ok(chunk_text(body.response.as_deref().unwrap_or_default()))
+    }
+
+    fn chat_with_request(&self, request: ModelRequest<'_>) -> Result<ModelResponse, ModelError> {
+        let invocation = ModelInvocation {
+            requested_model: request.selected_model.map(ToOwned::to_owned),
+            effective_provider: "ollama".to_owned(),
+            effective_model: self.model.clone(),
+            fallback: false,
+            fallback_reason: None,
+        };
+        self.chat(request.prompt)
+            .map(|deltas| ModelResponse {
+                deltas,
+                invocation: invocation.clone(),
+            })
+            .map_err(|error| error.with_invocation(invocation))
     }
 }
 
@@ -209,6 +495,22 @@ impl ModelProvider for OpenAiProvider {
 
         Ok(chunk_text(content))
     }
+
+    fn chat_with_request(&self, request: ModelRequest<'_>) -> Result<ModelResponse, ModelError> {
+        let invocation = ModelInvocation {
+            requested_model: request.selected_model.map(ToOwned::to_owned),
+            effective_provider: "openai".to_owned(),
+            effective_model: self.model.clone(),
+            fallback: false,
+            fallback_reason: None,
+        };
+        self.chat(request.prompt)
+            .map(|deltas| ModelResponse {
+                deltas,
+                invocation: invocation.clone(),
+            })
+            .map_err(|error| error.with_invocation(invocation))
+    }
 }
 
 /// Provider backed by the official Codex CLI.
@@ -221,10 +523,26 @@ pub struct CodexCliProvider {
 impl CodexCliProvider {
     /// Creates a Codex CLI provider from CADIS environment overrides.
     pub fn from_env() -> Result<Self, ModelError> {
+        Self::from_env_with_model(None)
+    }
+
+    /// Creates a Codex CLI provider with an optional per-request model override.
+    pub fn from_env_with_model(model_override: Option<&str>) -> Result<Self, ModelError> {
+        let mut command = CodexCliCommand::from_env()?;
+        if let Some(model) = normalize_optional_model(model_override) {
+            command.model = Some(model);
+        }
         Ok(Self {
-            command: CodexCliCommand::from_env()?,
+            command,
             timeout: CODEX_CLI_TIMEOUT,
         })
+    }
+
+    fn effective_model(&self) -> String {
+        self.command
+            .model
+            .clone()
+            .unwrap_or_else(|| CODEX_CLI_PLAN_MODEL.to_owned())
     }
 }
 
@@ -240,6 +558,22 @@ impl ModelProvider for CodexCliProvider {
         }
 
         Ok(chunk_text(output.stdout.trim()))
+    }
+
+    fn chat_with_request(&self, request: ModelRequest<'_>) -> Result<ModelResponse, ModelError> {
+        let invocation = ModelInvocation {
+            requested_model: request.selected_model.map(ToOwned::to_owned),
+            effective_provider: "codex-cli".to_owned(),
+            effective_model: self.effective_model(),
+            fallback: false,
+            fallback_reason: None,
+        };
+        self.chat(request.prompt)
+            .map(|deltas| ModelResponse {
+                deltas,
+                invocation: invocation.clone(),
+            })
+            .map_err(|error| error.with_invocation(invocation))
     }
 }
 
@@ -499,13 +833,38 @@ impl ModelProvider for AutoProvider {
     }
 
     fn chat(&self, prompt: &str) -> Result<Vec<String>, ModelError> {
-        match self.ollama.chat(prompt) {
-            Ok(deltas) => Ok(deltas),
+        Ok(self.chat_with_request(ModelRequest::new(prompt))?.deltas)
+    }
+
+    fn chat_with_request(&self, request: ModelRequest<'_>) -> Result<ModelResponse, ModelError> {
+        let requested_model = request.selected_model.map(ToOwned::to_owned);
+        let primary_invocation = ModelInvocation {
+            requested_model: requested_model.clone(),
+            effective_provider: "ollama".to_owned(),
+            effective_model: self.ollama.model.clone(),
+            fallback: false,
+            fallback_reason: None,
+        };
+        match self.ollama.chat(request.prompt) {
+            Ok(deltas) => Ok(ModelResponse {
+                deltas,
+                invocation: primary_invocation,
+            }),
             Err(error) => {
                 let response = format!(
-                    "CADIS runtime is online, but Ollama is not ready ({error}).\n\nI received: {prompt}\n\nStart Ollama or set [model].provider = \"echo\" in ~/.cadis/config.toml for an explicit local fallback."
+                    "CADIS runtime is online, but Ollama is not ready ({error}).\n\nI received: {}\n\nStart Ollama or set [model].provider = \"echo\" in ~/.cadis/config.toml for an explicit local fallback.",
+                    request.prompt
                 );
-                Ok(chunk_text(&response))
+                Ok(ModelResponse {
+                    deltas: chunk_text(&response),
+                    invocation: ModelInvocation {
+                        requested_model,
+                        effective_provider: "echo".to_owned(),
+                        effective_model: ECHO_MODEL.to_owned(),
+                        fallback: true,
+                        fallback_reason: Some(format!("ollama unavailable: {error}")),
+                    },
+                })
             }
         }
     }
@@ -520,48 +879,232 @@ pub fn provider_from_config(
     openai_model: &str,
     openai_api_key: Option<&str>,
 ) -> Box<dyn ModelProvider> {
-    match provider {
-        "ollama" => Box::new(OllamaProvider::new(ollama_endpoint, ollama_model)),
-        "openai" => match openai_api_key {
-            Some(api_key) => Box::new(OpenAiProvider::new(
-                openai_base_url,
-                openai_model,
-                api_key.to_owned(),
-            )),
-            None => Box::new(MissingOpenAiKeyProvider),
-        },
-        "codex" | "codex-cli" => match CodexCliProvider::from_env() {
-            Ok(provider) => Box::new(provider),
-            Err(error) => Box::new(ErrorProvider::new("codex-cli", error)),
-        },
-        "echo" | "dev-echo" => Box::<EchoProvider>::default(),
-        _ => Box::new(AutoProvider::new(ollama_endpoint, ollama_model)),
+    Box::new(RoutingModelProvider::new(ModelRouterConfig {
+        default_provider: normalize_provider_id(provider).to_owned(),
+        ollama_endpoint: ollama_endpoint.to_owned(),
+        ollama_model: ollama_model.to_owned(),
+        openai_base_url: openai_base_url.to_owned(),
+        openai_model: openai_model.to_owned(),
+        openai_api_key: openai_api_key.map(ToOwned::to_owned),
+    }))
+}
+
+/// Provider router backed by the configured built-in providers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoutingModelProvider {
+    config: ModelRouterConfig,
+}
+
+impl RoutingModelProvider {
+    /// Creates a provider router.
+    pub fn new(config: ModelRouterConfig) -> Self {
+        Self { config }
+    }
+
+    fn selection(&self, selected_model: Option<&str>) -> ModelSelection {
+        ModelSelection::parse(selected_model, &self.config.default_provider)
+    }
+
+    fn unsupported_provider_error(&self, selection: &ModelSelection) -> ModelError {
+        let requested = selection.requested_model.clone();
+        ModelError::with_code(
+            "unsupported_model_provider",
+            format!(
+                "model provider '{}' is not supported by this CADIS build",
+                selection.provider
+            ),
+            false,
+        )
+        .with_invocation(ModelInvocation {
+            requested_model: requested,
+            effective_provider: self.config.default_provider.clone(),
+            effective_model: CONFIGURED_MODEL.to_owned(),
+            fallback: false,
+            fallback_reason: None,
+        })
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ErrorProvider {
-    name: String,
-    error: ModelError,
-}
+impl ModelProvider for RoutingModelProvider {
+    fn name(&self) -> &str {
+        &self.config.default_provider
+    }
 
-impl ErrorProvider {
-    fn new(name: impl Into<String>, error: ModelError) -> Self {
-        Self {
-            name: name.into(),
-            error,
+    fn chat(&self, prompt: &str) -> Result<Vec<String>, ModelError> {
+        Ok(self.chat_with_request(ModelRequest::new(prompt))?.deltas)
+    }
+
+    fn chat_with_request(&self, request: ModelRequest<'_>) -> Result<ModelResponse, ModelError> {
+        let selection = self.selection(request.selected_model);
+        let model_request = ModelRequest::new(request.prompt)
+            .with_selected_model(selection.requested_model.as_deref());
+
+        match selection.provider.as_str() {
+            "auto" => {
+                let model = selection
+                    .model
+                    .as_deref()
+                    .unwrap_or(&self.config.ollama_model);
+                AutoProvider::new(&self.config.ollama_endpoint, model).chat_with_request(
+                    model_request.with_selected_model(selection.requested_model.as_deref()),
+                )
+            }
+            "ollama" => {
+                let model = selection
+                    .model
+                    .as_deref()
+                    .unwrap_or(&self.config.ollama_model);
+                OllamaProvider::new(&self.config.ollama_endpoint, model)
+                    .chat_with_request(model_request)
+            }
+            "openai" => {
+                let model = selection
+                    .model
+                    .as_deref()
+                    .unwrap_or(&self.config.openai_model);
+                match self.config.openai_api_key.as_deref() {
+                    Some(api_key) => {
+                        OpenAiProvider::new(&self.config.openai_base_url, model, api_key)
+                            .chat_with_request(model_request)
+                    }
+                    None => missing_openai_key_response(model_request, model),
+                }
+            }
+            "codex-cli" => {
+                match CodexCliProvider::from_env_with_model(selection.model.as_deref()) {
+                    Ok(provider) => provider.chat_with_request(model_request),
+                    Err(error) => Err(error.with_invocation(ModelInvocation {
+                        requested_model: selection.requested_model,
+                        effective_provider: "codex-cli".to_owned(),
+                        effective_model: selection
+                            .model
+                            .unwrap_or_else(|| CODEX_CLI_PLAN_MODEL.to_owned()),
+                        fallback: false,
+                        fallback_reason: None,
+                    })),
+                }
+            }
+            "echo" => EchoProvider.chat_with_request(model_request),
+            _ => Err(self.unsupported_provider_error(&selection)),
         }
     }
 }
 
-impl ModelProvider for ErrorProvider {
-    fn name(&self) -> &str {
-        &self.name
-    }
+/// Configuration used by the provider router.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelRouterConfig {
+    /// Default provider from `[model].provider`.
+    pub default_provider: String,
+    /// Ollama HTTP endpoint.
+    pub ollama_endpoint: String,
+    /// Default Ollama model.
+    pub ollama_model: String,
+    /// OpenAI-compatible API base URL.
+    pub openai_base_url: String,
+    /// Default OpenAI model.
+    pub openai_model: String,
+    /// Optional OpenAI API key from the environment.
+    pub openai_api_key: Option<String>,
+}
 
-    fn chat(&self, _prompt: &str) -> Result<Vec<String>, ModelError> {
-        Err(self.error.clone())
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ModelSelection {
+    requested_model: Option<String>,
+    provider: String,
+    model: Option<String>,
+}
+
+impl ModelSelection {
+    fn parse(selected_model: Option<&str>, default_provider: &str) -> Self {
+        let default_provider = normalize_provider_id(default_provider).to_owned();
+        let requested_model = selected_model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+
+        let Some(requested) = requested_model.clone() else {
+            return Self {
+                requested_model,
+                provider: default_provider,
+                model: None,
+            };
+        };
+        let requested = requested.as_str();
+
+        if let Some((provider, model)) = requested
+            .split_once('/')
+            .or_else(|| requested.split_once(':'))
+        {
+            return Self {
+                requested_model,
+                provider: normalize_provider_id(provider).to_owned(),
+                model: normalize_optional_model(Some(model)),
+            };
+        }
+
+        let normalized = normalize_provider_id(requested);
+        if is_known_provider(normalized) {
+            return Self {
+                requested_model,
+                provider: normalized.to_owned(),
+                model: None,
+            };
+        }
+
+        Self {
+            requested_model,
+            provider: default_provider,
+            model: normalize_optional_model(Some(requested)),
+        }
     }
+}
+
+fn missing_openai_key_response(
+    request: ModelRequest<'_>,
+    effective_model: &str,
+) -> Result<ModelResponse, ModelError> {
+    let invocation = ModelInvocation {
+        requested_model: request.selected_model.map(ToOwned::to_owned),
+        effective_provider: "openai".to_owned(),
+        effective_model: effective_model.to_owned(),
+        fallback: false,
+        fallback_reason: None,
+    };
+    Err(ModelError::with_code(
+        "model_auth_missing",
+        "OpenAI provider requires OPENAI_API_KEY or CADIS_OPENAI_API_KEY",
+        false,
+    )
+    .with_invocation(invocation))
+}
+
+fn normalize_provider_id(provider: &str) -> &str {
+    match provider.trim() {
+        "codex" => "codex-cli",
+        "dev-echo" => "echo",
+        "" => "auto",
+        value => value,
+    }
+}
+
+fn is_known_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "auto" | "ollama" | "openai" | "codex-cli" | "echo"
+    )
+}
+
+fn normalize_optional_model(model: Option<&str>) -> Option<String> {
+    model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| {
+            !matches!(
+                *value,
+                CONFIGURED_MODEL | ECHO_MODEL | CODEX_CLI_PLAN_MODEL | "default"
+            )
+        })
+        .map(ToOwned::to_owned)
 }
 
 fn chunk_text(text: &str) -> Vec<String> {
@@ -626,21 +1169,6 @@ struct OpenAiResponseMessage {
     content: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct MissingOpenAiKeyProvider;
-
-impl ModelProvider for MissingOpenAiKeyProvider {
-    fn name(&self) -> &str {
-        "openai"
-    }
-
-    fn chat(&self, _prompt: &str) -> Result<Vec<String>, ModelError> {
-        Err(ModelError::new(
-            "OpenAI provider requires OPENAI_API_KEY or CADIS_OPENAI_API_KEY",
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,6 +1179,26 @@ mod tests {
 
         assert!(!deltas.is_empty());
         assert!(deltas.join("").contains("hello"));
+    }
+
+    #[test]
+    fn provider_catalog_marks_fallback_entries() {
+        let catalog = provider_catalog();
+
+        let echo = catalog
+            .iter()
+            .find(|entry| entry.provider == "echo")
+            .expect("echo fallback should be listed");
+        assert_eq!(echo.readiness, ProviderReadiness::Fallback);
+        assert!(echo.fallback);
+        assert_eq!(echo.effective_provider, "echo");
+
+        let ollama = catalog
+            .iter()
+            .find(|entry| entry.provider == "ollama")
+            .expect("ollama should be listed");
+        assert_eq!(ollama.readiness, ProviderReadiness::RequiresConfiguration);
+        assert!(!ollama.fallback);
     }
 
     #[test]
@@ -672,10 +1220,78 @@ mod tests {
         );
 
         assert_eq!(provider.name(), "openai");
+        let error = provider.chat("hello").expect_err("missing key should fail");
+        assert_eq!(error.code(), "model_auth_missing");
         assert_eq!(
-            provider.chat("hello").expect_err("missing key should fail"),
-            ModelError::new("OpenAI provider requires OPENAI_API_KEY or CADIS_OPENAI_API_KEY")
+            error.message(),
+            "OpenAI provider requires OPENAI_API_KEY or CADIS_OPENAI_API_KEY"
         );
+        assert_eq!(
+            error
+                .invocation()
+                .map(|invocation| invocation.effective_provider.as_str()),
+            Some("openai")
+        );
+    }
+
+    #[test]
+    fn router_uses_per_agent_echo_model_selection() {
+        let provider = provider_from_config(
+            "openai",
+            "http://127.0.0.1:11434",
+            "llama3.2",
+            "https://api.openai.com/v1",
+            "gpt-5.2",
+            None,
+        );
+
+        let response = provider
+            .chat_with_request(
+                ModelRequest::new("hello").with_selected_model(Some("echo/cadis-local-fallback")),
+            )
+            .expect("echo selection should not require OpenAI credentials");
+
+        assert_eq!(
+            response.invocation.requested_model.as_deref(),
+            Some("echo/cadis-local-fallback")
+        );
+        assert_eq!(response.invocation.effective_provider, "echo");
+        assert_eq!(response.invocation.effective_model, ECHO_MODEL);
+        assert!(response.deltas.join("").contains("hello"));
+    }
+
+    #[test]
+    fn simulated_stream_emits_ordered_delta_callbacks() {
+        let provider = provider_from_config(
+            "echo",
+            "http://127.0.0.1:11434",
+            "llama3.2",
+            "https://api.openai.com/v1",
+            "gpt-5.2",
+            None,
+        );
+        let mut events = Vec::new();
+
+        let response = provider
+            .stream_chat(ModelRequest::new("stream please"), &mut |event| {
+                events.push(event);
+                Ok(())
+            })
+            .expect("echo stream should succeed");
+
+        assert!(matches!(events.first(), Some(ModelStreamEvent::Started(_))));
+        assert!(matches!(
+            events.last(),
+            Some(ModelStreamEvent::Completed(_))
+        ));
+        let streamed = events
+            .into_iter()
+            .filter_map(|event| match event {
+                ModelStreamEvent::Delta(delta) => Some(delta),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed, response.deltas.join(""));
     }
 
     #[test]

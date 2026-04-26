@@ -47,6 +47,7 @@ Use for:
 - tool registry contract
 - local protocol compatibility
 - event schema compatibility
+- renderer-neutral avatar frame compatibility
 
 ### End-to-End Tests
 
@@ -58,6 +59,8 @@ Use for:
 - request tool
 - approve tool
 - persist log
+- launch HUD against daemon protocol mock or local socket
+- verify HUD settings remain daemon-backed
 
 ## 3. Security Test Matrix
 
@@ -101,6 +104,11 @@ Performance tests should run locally first and become CI benchmarks later only i
 - CLI chat with mock provider
 - JSONL log write
 - redaction
+- HUD frontend lint, typecheck, unit tests, build, and Tauri crate check
+- HUD voice doctor preflight can report missing `whisper-cli`, missing model,
+  blocked mic, Node helper, and audio player states without secrets
+- `cadis-avatar` unit tests cover mode-to-gesture mapping, face-tracking privacy,
+  reduced-motion behavior, and renderer frame shape
 
 ### v0.2
 
@@ -129,3 +137,17 @@ Performance tests should run locally first and become CI benchmarks later only i
 - Telegram approval resolution
 - voice content routing
 
+## 7. CI Coverage
+
+CI must keep the desktop HUD and Rust daemon paths separate enough that a
+frontend dependency failure is visible:
+
+- repository hygiene checks required public files
+- Rust checks run `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`
+- native avatar checks are covered by workspace Rust checks; `cargo test -p cadis-avatar` is the focused local check for avatar-only changes
+- HUD checks run from `apps/cadis-hud` with pnpm: `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build`
+- HUD native shell check runs `cargo check --manifest-path apps/cadis-hud/src-tauri/Cargo.toml --locked`
+- browser preview and Playwright E2E are local or later-stage checks until stable enough for required CI
+- current orchestrator coverage should include route events, agent status events,
+  request-driven spawn limits, and the fact that live `session.subscribe`
+  fan-out is not implemented yet

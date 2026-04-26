@@ -17,6 +17,7 @@ log_level = "info"
 # Use "openai" with OPENAI_API_KEY or CADIS_OPENAI_API_KEY for OpenAI.
 # Use "codex-cli" after authenticating the official Codex CLI with `codex login`.
 # Use "ollama" to require Ollama, or "echo" for explicit local fallback.
+# Agent model selections may use "provider/model", for example "ollama/llama3.2".
 provider = "auto"
 ollama_model = "llama3.2"
 ollama_endpoint = "http://127.0.0.1:11434"
@@ -36,3 +37,14 @@ rate = 0
 pitch = 0
 volume = 0
 auto_speak = false
+
+[agent_spawn]
+# Applies to client-requested agent.spawn and explicit orchestrator /worker actions.
+max_depth = 2
+max_children_per_parent = 4
+max_total_agents = 32
+
+[orchestrator]
+# Enables explicit /worker, /spawn, /route, and /delegate message actions.
+worker_delegation_enabled = true
+default_worker_role = "Worker"

@@ -86,6 +86,44 @@ working
 waiting
 ```
 
+## 5.1 Wulan Avatar Engine
+
+The default center avatar remains the CADIS orb. Wulan is an optional avatar
+style and must follow `docs/26_WULAN_AVATAR_ENGINE.md`.
+
+Rules:
+
+- Wulan avatar selection must be daemon-backed through `hud.avatar_style`.
+- The current Three.js Wulan Arc implementation is a HUD prototype and migration
+  reference, not the long-term native engine boundary.
+- `crates/cadis-avatar` owns the renderer-independent state engine and exposes
+  `AvatarFrame`, `BodyGestureState`, `AvatarPrivacy`, and direct-wgpu uniform
+  contract data without depending on `wgpu` or Bevy.
+- The preferred native renderer is a focused Rust/wgpu engine. The renderer
+  adapter should consume `WgpuAvatarUniforms` and `WgpuRendererContract`
+  directly once the heavy renderer dependency is introduced.
+- Bevy remains optional and deferred behind the future `bevy-renderer` feature
+  unless CADIS accepts a broader 3D scene engine.
+- Wulan must render from daemon-derived HUD state and disposable renderer state;
+  it must not own sessions, agents, models, tools, policy, approvals, voice, or
+  memory.
+- Wulan must provide scripted body gestures for idle, listening, thinking,
+  speaking, coding, approval, and error states.
+- Body gestures must carry priority metadata so safety and approval states can
+  interrupt decorative animation.
+- Reduced-motion mode must disable large body gestures and preserve readable
+  state with minimal color, opacity, or mouth/reticle changes.
+- Renderer failure must fall back to the CADIS orb without blocking the HUD.
+
+Optional face tracking:
+
+- off by default
+- explicit permission required before camera access
+- local-only processing
+- visible camera-active indicator
+- no persisted frames, landmarks, embeddings, or biometric templates
+- graceful fallback to scripted gestures when unavailable or denied
+
 ## 6. Status Bar
 
 The status bar must show:

@@ -73,6 +73,8 @@ Minimum checks before any release:
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 - `cargo test`
+- `cd apps/cadis-hud && pnpm lint && pnpm typecheck && pnpm test && pnpm build`
+- `cargo check --manifest-path apps/cadis-hud/src-tauri/Cargo.toml --locked`
 - docs link/path spot check
 - license audit
 - changelog review
@@ -94,6 +96,7 @@ Additional checks before releases that include clients:
 - no duplicated tool or approval authority in clients
 - visible status for long-running operations
 - voice output avoids long code, diffs, logs, and test output
+- HUD artifacts are built from `apps/cadis-hud` with the pinned pnpm version and do not include local `.env`, auth JSON, logs, sockets, traces, or crash dumps
 
 ## Release Procedure
 
@@ -103,10 +106,11 @@ Additional checks before releases that include clients:
 4. Update `CHANGELOG.md`.
 5. Update installation, configuration, and known limitation docs.
 6. Confirm `NOTICE` and dependency license status.
-7. Create the release tag.
-8. Publish artifacts through the release workflow.
-9. Publish release notes with limitations and upgrade guidance.
-10. Monitor issue reports after release.
+7. Confirm generated artifacts are reproducible and local credential files are excluded.
+8. Create the release tag.
+9. Publish artifacts through the release workflow.
+10. Publish release notes with limitations and upgrade guidance.
+11. Monitor issue reports after release.
 
 ## Release Notes Requirements
 

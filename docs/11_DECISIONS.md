@@ -208,6 +208,41 @@ Consequence:
 - Contributors should keep future avatar variants as optional HUD assets and
   avoid moving browser/WebGL dependencies into `cadisd`.
 
+### ADR-014: Build Wulan as a CADIS-native avatar engine
+
+Status: Accepted.
+
+Decision: CADIS will treat the current Three.js Wulan Arc avatar as a prototype
+and design the long-term Wulan avatar as a native Rust rendering capability,
+preferably a focused `wgpu` renderer rather than Bevy for the first production
+path.
+
+Reason:
+
+- The avatar should remain local-first, fast, and daemon-driven without making
+  browser WebGL the permanent animation boundary.
+- Wulan's initial visual needs are narrow: portrait compositing, hologram
+  shader, particles, reticles, eye/mouth overlays, body gestures, and
+  state-driven transitions.
+- A focused `wgpu` layer gives CADIS direct control over frame budget,
+  deterministic fixtures, fallback behavior, and dependency surface.
+- Bevy is better reserved for a future decision if CADIS needs a broader 3D
+  scene engine, skeletal rigs, physics-like interaction, or a game-style ECS.
+
+Consequence:
+
+- `docs/26_WULAN_AVATAR_ENGINE.md` is the canonical Wulan native-engine plan.
+- `crates/cadis-avatar` owns the renderer-independent state engine, body
+  gesture state model, local-only face tracking privacy config, and
+  dependency-free direct-wgpu contract.
+- The Tauri/React/Three.js Wulan Arc path remains a lazy-loaded HUD prototype
+  until native parity is demonstrated.
+- No heavy `wgpu` or Bevy dependency is wired into the state crate yet.
+- Face tracking is optional, off by default, local-only, and requires explicit
+  permission plus visible camera-active UI.
+- Avatar state and preferences remain daemon-owned protocol state; renderer
+  animation state remains disposable HUD state.
+
 ## Pending Decisions
 
 ### ADR-P001: First model provider

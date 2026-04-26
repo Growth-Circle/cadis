@@ -55,7 +55,9 @@ export function ChatPanel() {
   const [listening, setListening] = useState(false);
   const [partial, setPartial] = useState("");
   const [audioLevel, setAudioLevel] = useState(0);
+  const [audioSamples, setAudioSamples] = useState<number[]>([]);
   const [micDebugOpen, setMicDebugOpen] = useState(false);
+  const [micDebugCapture, setMicDebugCapture] = useState(false);
   const [micDebug, setMicDebug] = useState<SttDebugSnapshot>(() => emptyMicDebug());
   const sttRef = useRef<SttSession | null>(null);
   const voiceSubmittedRef = useRef(false);
@@ -206,15 +208,21 @@ export function ChatPanel() {
     return v?.locale ?? "en-US";
   })();
 
-  const toggleMic = async () => {
+  const stopMicCapture = () => {
+    sttRef.current?.stop();
+    sttRef.current = null;
+    voiceSubmittedRef.current = false;
+    setListening(false);
+    setMicDebugCapture(false);
+    setVoiceState("idle");
+    setPartial("");
+    setAudioLevel(0);
+    setAudioSamples([]);
+  };
+
+  const beginMicCapture = async (debugOnly: boolean) => {
     if (listening) {
-      sttRef.current?.stop();
-      sttRef.current = null;
-      voiceSubmittedRef.current = false;
-      setListening(false);
-      setVoiceState("idle");
-      setPartial("");
-      setAudioLevel(0);
+      stopMicCapture();
       return;
     }
     if (!sttAvailable()) {
@@ -229,27 +237,57 @@ export function ChatPanel() {
     await stopSpeaking();
     setVoiceState("listening");
     setListening(true);
+    setMicDebugCapture(debugOnly);
     setAudioLevel(0);
+    setAudioSamples([]);
+    setMicDebugOpen((open) => open || debugOnly);
     setMicDebug(emptyMicDebug(sttLang));
     voiceSubmittedRef.current = false;
     sttRef.current = startListening(sttLang, {
       onDebug: setMicDebug,
-      onLevel: ({ level }) => setAudioLevel(level),
+      onLevel: ({ level, samples }) => {
+        setAudioLevel(level);
+        setAudioSamples(samples);
+      },
       onPartial: setPartial,
       onFinal: (t) => {
         setPartial("");
         setAudioLevel(0);
+        setAudioSamples([]);
         setListening(false);
+        setMicDebugCapture(false);
         sttRef.current = null;
         voiceSubmittedRef.current = true;
         submitText(t);
       },
+      onEmpty: ({ message, audioHeard }) => {
+        setPartial("");
+        setAudioLevel(0);
+        setAudioSamples([]);
+        setListening(false);
+        setMicDebugCapture(false);
+        sttRef.current = null;
+        voiceSubmittedRef.current = false;
+        setVoiceState("idle");
+        if (audioHeard || debugOnly) setMicDebugOpen(true);
+        if (!debugOnly || !audioHeard) {
+          push({
+            id: `m-${Date.now()}-stt-empty`,
+            who: "system",
+            text: debugOnly ? `(mic debug: ${message})` : `(stt status: ${message})`,
+            ts: Date.now(),
+          });
+        }
+      },
       onError: (msg) => {
         setAudioLevel(0);
+        setAudioSamples([]);
         voiceSubmittedRef.current = false;
         setListening(false);
+        setMicDebugCapture(false);
         sttRef.current = null;
         setVoiceState("idle");
+        setMicDebugOpen(true);
         push({
           id: `m-${Date.now()}-stterr`,
           who: "system",
@@ -259,7 +297,9 @@ export function ChatPanel() {
       },
       onEnd: () => {
         setAudioLevel(0);
+        setAudioSamples([]);
         setListening(false);
+        setMicDebugCapture(false);
         sttRef.current = null;
         if (voiceSubmittedRef.current) {
           voiceSubmittedRef.current = false;
@@ -267,7 +307,11 @@ export function ChatPanel() {
         }
         setVoiceState("idle");
       },
-    });
+    }, { debugOnly });
+  };
+
+  const toggleMic = () => {
+    void beginMicCapture(false);
   };
 
   const modelLabel = compactModelLabel(agentModels.main ?? defaultModel ?? "openai/codex");
@@ -280,8 +324,14 @@ export function ChatPanel() {
     { label: "expand", run: () => submitText("expand on that") },
     { label: "route -> codex", run: () => setDraft("@codex ") },
     {
-      label: micDebugOpen ? "mic debug off" : "mic debug",
-      run: () => setMicDebugOpen((open) => !open),
+      label: listening ? (micDebugOpen ? "mic debug off" : "mic debug") : "debug mic",
+      run: () => {
+        if (listening) {
+          setMicDebugOpen((open) => !open);
+        } else {
+          void beginMicCapture(true);
+        }
+      },
       alwaysEnabled: true,
     },
   ];
@@ -314,8 +364,8 @@ export function ChatPanel() {
         {listening && !partial && (
           <div className="chat-line chat-line--user chat-line--listening">
             <span className="chat-line__ts">...</span>
-            <span className="chat-line__who">you ›</span>
-            <WaveformLine level={audioLevel} />
+            <span className="chat-line__who">{micDebugCapture ? "mic ›" : "you ›"}</span>
+            <WaveformLine level={audioLevel} samples={audioSamples} />
           </div>
         )}
         {isAwaitingReply && (
@@ -334,7 +384,14 @@ export function ChatPanel() {
             <span className="chat-line__text">{partial}</span>
           </div>
         )}
-        {showMicDebug && <MicDebugPanel debug={micDebug} level={audioLevel} listening={listening} />}
+        {showMicDebug && (
+          <MicDebugPanel
+            debug={micDebug}
+            level={audioLevel}
+            listening={listening}
+            debugCapture={micDebugCapture}
+          />
+        )}
       </div>
       <div className="chat-panel__chips" aria-label="quick commands">
         {quickActions.map((action) => (
@@ -343,7 +400,7 @@ export function ChatPanel() {
             type="button"
             className="chat-panel__chip"
             onClick={action.run}
-            disabled={gateway !== "connected" && !action.label.includes("route") && !action.alwaysEnabled}
+            disabled={gateway !== "connected" && !action.alwaysEnabled}
           >
             {action.label}
           </button>
@@ -460,16 +517,20 @@ function MicDebugPanel({
   debug,
   level,
   listening,
+  debugCapture,
 }: {
   debug: SttDebugSnapshot;
   level: number;
   listening: boolean;
+  debugCapture: boolean;
 }) {
   const pct = Math.round(Math.max(0, Math.min(1, level || debug.level)) * 100);
+  const selectedDevice = debug.selectedDeviceLabel || debug.trackLabel || "-";
+  const streamState = debug.streamActive ? "active" : debug.streamId ? "inactive" : "-";
   return (
     <div className="chat-mic-debug">
       <div className="chat-mic-debug__head">
-        <span>mic debug</span>
+        <span>{debugCapture ? "mic debug capture" : "mic debug"}</span>
         <span className={`chat-mic-debug__pill chat-mic-debug__pill--${debug.stage}`}>
           {listening ? debug.stage : "standby"}
         </span>
@@ -480,16 +541,29 @@ function MicDebugPanel({
       <div className="chat-mic-debug__grid">
         <DebugCell label="level" value={`${pct}%`} />
         <DebugCell label="rms" value={debug.rms.toFixed(5)} />
+        <DebugCell label="peak" value={debug.peak.toFixed(5)} />
         <DebugCell label="voice" value={debug.voiceDetected ? "yes" : "no"} />
+        <DebugCell label="permission" value={debug.permissionState || "-"} />
+        <DebugCell label="inputs" value={debug.deviceCount ? `${debug.deviceCount}` : "-"} />
         <DebugCell label="elapsed" value={formatMs(debug.elapsedMs)} />
         <DebugCell label="silent" value={formatMs(debug.silentMs)} />
         <DebugCell label="chunks" value={`${debug.chunks}`} />
         <DebugCell label="bytes" value={formatBytes(debug.bytes)} />
         <DebugCell label="stop" value={debug.stopReason || "-"} />
-        <DebugCell label="track" value={debug.trackLabel || "-"} wide />
+        <DebugCell label="selected" value={selectedDevice} wide />
+        <DebugCell label="devices" value={debug.deviceLabels || "-"} wide />
+        <DebugCell label="stream" value={streamState} />
         <DebugCell
           label="track state"
           value={`${debug.trackReadyState || "-"} / ${debug.trackMuted ? "muted" : "unmuted"}`}
+        />
+        <DebugCell
+          label="track fmt"
+          value={[
+            debug.trackChannelCount ? `${debug.trackChannelCount}ch` : "",
+            debug.trackSampleRate ? `${debug.trackSampleRate}Hz` : "",
+            debug.trackDeviceId ? `id ${debug.trackDeviceId}` : "",
+          ].filter(Boolean).join(" ") || "-"}
         />
         <DebugCell label="recorder" value={debug.recorderState || "-"} />
         <DebugCell label="mime" value={debug.mimeType || "-"} wide />
@@ -497,6 +571,8 @@ function MicDebugPanel({
           label="audio ctx"
           value={`${debug.audioContextState || "-"} ${debug.sampleRate ? `${debug.sampleRate}Hz` : ""}`}
         />
+        <DebugCell label="analyser" value={debug.analyserFrames ? `${debug.analyserFrames} frames` : "-"} />
+        <DebugCell label="silence" value={debug.silenceReason || "-"} wide />
         <DebugCell label="lang" value={debug.language || "-"} />
         <DebugCell label="message" value={debug.message || "-"} wide />
         {debug.transcript && <DebugCell label="transcript" value={debug.transcript} wide />}
@@ -515,9 +591,10 @@ function DebugCell({ label, value, wide = false }: { label: string; value: strin
   );
 }
 
-function WaveformLine({ level }: { level: number }) {
+function WaveformLine({ level, samples }: { level: number; samples: number[] }) {
   const normalized = Math.max(0, Math.min(1, level));
   const gain = Math.pow(normalized, 0.72);
+  const values = samples.length === WAVE_BARS.length ? samples : WAVE_BARS.map(() => gain);
   return (
     <span
       className="chat-wave"
@@ -529,8 +606,8 @@ function WaveformLine({ level }: { level: number }) {
           key={i}
           className="chat-wave__bar"
           style={{
-            height: `${3 + gain * (5 + Math.abs(Math.sin(i * 0.74 + normalized * 7)) * 15)}px`,
-            opacity: `${0.32 + gain * 0.62}`,
+            height: `${3 + Math.max(gain * 0.35, values[i] ?? 0) * 20}px`,
+            opacity: `${0.32 + Math.max(gain, values[i] ?? 0) * 0.62}`,
           }}
         />
       ))}
@@ -546,18 +623,34 @@ function emptyMicDebug(language = "auto"): SttDebugSnapshot {
     elapsedMs: 0,
     level: 0,
     rms: 0,
+    peak: 0,
+    samples: [],
     voiceDetected: false,
     silentMs: 0,
     chunks: 0,
     bytes: 0,
+    permissionState: "",
+    deviceCount: 0,
+    deviceLabels: "",
+    selectedDeviceId: "",
+    selectedDeviceLabel: "",
+    streamActive: false,
+    streamId: "",
     trackLabel: "",
     trackEnabled: false,
     trackMuted: false,
     trackReadyState: "",
+    trackDeviceId: "",
+    trackGroupId: "",
+    trackSampleRate: 0,
+    trackChannelCount: 0,
     recorderState: "",
     mimeType: "",
     audioContextState: "",
     sampleRate: 0,
+    analyserFftSize: 0,
+    analyserFrames: 0,
+    silenceReason: "",
     stopReason: "",
     transcript: "",
     error: "",

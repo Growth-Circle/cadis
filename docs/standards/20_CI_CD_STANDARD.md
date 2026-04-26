@@ -29,10 +29,30 @@ Baseline checks:
 Rust checks once crates exist:
 
 ```text
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo test --all-targets --all-features
 ```
+
+Focused Rust checks may be used while iterating, for example
+`cargo test -p cadis-avatar` for native avatar state changes, but required CI
+should keep the full workspace checks green.
+
+HUD checks once the Tauri app exists:
+
+```text
+cd apps/cadis-hud
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+cargo check --manifest-path src-tauri/Cargo.toml --locked
+```
+
+The HUD job should install Linux Tauri dependencies and must not require model
+provider credentials, microphone access, camera access, or audio devices.
+Voice doctor behavior should be covered by deterministic unit tests where
+possible; live mic and player checks remain local smoke tests.
 
 Security and dependency checks once tooling is configured:
 
@@ -101,6 +121,10 @@ CI should protect daemon-first boundaries with targeted checks as the codebase g
 - logs and persisted events must pass redaction tests
 - model providers must stream through core provider traits
 - UI and voice clients must consume daemon state through typed protocol events
+- HUD voice checks must stay preflight/diagnostic unless daemon-owned voice
+  execution is explicitly implemented
+- native avatar crates must remain renderer/state boundaries and must not call
+  tools, approvals, models, memory, or policy APIs
 
 Some of these checks may start as review checklist items and become automated as package boundaries stabilize.
 
@@ -126,9 +150,15 @@ Rules:
 Contributors should be able to reproduce core CI with:
 
 ```text
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo test --all-targets --all-features
+cd apps/cadis-hud
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+cargo check --manifest-path src-tauri/Cargo.toml --locked
 ```
 
 Additional documented commands should be added as CI expands, including docs checks, dependency checks, and package smoke tests.

@@ -89,6 +89,8 @@ The daemon maps provider events into CADIS session events such as `message.delta
 Streaming rules:
 
 - Preserve token order.
+- Providers that do not support native upstream streaming must use the shared
+  callback interface to emit structured simulated deltas from chunked output.
 - Support cancellation where the upstream API permits it.
 - Convert provider-specific stop reasons to CADIS stop metadata.
 - Bound memory usage for long streams.
@@ -113,6 +115,13 @@ Required categories:
 
 Errors must include actionable metadata but must not leak credentials, headers, or full sensitive request bodies.
 
+The runtime must surface `requested_model`, `effective_provider`,
+`effective_model`, and fallback state on model-backed message events whenever
+the provider can resolve them. Provider failures should use stable error codes
+and redacted messages; authentication or configuration failures must not fall
+back silently unless the selected provider is explicitly fallback-capable, such
+as `auto`.
+
 ## 8. Model Catalog
 
 The daemon must support `models.list` for UI and CLI clients.
@@ -124,6 +133,10 @@ Catalog behavior:
 - include per-agent model assignments
 - preserve current configured values even if a model is temporarily missing
 - make provider unavailability visible without deleting configuration
+
+Per-agent model IDs should use `provider/model` where possible. Supported MVP
+provider prefixes are `auto`, `ollama`, `openai`, `codex-cli`, and `echo`.
+Plain model IDs are interpreted against the configured default provider.
 
 ## 9. Provider Conformance
 

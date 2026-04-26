@@ -21,9 +21,59 @@ jobs:
           test -f docs/06_IMPLEMENTATION_PLAN.md
           test -f docs/07_MASTER_CHECKLIST.md
           test -f docs/standards/00_STANDARD_INDEX.md
+
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
       - name: Rust format
         run: cargo fmt --all --check
       - name: Rust clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Rust tests
         run: cargo test --all-targets --all-features
+      - name: Native avatar focused tests
+        run: cargo test -p cadis-avatar
+
+  hud-frontend:
+    name: HUD frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/cadis-hud
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libwebkit2gtk-4.1-dev \
+            patchelf
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.33.2 --activate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/cadis-hud/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Frontend lint
+        run: pnpm lint
+      - name: Frontend typecheck
+        run: pnpm typecheck
+      - name: Frontend tests
+        run: pnpm test
+      - name: Frontend build
+        run: pnpm build
+      - name: Tauri check
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked
