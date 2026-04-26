@@ -861,6 +861,96 @@ html, body, #root {
   filter: brightness(1.28);
 }
 
+.chat-mic-debug {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 4px 0 2px 48px;
+  padding: 9px 10px;
+  border: 1px solid oklch(0.34 0.08 var(--hue) / 0.58);
+  background: oklch(0.08 0.02 var(--hue) / 0.68);
+  box-shadow: inset 0 0 18px oklch(0.78 0.16 var(--hue) / 0.08);
+}
+
+.chat-mic-debug__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.chat-mic-debug__pill {
+  color: var(--dim);
+  border: 1px solid var(--border-d);
+  padding: 2px 6px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+.chat-mic-debug__pill--recording { color: var(--ok); border-color: oklch(0.75 0.16 150 / 0.58); }
+.chat-mic-debug__pill--transcribing { color: var(--warn); border-color: oklch(0.80 0.15 80 / 0.58); }
+.chat-mic-debug__pill--error { color: var(--err); border-color: oklch(0.68 0.18 25 / 0.62); }
+
+.chat-mic-debug__meter {
+  position: relative;
+  height: 5px;
+  overflow: hidden;
+  background: oklch(0.15 0.03 var(--hue) / 0.82);
+  border: 1px solid oklch(0.28 0.05 var(--hue) / 0.62);
+}
+
+.chat-mic-debug__meter span {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--ok));
+  box-shadow: 0 0 10px oklch(0.78 0.16 var(--hue) / 0.66);
+  transition: width 72ms ease-out;
+}
+
+.chat-mic-debug__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.chat-mic-debug__cell {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 6px;
+  border: 1px solid oklch(0.25 0.04 var(--hue) / 0.54);
+  background: oklch(0.10 0.018 var(--hue) / 0.54);
+}
+
+.chat-mic-debug__cell--wide {
+  grid-column: span 2;
+}
+
+.chat-mic-debug__cell span {
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+}
+
+.chat-mic-debug__cell strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-panel__chips {
   display: flex;
   gap: 6px;

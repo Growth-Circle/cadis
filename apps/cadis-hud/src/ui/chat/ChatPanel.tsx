@@ -14,7 +14,12 @@ import type { KeyboardEvent } from "react";
 import { useHud, type AgentLive, type ChatMessage } from "../hudState.js";
 import { sendUserMessage } from "../cadisActions.js";
 import { speak, stopSpeaking } from "../../lib/voice/tts.js";
-import { available as sttAvailable, startListening, type SttSession } from "../../lib/voice/stt.js";
+import {
+  available as sttAvailable,
+  startListening,
+  type SttDebugSnapshot,
+  type SttSession,
+} from "../../lib/voice/stt.js";
 import { VOICES } from "../../lib/voice/voices.js";
 
 const WAVE_BARS = Array.from({ length: 48 }, (_, i) => i);
@@ -50,6 +55,8 @@ export function ChatPanel() {
   const [listening, setListening] = useState(false);
   const [partial, setPartial] = useState("");
   const [audioLevel, setAudioLevel] = useState(0);
+  const [micDebugOpen, setMicDebugOpen] = useState(false);
+  const [micDebug, setMicDebug] = useState<SttDebugSnapshot>(() => emptyMicDebug());
   const sttRef = useRef<SttSession | null>(null);
   const voiceSubmittedRef = useRef(false);
   const scroll = useRef<HTMLDivElement | null>(null);
@@ -223,8 +230,10 @@ export function ChatPanel() {
     setVoiceState("listening");
     setListening(true);
     setAudioLevel(0);
+    setMicDebug(emptyMicDebug(sttLang));
     voiceSubmittedRef.current = false;
     sttRef.current = startListening(sttLang, {
+      onDebug: setMicDebug,
       onLevel: ({ level }) => setAudioLevel(level),
       onPartial: setPartial,
       onFinal: (t) => {
@@ -270,7 +279,13 @@ export function ChatPanel() {
     { label: "cancel", run: () => submitText("cancel") },
     { label: "expand", run: () => submitText("expand on that") },
     { label: "route -> codex", run: () => setDraft("@codex ") },
+    {
+      label: micDebugOpen ? "mic debug off" : "mic debug",
+      run: () => setMicDebugOpen((open) => !open),
+      alwaysEnabled: true,
+    },
   ];
+  const showMicDebug = listening || micDebugOpen || micDebug.stage === "error";
 
   return (
     <section className="chat-panel" aria-label="CADIS chat">
@@ -319,6 +334,7 @@ export function ChatPanel() {
             <span className="chat-line__text">{partial}</span>
           </div>
         )}
+        {showMicDebug && <MicDebugPanel debug={micDebug} level={audioLevel} listening={listening} />}
       </div>
       <div className="chat-panel__chips" aria-label="quick commands">
         {quickActions.map((action) => (
@@ -327,7 +343,7 @@ export function ChatPanel() {
             type="button"
             className="chat-panel__chip"
             onClick={action.run}
-            disabled={gateway !== "connected" && !action.label.includes("route")}
+            disabled={gateway !== "connected" && !action.label.includes("route") && !action.alwaysEnabled}
           >
             {action.label}
           </button>
@@ -440,6 +456,65 @@ function ChatLine({ m }: { m: ChatMessage }) {
   );
 }
 
+function MicDebugPanel({
+  debug,
+  level,
+  listening,
+}: {
+  debug: SttDebugSnapshot;
+  level: number;
+  listening: boolean;
+}) {
+  const pct = Math.round(Math.max(0, Math.min(1, level || debug.level)) * 100);
+  return (
+    <div className="chat-mic-debug">
+      <div className="chat-mic-debug__head">
+        <span>mic debug</span>
+        <span className={`chat-mic-debug__pill chat-mic-debug__pill--${debug.stage}`}>
+          {listening ? debug.stage : "standby"}
+        </span>
+      </div>
+      <div className="chat-mic-debug__meter" aria-hidden="true">
+        <span style={{ width: `${pct}%` }} />
+      </div>
+      <div className="chat-mic-debug__grid">
+        <DebugCell label="level" value={`${pct}%`} />
+        <DebugCell label="rms" value={debug.rms.toFixed(5)} />
+        <DebugCell label="voice" value={debug.voiceDetected ? "yes" : "no"} />
+        <DebugCell label="elapsed" value={formatMs(debug.elapsedMs)} />
+        <DebugCell label="silent" value={formatMs(debug.silentMs)} />
+        <DebugCell label="chunks" value={`${debug.chunks}`} />
+        <DebugCell label="bytes" value={formatBytes(debug.bytes)} />
+        <DebugCell label="stop" value={debug.stopReason || "-"} />
+        <DebugCell label="track" value={debug.trackLabel || "-"} wide />
+        <DebugCell
+          label="track state"
+          value={`${debug.trackReadyState || "-"} / ${debug.trackMuted ? "muted" : "unmuted"}`}
+        />
+        <DebugCell label="recorder" value={debug.recorderState || "-"} />
+        <DebugCell label="mime" value={debug.mimeType || "-"} wide />
+        <DebugCell
+          label="audio ctx"
+          value={`${debug.audioContextState || "-"} ${debug.sampleRate ? `${debug.sampleRate}Hz` : ""}`}
+        />
+        <DebugCell label="lang" value={debug.language || "-"} />
+        <DebugCell label="message" value={debug.message || "-"} wide />
+        {debug.transcript && <DebugCell label="transcript" value={debug.transcript} wide />}
+        {debug.error && <DebugCell label="error" value={debug.error} wide />}
+      </div>
+    </div>
+  );
+}
+
+function DebugCell({ label, value, wide = false }: { label: string; value: string; wide?: boolean }) {
+  return (
+    <span className={`chat-mic-debug__cell${wide ? " chat-mic-debug__cell--wide" : ""}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </span>
+  );
+}
+
 function WaveformLine({ level }: { level: number }) {
   const normalized = Math.max(0, Math.min(1, level));
   const gain = Math.pow(normalized, 0.72);
@@ -461,6 +536,44 @@ function WaveformLine({ level }: { level: number }) {
       ))}
     </span>
   );
+}
+
+function emptyMicDebug(language = "auto"): SttDebugSnapshot {
+  return {
+    stage: "idle",
+    message: "idle",
+    language,
+    elapsedMs: 0,
+    level: 0,
+    rms: 0,
+    voiceDetected: false,
+    silentMs: 0,
+    chunks: 0,
+    bytes: 0,
+    trackLabel: "",
+    trackEnabled: false,
+    trackMuted: false,
+    trackReadyState: "",
+    recorderState: "",
+    mimeType: "",
+    audioContextState: "",
+    sampleRate: 0,
+    stopReason: "",
+    transcript: "",
+    error: "",
+  };
+}
+
+function formatMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0ms";
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0B";
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function MicIcon({ active }: { active: boolean }) {

@@ -5,11 +5,36 @@ export type SttHandlers = {
   onFinal: (text: string) => void;
   onError?: (msg: string) => void;
   onEnd?: () => void;
+  onDebug?: (state: SttDebugSnapshot) => void;
   onLevel?: (state: { level: number; rms: number }) => void;
   onLoading?: (state: { stage: "model" | "recording" | "transcribing" }) => void;
 };
 
 export type SttSession = { stop: () => void };
+
+export type SttDebugSnapshot = {
+  stage: "idle" | "requesting" | "recording" | "transcribing" | "done" | "error";
+  message: string;
+  language: string;
+  elapsedMs: number;
+  level: number;
+  rms: number;
+  voiceDetected: boolean;
+  silentMs: number;
+  chunks: number;
+  bytes: number;
+  trackLabel: string;
+  trackEnabled: boolean;
+  trackMuted: boolean;
+  trackReadyState: string;
+  recorderState: string;
+  mimeType: string;
+  audioContextState: string;
+  sampleRate: number;
+  stopReason: string;
+  transcript: string;
+  error: string;
+};
 
 type LocalSttResult = {
   text: string;
@@ -29,6 +54,7 @@ export function available(): boolean {
 }
 
 export function startListening(lang: string, handlers: SttHandlers): SttSession {
+  const sessionStartedAt = Date.now();
   let stopped = false;
   let finalizing = false;
   let mediaStream: MediaStream | null = null;
@@ -36,7 +62,45 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
   let analyserCtx: AudioContext | null = null;
   let heardVoice = false;
   let noSignalTimedOut = false;
+  let stopReason = "";
+  let chunkBytes = 0;
   const chunks: Blob[] = [];
+  let debug: SttDebugSnapshot = {
+    stage: "idle",
+    message: "idle",
+    language: whisperLanguageFromLocale(lang),
+    elapsedMs: 0,
+    level: 0,
+    rms: 0,
+    voiceDetected: false,
+    silentMs: 0,
+    chunks: 0,
+    bytes: 0,
+    trackLabel: "",
+    trackEnabled: false,
+    trackMuted: false,
+    trackReadyState: "",
+    recorderState: "",
+    mimeType: "",
+    audioContextState: "",
+    sampleRate: 0,
+    stopReason: "",
+    transcript: "",
+    error: "",
+  };
+
+  const emitDebug = (patch: Partial<SttDebugSnapshot>) => {
+    debug = {
+      ...debug,
+      elapsedMs: Date.now() - sessionStartedAt,
+      chunks: chunks.length,
+      bytes: chunkBytes,
+      recorderState: recorder?.state ?? debug.recorderState,
+      audioContextState: analyserCtx?.state ?? debug.audioContextState,
+      ...patch,
+    };
+    handlers.onDebug?.(debug);
+  };
 
   const cleanup = () => {
     mediaStream?.getTracks().forEach((track) => track.stop());
@@ -46,6 +110,7 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
     }
     analyserCtx = null;
     handlers.onLevel?.({ level: 0, rms: 0 });
+    emitDebug({ level: 0, rms: 0 });
   };
 
   const finalize = async () => {
@@ -54,15 +119,28 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
     cleanup();
 
     if (chunks.length === 0) {
+      emitDebug({
+        stage: "error",
+        message: "recording stopped without audio chunks",
+        error: "MediaRecorder produced no audio chunks",
+        stopReason,
+      });
       handlers.onEnd?.();
       return;
     }
     if (noSignalTimedOut && !heardVoice) {
+      emitDebug({
+        stage: "error",
+        message: "no voice signal detected",
+        error: "microphone is connected, but CADIS did not receive a voice signal",
+        stopReason,
+      });
       handlers.onError?.("microphone is connected, but CADIS did not receive a voice signal.");
       handlers.onEnd?.();
       return;
     }
 
+    emitDebug({ stage: "transcribing", message: "sending audio to whisper.cpp", stopReason });
     handlers.onLoading?.({ stage: "transcribing" });
     try {
       const blob = new Blob(chunks, { type: chunks[0]?.type || "audio/webm" });
@@ -72,17 +150,26 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
       const language = whisperLanguageFromLocale(lang);
       const result = await invoke<LocalSttResult>("local_stt_transcribe", { audioBase64, language });
       const text = result.text.trim();
+      emitDebug({
+        stage: "done",
+        message: text ? "transcription complete" : "whisper returned empty text",
+        transcript: text,
+      });
       if (text) handlers.onFinal(text);
     } catch (err) {
-      handlers.onError?.(friendlySttError(err));
+      const message = friendlySttError(err);
+      emitDebug({ stage: "error", message: "transcription failed", error: message });
+      handlers.onError?.(message);
     } finally {
       handlers.onEnd?.();
     }
   };
 
-  const stopRecording = () => {
+  const stopRecording = (reason = "manual") => {
     if (stopped) return;
     stopped = true;
+    stopReason = reason;
+    emitDebug({ message: `stopping recording: ${reason}`, stopReason: reason });
     try {
       if (recorder?.state === "recording") {
         recorder.stop();
@@ -96,6 +183,7 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
 
   (async () => {
     try {
+      emitDebug({ stage: "requesting", message: "requesting microphone stream" });
       handlers.onLoading?.({ stage: "recording" });
       mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -107,6 +195,20 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
       if (mediaStream.getAudioTracks().length === 0) {
         throw new Error("no microphone audio track was opened");
       }
+      const [track] = mediaStream.getAudioTracks();
+      if (track) {
+        track.onmute = () => emitDebug({ trackMuted: true, message: "microphone track muted" });
+        track.onunmute = () => emitDebug({ trackMuted: false, message: "microphone track unmuted" });
+        track.onended = () => emitDebug({ trackReadyState: track.readyState, message: "microphone track ended" });
+        emitDebug({
+          message: `opened microphone track: ${track.label || "unlabeled input"}`,
+          trackLabel: track.label,
+          trackEnabled: track.enabled,
+          trackMuted: track.muted,
+          trackReadyState: track.readyState,
+        });
+      }
+
       const ctor = (window as unknown as { MediaRecorder?: typeof MediaRecorder }).MediaRecorder;
       if (!ctor) {
         handlers.onError?.("MediaRecorder unavailable in this webview");
@@ -115,23 +217,48 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
         return;
       }
 
-      recorder = new ctor(mediaStream);
+      recorder = new ctor(mediaStream, preferredMediaRecorderOptions(ctor));
       recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) chunks.push(event.data);
+        if (event.data && event.data.size > 0) {
+          chunks.push(event.data);
+          chunkBytes += event.data.size;
+          emitDebug({
+            stage: "recording",
+            message: "audio chunk received",
+            mimeType: event.data.type || recorder?.mimeType || "",
+          });
+        }
       };
       recorder.onstop = () => {
+        emitDebug({ message: "MediaRecorder stopped", recorderState: recorder?.state ?? "" });
         void finalize();
       };
       recorder.start(150);
+      emitDebug({
+        stage: "recording",
+        message: "recording",
+        recorderState: recorder.state,
+        mimeType: recorder.mimeType,
+      });
 
-      analyserCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      analyserCtx = new AudioContext();
       if (analyserCtx.state === "suspended") {
         await analyserCtx.resume().catch(() => {});
       }
       const src = analyserCtx.createMediaStreamSource(mediaStream);
       const analyser = analyserCtx.createAnalyser();
       analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.42;
+      const zeroGain = analyserCtx.createGain();
+      zeroGain.gain.value = 0;
       src.connect(analyser);
+      analyser.connect(zeroGain);
+      zeroGain.connect(analyserCtx.destination);
+      emitDebug({
+        audioContextState: analyserCtx.state,
+        sampleRate: analyserCtx.sampleRate,
+        message: "audio analyser connected",
+      });
 
       const buf = new Float32Array(analyser.fftSize);
       let lastVoice = Date.now();
@@ -150,7 +277,19 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
         const rms = Math.sqrt(sum / buf.length);
         const now = Date.now();
         if (now - lastLevelEmit > 42) {
-          handlers.onLevel?.({ level: rmsToLevel(rms), rms });
+          const level = rmsToLevel(rms);
+          handlers.onLevel?.({ level, rms });
+          emitDebug({
+            stage: "recording",
+            message: heardVoice ? "voice signal detected" : "waiting for voice signal",
+            level,
+            rms,
+            voiceDetected: heardVoice,
+            silentMs: now - lastVoice,
+            trackReadyState: track?.readyState ?? debug.trackReadyState,
+            trackMuted: track?.muted ?? debug.trackMuted,
+            trackEnabled: track?.enabled ?? debug.trackEnabled,
+          });
           lastLevelEmit = now;
         }
         if (rms > VOICE_RMS) {
@@ -162,31 +301,33 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
         const totalMs = now - startedAt;
         if (!heardVoice && rms < NO_SIGNAL_RMS && totalMs > NO_SIGNAL_TIMEOUT_MS) {
           noSignalTimedOut = true;
-          stopRecording();
+          stopRecording("no-signal");
           return;
         }
         if (heardVoice && totalMs > MIN_RECORDING_MS && silentMs > SILENCE_TAIL_MS) {
-          stopRecording();
+          stopRecording("silence");
           return;
         }
         if (totalMs > MAX_DURATION_MS) {
-          stopRecording();
+          stopRecording("max-duration");
           return;
         }
 
-        requestAnimationFrame(tick);
+        window.setTimeout(tick, 50);
       };
 
-      requestAnimationFrame(tick);
+      window.setTimeout(tick, 50);
     } catch (err) {
       stopped = true;
       cleanup();
-      handlers.onError?.(friendlySttError(err));
+      const message = friendlySttError(err);
+      emitDebug({ stage: "error", message: "microphone capture failed", error: message });
+      handlers.onError?.(message);
       handlers.onEnd?.();
     }
   })();
 
-  return { stop: stopRecording };
+  return { stop: () => stopRecording("manual") };
 }
 
 function friendlySttError(err: unknown): string {
@@ -217,6 +358,17 @@ function rmsToLevel(rms: number): number {
 function whisperLanguageFromLocale(locale: string): string {
   const base = locale.trim().toLowerCase().split(/[-_]/)[0];
   return base || "auto";
+}
+
+function preferredMediaRecorderOptions(ctor: typeof MediaRecorder): { mimeType: string } | undefined {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+    "audio/webm",
+  ];
+  const mimeType = candidates.find((candidate) => ctor.isTypeSupported(candidate));
+  return mimeType ? { mimeType } : undefined;
 }
 
 async function blobToFloat32Mono16k(blob: Blob): Promise<Float32Array> {
