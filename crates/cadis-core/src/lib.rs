@@ -95,6 +95,7 @@ pub struct RequestOutcome {
 pub struct Runtime {
     options: RuntimeOptions,
     provider: Box<dyn ModelProvider>,
+    tools: ToolRegistry,
     started_at: Instant,
     next_event: u64,
     next_session: u64,
@@ -127,6 +128,7 @@ impl Runtime {
         Self {
             options,
             provider,
+            tools: ToolRegistry::builtin().expect("built-in tool registry should be valid"),
             started_at: Instant::now(),
             next_event: 1,
             next_session: 1,
@@ -358,15 +360,17 @@ impl Runtime {
         request_id: RequestId,
         request: ToolCallRequest,
     ) -> RequestOutcome {
-        let policy = self.policy.decide_tool(&request.tool_name);
-        let Some(risk_class) = policy.risk_class else {
+        let Some(tool) = self.tools.get(&request.tool_name) else {
             return self.reject(
                 request_id,
                 "tool_denied",
-                format!("{}: {}", request.tool_name, policy.reason),
+                format!("{}: unknown tool is denied by default", request.tool_name),
                 false,
             );
         };
+        let risk_class = tool.risk_class;
+        let policy_decision = self.policy.decide(risk_class);
+        let policy_reason = tool.policy_reason();
 
         let (session_id, mut events) =
             self.resolve_tool_session(request.session_id.clone(), &request.input);
@@ -376,13 +380,13 @@ impl Runtime {
             CadisEvent::ToolRequested(ToolEventPayload {
                 tool_call_id: tool_call_id.clone(),
                 tool_name: request.tool_name.clone(),
-                summary: Some(policy.reason.clone()),
+                summary: Some(policy_reason.clone()),
                 risk_class: Some(risk_class),
                 output: None,
             }),
         ));
 
-        match policy.decision {
+        match policy_decision {
             PolicyDecision::Allow => {
                 events.push(self.session_event(
                     session_id.clone(),
@@ -477,7 +481,7 @@ impl Runtime {
             PolicyDecision::Deny => self.reject(
                 request_id,
                 "tool_denied",
-                format!("{}: {}", request.tool_name, policy.reason),
+                format!("{}: {policy_reason}", request.tool_name),
                 false,
             ),
         }
@@ -1129,9 +1133,16 @@ impl Runtime {
         request: &ToolCallRequest,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
         match request.tool_name.as_str() {
-            "file.read" => self.execute_file_read(session_id, &request.input),
-            "file.search" => self.execute_file_search(session_id, &request.input),
-            "git.status" => self.execute_git_status(session_id, &request.input),
+            tool_name if self.tools.is_auto_executable_safe_read(tool_name) => match tool_name {
+                "file.read" => self.execute_file_read(session_id, &request.input),
+                "file.search" => self.execute_file_search(session_id, &request.input),
+                "git.status" => self.execute_git_status(session_id, &request.input),
+                _ => Err(tool_error(
+                    "tool_not_implemented",
+                    format!("{tool_name} has no native execution backend"),
+                    false,
+                )),
+            },
             _ => Err(tool_error(
                 "tool_not_allowed",
                 format!(
@@ -1647,6 +1658,139 @@ struct WorkerDelegation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingApproval {
     record: ApprovalRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ToolRegistry {
+    definitions: Vec<ToolDefinition>,
+}
+
+impl ToolRegistry {
+    fn new(definitions: Vec<ToolDefinition>) -> Result<Self, RuntimeError> {
+        for (index, definition) in definitions.iter().enumerate() {
+            if definitions[..index]
+                .iter()
+                .any(|previous| previous.name == definition.name)
+            {
+                return Err(RuntimeError {
+                    code: "duplicate_tool_name",
+                    message: format!("tool '{}' is registered more than once", definition.name),
+                });
+            }
+        }
+
+        Ok(Self { definitions })
+    }
+
+    fn builtin() -> Result<Self, RuntimeError> {
+        Self::new(vec![
+            ToolDefinition::safe_read("file.read", ToolInputSchema::FileRead),
+            ToolDefinition::safe_read("file.search", ToolInputSchema::FileSearch),
+            ToolDefinition::safe_read("git.status", ToolInputSchema::GitStatus),
+            ToolDefinition::approval_placeholder(
+                "file.write",
+                cadis_protocol::RiskClass::WorkspaceEdit,
+                ToolInputSchema::WorkspaceMutation,
+            ),
+            ToolDefinition::approval_placeholder(
+                "file.patch",
+                cadis_protocol::RiskClass::WorkspaceEdit,
+                ToolInputSchema::WorkspaceMutation,
+            ),
+            ToolDefinition::approval_placeholder(
+                "git.diff",
+                cadis_protocol::RiskClass::WorkspaceEdit,
+                ToolInputSchema::GitMutation,
+            ),
+            ToolDefinition::approval_placeholder(
+                "git.worktree.create",
+                cadis_protocol::RiskClass::WorkspaceEdit,
+                ToolInputSchema::GitMutation,
+            ),
+            ToolDefinition::approval_placeholder(
+                "git.worktree.remove",
+                cadis_protocol::RiskClass::WorkspaceEdit,
+                ToolInputSchema::GitMutation,
+            ),
+            ToolDefinition::approval_placeholder(
+                "shell.run",
+                cadis_protocol::RiskClass::SystemChange,
+                ToolInputSchema::ShellRun,
+            ),
+        ])
+    }
+
+    fn get(&self, name: &str) -> Option<&ToolDefinition> {
+        self.definitions
+            .iter()
+            .find(|definition| definition.name == name)
+    }
+
+    fn is_auto_executable_safe_read(&self, name: &str) -> bool {
+        self.get(name)
+            .is_some_and(|definition| definition.execution == ToolExecutionMode::AutoExecute)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ToolDefinition {
+    name: &'static str,
+    risk_class: cadis_protocol::RiskClass,
+    input_schema: ToolInputSchema,
+    execution: ToolExecutionMode,
+}
+
+impl ToolDefinition {
+    fn safe_read(name: &'static str, input_schema: ToolInputSchema) -> Self {
+        Self {
+            name,
+            risk_class: cadis_protocol::RiskClass::SafeRead,
+            input_schema,
+            execution: ToolExecutionMode::AutoExecute,
+        }
+    }
+
+    fn approval_placeholder(
+        name: &'static str,
+        risk_class: cadis_protocol::RiskClass,
+        input_schema: ToolInputSchema,
+    ) -> Self {
+        Self {
+            name,
+            risk_class,
+            input_schema,
+            execution: ToolExecutionMode::ApprovalPlaceholder,
+        }
+    }
+
+    fn policy_reason(&self) -> String {
+        match self.execution {
+            ToolExecutionMode::AutoExecute => format!(
+                "{} is a read-only tool using {:?} input schema",
+                self.name, self.input_schema
+            ),
+            ToolExecutionMode::ApprovalPlaceholder => format!(
+                "{} requires approval for {:?} risk using {:?} input schema",
+                self.name, self.risk_class, self.input_schema
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolInputSchema {
+    FileRead,
+    FileSearch,
+    GitStatus,
+    ShellRun,
+    WorkspaceMutation,
+    GitMutation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolExecutionMode {
+    AutoExecute,
+    ApprovalPlaceholder,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2226,6 +2370,32 @@ mod tests {
             other => panic!("unexpected response: {other:?}"),
         }
         assert!(outcome.events.is_empty());
+    }
+
+    #[test]
+    fn builtin_tool_registry_contains_safe_and_gated_tools() {
+        let registry = ToolRegistry::builtin().expect("registry should build");
+
+        assert!(registry.is_auto_executable_safe_read("file.read"));
+        assert!(registry.is_auto_executable_safe_read("file.search"));
+        assert!(registry.is_auto_executable_safe_read("git.status"));
+        assert!(!registry.is_auto_executable_safe_read("shell.run"));
+
+        let shell = registry.get("shell.run").expect("shell tool exists");
+        assert_eq!(shell.risk_class, cadis_protocol::RiskClass::SystemChange);
+        assert_eq!(shell.execution, ToolExecutionMode::ApprovalPlaceholder);
+    }
+
+    #[test]
+    fn tool_registry_rejects_duplicate_names() {
+        let result = ToolRegistry::new(vec![
+            ToolDefinition::safe_read("file.read", ToolInputSchema::FileRead),
+            ToolDefinition::safe_read("file.read", ToolInputSchema::FileSearch),
+        ]);
+
+        let error = result.expect_err("duplicate tool names should be rejected");
+        assert_eq!(error.code, "duplicate_tool_name");
+        assert!(error.message.contains("file.read"));
     }
 
     #[test]

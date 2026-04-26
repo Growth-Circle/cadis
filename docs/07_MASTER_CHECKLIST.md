@@ -148,18 +148,18 @@
 ## 8. Tool Runtime
 
 - [ ] Define tool trait.
-- [ ] Define tool registry.
-- [ ] Define tool schema strategy.
-- [ ] Define tool lifecycle events.
-- [ ] Implement `file.read`.
-- [ ] Implement `file.search`.
+- [x] Define tool registry.
+- [x] Define tool schema strategy.
+- [x] Define tool lifecycle events.
+- [x] Implement `file.read`.
+- [x] Implement `file.search`.
 - [ ] Implement `file.patch`.
 - [ ] Implement `shell.run`.
-- [ ] Implement `git.status`.
+- [x] Implement `git.status`.
 - [ ] Implement `git.diff`.
 - [ ] Add timeouts.
 - [ ] Add cancellation.
-- [ ] Add tests for success and failure.
+- [x] Add tests for success and failure.
 
 ## 9. Policy and Approval
 
