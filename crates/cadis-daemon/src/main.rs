@@ -9,8 +9,8 @@ use std::process;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use cadis_core::{Runtime, RuntimeOptions};
-use cadis_models::provider_from_config;
+use cadis_core::{PendingMessageGeneration, Runtime, RuntimeOptions};
+use cadis_models::{provider_from_config, ModelError, ModelRequest, ModelStreamEvent};
 use cadis_protocol::{
     ClientRequest, DaemonResponse, ErrorPayload, EventEnvelope, EventId, EventSubscriptionRequest,
     RequestEnvelope, RequestId, ResponseEnvelope, ServerFrame, SessionId,
@@ -157,6 +157,31 @@ where
                     _ => None,
                 };
                 let snapshot_only = matches!(envelope.request, ClientRequest::EventsSnapshot(_));
+                if matches!(envelope.request, ClientRequest::MessageSend(_)) {
+                    let pending = runtime
+                        .lock()
+                        .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+                        .begin_message_request(envelope);
+                    match pending {
+                        Ok(pending) => {
+                            serve_pending_message_generation(
+                                &mut writer,
+                                Arc::clone(&runtime),
+                                &event_log,
+                                &event_bus,
+                                pending,
+                            )?;
+                        }
+                        Err(outcome) => {
+                            let outcome = *outcome;
+                            write_frame(&mut writer, &ServerFrame::Response(outcome.response))?;
+                            for event in outcome.events {
+                                emit_event(&mut writer, &event_log, &event_bus, event)?;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let outcome = runtime
                     .lock()
                     .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
@@ -193,11 +218,7 @@ where
                 }
 
                 for event in outcome.events {
-                    if let Err(error) = event_log.append_event(&event) {
-                        eprintln!("cadisd log error: {error}");
-                    }
-                    event_bus.publish(event.clone());
-                    write_frame(&mut writer, &ServerFrame::Event(event))?;
+                    emit_event(&mut writer, &event_log, &event_bus, event)?;
                 }
             }
             Err(error) => {
@@ -215,6 +236,87 @@ where
     }
 
     Ok(())
+}
+
+fn serve_pending_message_generation<W: Write>(
+    writer: &mut W,
+    runtime: Arc<Mutex<Runtime>>,
+    event_log: &EventLog,
+    event_bus: &EventBus,
+    pending: PendingMessageGeneration,
+) -> Result<(), Box<dyn Error>> {
+    write_frame(writer, &ServerFrame::Response(pending.response.clone()))?;
+    for event in pending.initial_events.clone() {
+        emit_event(writer, event_log, event_bus, event)?;
+    }
+
+    let provider = Arc::clone(&pending.provider);
+    let mut invocation = None;
+    let mut final_content = String::new();
+    let mut emitted_delta = false;
+    let stream_result = provider.stream_chat(
+        ModelRequest::new(&pending.prompt).with_selected_model(pending.selected_model.as_deref()),
+        &mut |event| {
+            match event {
+                ModelStreamEvent::Started(started) | ModelStreamEvent::Completed(started) => {
+                    invocation = Some(started);
+                }
+                ModelStreamEvent::Delta(delta) => {
+                    final_content.push_str(&delta);
+                    emitted_delta = true;
+                    let event = runtime
+                        .lock()
+                        .map_err(|_| {
+                            ModelError::with_code(
+                                "runtime_lock_failed",
+                                "runtime mutex was poisoned",
+                                false,
+                            )
+                        })?
+                        .message_delta_event(&pending, delta, invocation.as_ref());
+                    emit_event(writer, event_log, event_bus, event).map_err(|error| {
+                        ModelError::with_code("event_write_failed", error.to_string(), false)
+                    })?;
+                }
+                ModelStreamEvent::Failed(_) => {}
+            }
+            Ok(())
+        },
+    );
+
+    let final_events = match stream_result {
+        Ok(response) => runtime
+            .lock()
+            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+            .complete_message_generation(pending, response, final_content, emitted_delta),
+        Err(error) => runtime
+            .lock()
+            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+            .fail_message_generation(pending, error),
+    };
+
+    for event in final_events {
+        emit_event(writer, event_log, event_bus, event)?;
+    }
+
+    Ok(())
+}
+
+fn emit_event<W: Write>(
+    writer: &mut W,
+    event_log: &EventLog,
+    event_bus: &EventBus,
+    event: EventEnvelope,
+) -> Result<(), Box<dyn Error>> {
+    publish_event(event_log, event_bus, &event);
+    write_frame(writer, &ServerFrame::Event(event))
+}
+
+fn publish_event(event_log: &EventLog, event_bus: &EventBus, event: &EventEnvelope) {
+    if let Err(error) = event_log.append_event(event) {
+        eprintln!("cadisd log error: {error}");
+    }
+    event_bus.publish(event.clone());
 }
 
 #[derive(Clone)]
@@ -364,7 +466,12 @@ fn bounded_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cadis_protocol::{CadisEvent, EmptyPayload, SessionEventPayload, Timestamp};
+    use cadis_models::{ModelInvocation, ModelProvider, ModelResponse};
+    use cadis_protocol::{
+        CadisEvent, ClientId, ContentKind, DaemonResponse, EmptyPayload, MessageSendRequest,
+        RequestEnvelope, SessionEventPayload, Timestamp,
+    };
+    use std::sync::Condvar;
 
     #[test]
     fn bounded_replay_returns_events_after_retained_event_id() {
@@ -464,6 +571,136 @@ mod tests {
             .try_recv()
             .expect("subscriber should remain attached until a matching event");
         assert_eq!(received.event_id.as_str(), "evt_000002");
+    }
+
+    #[test]
+    fn pending_message_generation_leaves_runtime_mutex_available() {
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let runtime = Arc::new(Mutex::new(Runtime::new(
+            RuntimeOptions {
+                cadis_home: test_workspace("cadis-daemon-runtime-lock"),
+                profile_id: "default".to_owned(),
+                socket_path: None,
+                model_provider: "waiting".to_owned(),
+                ui_preferences: serde_json::json!({}),
+            },
+            Box::new(WaitingProvider {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+        )));
+        let pending = runtime
+            .lock()
+            .expect("runtime mutex should lock")
+            .begin_message_request(RequestEnvelope::new(
+                RequestId::from("req_chat"),
+                ClientId::from("cli_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "hello".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ))
+            .expect("message generation should be prepared");
+        let selected_model = pending.selected_model.clone();
+        let prompt = pending.prompt.clone();
+        let provider = Arc::clone(&pending.provider);
+        let worker = thread::spawn(move || {
+            provider
+                .stream_chat(
+                    ModelRequest::new(&prompt).with_selected_model(selected_model.as_deref()),
+                    &mut |_event| Ok(()),
+                )
+                .expect("waiting provider should complete")
+        });
+
+        wait_for_flag(&entered);
+        let status = runtime
+            .try_lock()
+            .expect("runtime mutex should not be held during provider generation")
+            .handle_request(RequestEnvelope::new(
+                RequestId::from("req_status"),
+                ClientId::from("cli_2"),
+                ClientRequest::DaemonStatus(EmptyPayload::default()),
+            ));
+        assert!(matches!(
+            status.response.response,
+            DaemonResponse::DaemonStatus(_)
+        ));
+
+        set_flag(&release);
+        let response = worker.join().expect("provider thread should not panic");
+        assert_eq!(response.deltas, vec!["done".to_owned()]);
+    }
+
+    #[derive(Clone, Debug)]
+    struct WaitingProvider {
+        entered: Arc<(Mutex<bool>, Condvar)>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl ModelProvider for WaitingProvider {
+        fn name(&self) -> &str {
+            "waiting"
+        }
+
+        fn chat(&self, _prompt: &str) -> Result<Vec<String>, ModelError> {
+            Ok(vec!["done".to_owned()])
+        }
+
+        fn stream_chat(
+            &self,
+            request: ModelRequest<'_>,
+            callback: &mut cadis_models::ModelStreamCallback<'_>,
+        ) -> Result<ModelResponse, ModelError> {
+            set_flag(&self.entered);
+            wait_for_flag(&self.release);
+            let invocation = ModelInvocation {
+                requested_model: request.selected_model.map(ToOwned::to_owned),
+                effective_provider: "waiting".to_owned(),
+                effective_model: "unit-test".to_owned(),
+                fallback: false,
+                fallback_reason: None,
+            };
+            callback(ModelStreamEvent::Started(invocation.clone()))?;
+            callback(ModelStreamEvent::Delta("done".to_owned()))?;
+            callback(ModelStreamEvent::Completed(invocation.clone()))?;
+            Ok(ModelResponse {
+                deltas: vec!["done".to_owned()],
+                invocation,
+            })
+        }
+    }
+
+    fn wait_for_flag(flag: &Arc<(Mutex<bool>, Condvar)>) {
+        let (lock, condvar) = &**flag;
+        let mut ready = lock.lock().expect("flag mutex should lock");
+        while !*ready {
+            ready = condvar
+                .wait(ready)
+                .expect("flag mutex should not be poisoned");
+        }
+    }
+
+    fn set_flag(flag: &Arc<(Mutex<bool>, Condvar)>) {
+        let (lock, condvar) = &**flag;
+        *lock.lock().expect("flag mutex should lock") = true;
+        condvar.notify_all();
+    }
+
+    fn test_workspace(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "{name}-{}-{}",
+            process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).expect("test workspace should be created");
+        path
     }
 
     fn session_event(event_id: &str, session_id: &str) -> EventEnvelope {

@@ -400,6 +400,12 @@ Model-backed `message.delta` and `message.completed` payloads may include a
 actually served the request. When fallback occurs, `fallback` is true and
 `fallback_reason` may contain a redacted reason suitable for logs and clients.
 
+For `message.send`, `cadisd` first publishes daemon-owned session, route, and
+agent status events, then runs provider generation outside the runtime mutex.
+Providers with stream callbacks cause `message.delta` events to be fanned out
+as callbacks arrive; providers without native streaming still produce the same
+typed events after their blocking response returns.
+
 ## 5. Content Kind
 
 ```text

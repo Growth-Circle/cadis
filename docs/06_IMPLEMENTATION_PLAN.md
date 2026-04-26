@@ -93,8 +93,12 @@ Tasks:
 - Add a daemon event bus with fan-out to connected clients.
 - Add a persistent `session.subscribe` stream for HUD and CLI clients.
   Baseline now supports session-filtered replay and live fan-out over the
-  daemon socket; model-generation-time progressive publishing remains pending.
+  daemon socket. The daemon now publishes route/status progress before provider
+  generation returns and fans out model deltas as provider callbacks arrive.
 - Stop holding the runtime mutex while model providers are generating.
+  Baseline now prepares daemon-owned message generation under the runtime mutex,
+  releases it for provider work, and reacquires it only to mint authoritative
+  event envelopes.
 - Emit `session.started`, `orchestrator.route`, `agent.status.changed`,
   `message.delta`, and `message.completed` as they happen.
 - Add integration tests for two clients receiving the same session events.

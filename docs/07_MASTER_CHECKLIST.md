@@ -113,11 +113,14 @@
 - [x] Add event fan-out to multiple clients.
 - [x] Add `session.subscribe` protocol/request baseline.
 - [x] Add live persistent `session.subscribe` stream.
-- [ ] Avoid blocking daemon mutex during model generation.
+- [x] Avoid blocking daemon mutex during model generation.
+- [x] Publish daemon-owned route/status progress before model completion.
+- [x] Publish `message.delta` events from provider stream callbacks.
 - [x] Add session registry.
 - [ ] Add shutdown handling.
 - [x] Add structured logging.
-- [ ] Add daemon integration test.
+- [x] Add focused daemon runtime mutex regression test.
+- [ ] Add full daemon socket integration test.
 
 ## 6. CLI
 
@@ -305,7 +308,7 @@
 
 ## 15.1 Next Multi-Agent Execution Tracks
 
-- [ ] Track A: daemon event bus and live session subscription.
+- [ ] Track A: daemon event bus, live session subscription, and non-blocking generation path.
 - [ ] Track B: provider readiness, effective model metadata, and provider streaming.
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
 - [ ] Track D: policy-backed tools and approval persistence.

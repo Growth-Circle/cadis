@@ -4,19 +4,20 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Instant;
 
 use cadis_models::{
-    provider_catalog, ModelInvocation, ModelProvider, ModelRequest, ModelStreamEvent,
-    ProviderCatalogEntry, ProviderReadiness,
+    provider_catalog, ModelInvocation, ModelProvider, ModelRequest, ModelResponse,
+    ModelStreamEvent, ProviderCatalogEntry, ProviderReadiness,
 };
 use cadis_policy::{PolicyDecision, PolicyEngine};
 use cadis_protocol::{
     AgentEventPayload, AgentId, AgentListPayload, AgentModelChangedPayload, AgentRenamedPayload,
     AgentSpawnRequest, AgentStatus, AgentStatusChangedPayload, ApprovalDecision, ApprovalId,
     ApprovalRequestPayload, ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent,
-    ClientRequest, DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope, EventId,
-    MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
+    ClientRequest, ContentKind, DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope,
+    EventId, MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
     ModelInvocationPayload, ModelReadiness, ModelsListPayload, OrchestratorRoutePayload,
     ProtocolVersion, RequestAcceptedPayload, RequestEnvelope, RequestId, ResponseEnvelope,
     SessionEventPayload, SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload,
@@ -104,10 +105,34 @@ pub struct RequestOutcome {
     pub events: Vec<EventEnvelope>,
 }
 
+/// Daemon-owned model generation work prepared by the runtime.
+pub struct PendingMessageGeneration {
+    /// Immediate response for the client that sent `message.send`.
+    pub response: ResponseEnvelope,
+    /// Events that are ready before provider generation starts.
+    pub initial_events: Vec<EventEnvelope>,
+    /// Provider selected by the daemon runtime.
+    pub provider: Arc<dyn ModelProvider>,
+    /// Prompt text prepared by daemon-owned routing/orchestration.
+    pub prompt: String,
+    /// Optional provider/model selected on the routed agent.
+    pub selected_model: Option<String>,
+    context: MessageGenerationContext,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MessageGenerationContext {
+    session_id: SessionId,
+    content_kind: ContentKind,
+    agent_id: AgentId,
+    agent_name: String,
+    worker: Option<WorkerDelegation>,
+}
+
 /// CADIS core runtime.
 pub struct Runtime {
     options: RuntimeOptions,
-    provider: Box<dyn ModelProvider>,
+    provider: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
     started_at: Instant,
     next_event: u64,
@@ -161,7 +186,7 @@ impl Runtime {
 
         Self {
             options,
-            provider,
+            provider: Arc::from(provider),
             tools: ToolRegistry::builtin().expect("built-in tool registry should be valid"),
             started_at: Instant::now(),
             next_event: 1,
@@ -384,6 +409,38 @@ impl Runtime {
                 "this request is defined in the protocol but is not implemented in the desktop MVP",
                 false,
             ),
+        }
+    }
+
+    /// Prepares a `message.send` request without running model generation.
+    ///
+    /// The returned plan contains all daemon-authoritative routing/session state
+    /// and enough provider context for the daemon to stream outside the runtime
+    /// mutex. Non-message requests and invalid message requests return a normal
+    /// request outcome.
+    pub fn begin_message_request(
+        &mut self,
+        envelope: RequestEnvelope,
+    ) -> Result<PendingMessageGeneration, Box<RequestOutcome>> {
+        let request_id = envelope.request_id.clone();
+
+        if let Err(error) = envelope.protocol_version.ensure_supported() {
+            return Err(Box::new(self.reject(
+                request_id,
+                "unsupported_protocol_version",
+                error.to_string(),
+                false,
+            )));
+        }
+
+        match envelope.request {
+            ClientRequest::MessageSend(request) => self.begin_message(request_id, request),
+            _ => Err(Box::new(self.reject(
+                request_id,
+                "invalid_request_type",
+                "begin_message_request only accepts message.send",
+                false,
+            ))),
         }
     }
 
@@ -662,6 +719,17 @@ impl Runtime {
         request_id: RequestId,
         request: MessageSendRequest,
     ) -> RequestOutcome {
+        match self.begin_message(request_id, request) {
+            Ok(pending) => self.complete_pending_message_blocking(pending),
+            Err(outcome) => *outcome,
+        }
+    }
+
+    fn begin_message(
+        &mut self,
+        request_id: RequestId,
+        request: MessageSendRequest,
+    ) -> Result<PendingMessageGeneration, Box<RequestOutcome>> {
         let content_kind = request.content_kind;
         let content = request.content;
         let decision =
@@ -670,7 +738,14 @@ impl Runtime {
                 .route_message(request.target_agent_id, &content, &self.agents)
             {
                 Ok(decision) => decision,
-                Err(error) => return self.reject(request_id, error.code, error.message, false),
+                Err(error) => {
+                    return Err(Box::new(self.reject(
+                        request_id,
+                        error.code,
+                        error.message,
+                        false,
+                    )));
+                }
             };
 
         let (route, spawned_agent) = match decision {
@@ -683,7 +758,14 @@ impl Runtime {
                     model: None,
                 }) {
                     Ok(record) => record,
-                    Err(error) => return self.reject(request_id, error.code, error.message, false),
+                    Err(error) => {
+                        return Err(Box::new(self.reject(
+                            request_id,
+                            error.code,
+                            error.message,
+                            false,
+                        )));
+                    }
                 };
                 (
                     RouteDecision {
@@ -829,130 +911,205 @@ impl Runtime {
             .get(&route.agent_id)
             .map(|agent| agent.model.clone())
             .filter(|model| !model.trim().is_empty());
-        let mut streamed_deltas = Vec::new();
-        let stream_result = self.provider.stream_chat(
-            ModelRequest::new(&prompt).with_selected_model(selected_model.as_deref()),
+        let response = self.accept(request_id, Vec::new()).response;
+
+        Ok(PendingMessageGeneration {
+            response,
+            initial_events: events,
+            provider: Arc::clone(&self.provider),
+            prompt,
+            selected_model,
+            context: MessageGenerationContext {
+                session_id,
+                content_kind,
+                agent_id: route.agent_id,
+                agent_name: route.agent_name,
+                worker,
+            },
+        })
+    }
+
+    /// Creates a daemon event for a streamed model delta.
+    pub fn message_delta_event(
+        &mut self,
+        pending: &PendingMessageGeneration,
+        delta: String,
+        invocation: Option<&ModelInvocation>,
+    ) -> EventEnvelope {
+        let model = invocation.map(model_invocation_payload);
+        self.session_event(
+            pending.context.session_id.clone(),
+            CadisEvent::MessageDelta(MessageDeltaPayload {
+                delta,
+                content_kind: pending.context.content_kind,
+                agent_id: Some(pending.context.agent_id.clone()),
+                agent_name: Some(pending.context.agent_name.clone()),
+                model,
+            }),
+        )
+    }
+
+    /// Finalizes a successful streamed model generation.
+    pub fn complete_message_generation(
+        &mut self,
+        pending: PendingMessageGeneration,
+        response: ModelResponse,
+        final_content: String,
+        emitted_delta: bool,
+    ) -> Vec<EventEnvelope> {
+        let mut events = Vec::new();
+        let model = Some(model_invocation_payload(&response.invocation));
+        let mut content = final_content;
+
+        if !emitted_delta {
+            for delta in response.deltas {
+                content.push_str(&delta);
+                events.push(self.message_delta_event(&pending, delta, Some(&response.invocation)));
+            }
+        }
+
+        let context = pending.context;
+        events.push(self.session_event(
+            context.session_id.clone(),
+            CadisEvent::MessageCompleted(MessageCompletedPayload {
+                content_kind: context.content_kind,
+                content: Some(content),
+                agent_id: Some(context.agent_id.clone()),
+                agent_name: Some(context.agent_name.clone()),
+                model,
+            }),
+        ));
+        events.push(self.session_event(
+            context.session_id.clone(),
+            CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                agent_id: context.agent_id.clone(),
+                status: AgentStatus::Completed,
+                task: None,
+            }),
+        ));
+        if context.agent_id.as_str() != "main" {
+            events.push(self.session_event(
+                context.session_id.clone(),
+                CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                    agent_id: AgentId::from("main"),
+                    status: AgentStatus::Completed,
+                    task: None,
+                }),
+            ));
+        }
+        if let Some(worker) = &context.worker {
+            events.push(self.session_event(
+                context.session_id.clone(),
+                CadisEvent::WorkerCompleted(WorkerEventPayload {
+                    worker_id: worker.worker_id.clone(),
+                    agent_id: Some(context.agent_id.clone()),
+                    parent_agent_id: worker.parent_agent_id.clone(),
+                    status: Some("completed".to_owned()),
+                    cli: None,
+                    cwd: None,
+                    summary: Some(worker.summary.clone()),
+                    worktree: Some(worker.worktree.clone()),
+                    artifacts: Some(worker.artifacts.clone()),
+                }),
+            ));
+        }
+        events.push(self.session_event(
+            context.session_id.clone(),
+            CadisEvent::SessionCompleted(SessionEventPayload {
+                session_id: context.session_id,
+                title: None,
+            }),
+        ));
+        events
+    }
+
+    /// Finalizes a failed streamed model generation.
+    pub fn fail_message_generation(
+        &mut self,
+        pending: PendingMessageGeneration,
+        error: cadis_models::ModelError,
+    ) -> Vec<EventEnvelope> {
+        let context = pending.context;
+        let error_message = error.message().to_owned();
+        let mut events = vec![self.session_event(
+            context.session_id.clone(),
+            CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                agent_id: context.agent_id.clone(),
+                status: AgentStatus::Failed,
+                task: Some(error_message.clone()),
+            }),
+        )];
+        if let Some(worker) = &context.worker {
+            events.push(self.session_event(
+                context.session_id.clone(),
+                CadisEvent::WorkerCompleted(WorkerEventPayload {
+                    worker_id: worker.worker_id.clone(),
+                    agent_id: Some(context.agent_id.clone()),
+                    parent_agent_id: worker.parent_agent_id.clone(),
+                    status: Some("failed".to_owned()),
+                    cli: None,
+                    cwd: None,
+                    summary: Some(error_message.clone()),
+                    worktree: Some(worker.worktree.clone()),
+                    artifacts: Some(worker.artifacts.clone()),
+                }),
+            ));
+        }
+        events.push(self.session_event(
+            context.session_id,
+            CadisEvent::SessionFailed(ErrorPayload {
+                code: error.code().to_owned(),
+                message: error_message,
+                retryable: error.retryable(),
+            }),
+        ));
+        events
+    }
+
+    fn complete_pending_message_blocking(
+        &mut self,
+        pending: PendingMessageGeneration,
+    ) -> RequestOutcome {
+        let response = pending.response.clone();
+        let mut events = pending.initial_events.clone();
+        let provider = Arc::clone(&pending.provider);
+        let mut invocation = None;
+        let mut final_content = String::new();
+        let mut emitted_delta = false;
+        let stream_result = provider.stream_chat(
+            ModelRequest::new(&pending.prompt)
+                .with_selected_model(pending.selected_model.as_deref()),
             &mut |event| {
-                if let ModelStreamEvent::Delta(delta) = event {
-                    streamed_deltas.push(delta);
+                match event {
+                    ModelStreamEvent::Started(started) | ModelStreamEvent::Completed(started) => {
+                        invocation = Some(started);
+                    }
+                    ModelStreamEvent::Delta(delta) => {
+                        final_content.push_str(&delta);
+                        emitted_delta = true;
+                        events.push(self.message_delta_event(&pending, delta, invocation.as_ref()));
+                    }
+                    ModelStreamEvent::Failed(_) => {}
                 }
                 Ok(())
             },
         );
 
         match stream_result {
-            Ok(response) => {
-                let model = Some(model_invocation_payload(&response.invocation));
-                let deltas = if streamed_deltas.is_empty() {
-                    response.deltas
-                } else {
-                    streamed_deltas
-                };
-                let mut final_content = String::new();
-                for delta in deltas {
-                    final_content.push_str(&delta);
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::MessageDelta(MessageDeltaPayload {
-                            delta,
-                            content_kind,
-                            agent_id: Some(route.agent_id.clone()),
-                            agent_name: Some(route.agent_name.clone()),
-                            model: model.clone(),
-                        }),
-                    ));
-                }
-
-                events.push(self.session_event(
-                    session_id.clone(),
-                    CadisEvent::MessageCompleted(MessageCompletedPayload {
-                        content_kind,
-                        content: Some(final_content),
-                        agent_id: Some(route.agent_id.clone()),
-                        agent_name: Some(route.agent_name.clone()),
-                        model,
-                    }),
+            Ok(model_response) => {
+                events.extend(self.complete_message_generation(
+                    pending,
+                    model_response,
+                    final_content,
+                    emitted_delta,
                 ));
-                events.push(self.session_event(
-                    session_id.clone(),
-                    CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
-                        agent_id: route.agent_id.clone(),
-                        status: AgentStatus::Completed,
-                        task: None,
-                    }),
-                ));
-                if route.agent_id.as_str() != "main" {
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
-                            agent_id: AgentId::from("main"),
-                            status: AgentStatus::Completed,
-                            task: None,
-                        }),
-                    ));
-                }
-                if let Some(worker) = &worker {
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::WorkerCompleted(WorkerEventPayload {
-                            worker_id: worker.worker_id.clone(),
-                            agent_id: Some(route.agent_id.clone()),
-                            parent_agent_id: worker.parent_agent_id.clone(),
-                            status: Some("completed".to_owned()),
-                            cli: None,
-                            cwd: None,
-                            summary: Some(worker.summary.clone()),
-                            worktree: Some(worker.worktree.clone()),
-                            artifacts: Some(worker.artifacts.clone()),
-                        }),
-                    ));
-                }
-                events.push(self.session_event(
-                    session_id.clone(),
-                    CadisEvent::SessionCompleted(SessionEventPayload {
-                        session_id,
-                        title: None,
-                    }),
-                ));
+                RequestOutcome { response, events }
             }
             Err(error) => {
-                let error_message = error.message().to_owned();
-                events.push(self.session_event(
-                    session_id.clone(),
-                    CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
-                        agent_id: route.agent_id.clone(),
-                        status: AgentStatus::Failed,
-                        task: Some(error_message.clone()),
-                    }),
-                ));
-                if let Some(worker) = &worker {
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::WorkerCompleted(WorkerEventPayload {
-                            worker_id: worker.worker_id.clone(),
-                            agent_id: Some(route.agent_id.clone()),
-                            parent_agent_id: worker.parent_agent_id.clone(),
-                            status: Some("failed".to_owned()),
-                            cli: None,
-                            cwd: None,
-                            summary: Some(error_message.clone()),
-                            worktree: Some(worker.worktree.clone()),
-                            artifacts: Some(worker.artifacts.clone()),
-                        }),
-                    ));
-                }
-                events.push(self.session_event(
-                    session_id,
-                    CadisEvent::SessionFailed(ErrorPayload {
-                        code: error.code().to_owned(),
-                        message: error_message,
-                        retryable: error.retryable(),
-                    }),
-                ));
+                events.extend(self.fail_message_generation(pending, error));
+                RequestOutcome { response, events }
             }
         }
-
-        self.accept(request_id, events)
     }
 
     fn spawn_agent(&mut self, request_id: RequestId, request: AgentSpawnRequest) -> RequestOutcome {
@@ -3344,6 +3501,10 @@ mod tests {
         SessionSubscriptionRequest, SessionTargetRequest, ToolCallRequest, WorkspaceAccess,
         WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceRegisterRequest,
     };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     fn runtime() -> Runtime {
         runtime_with_spawn_limits(AgentSpawnLimits::default())
@@ -3429,6 +3590,22 @@ mod tests {
             },
             provider,
         )
+    }
+
+    #[derive(Clone, Debug)]
+    struct CountingProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ModelProvider for CountingProvider {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn chat(&self, _prompt: &str) -> Result<Vec<String>, cadis_models::ModelError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec!["counted".to_owned()])
+        }
     }
 
     fn test_workspace(name: &str) -> PathBuf {
@@ -4039,6 +4216,49 @@ mod tests {
             .any(|event| matches!(event.event, CadisEvent::MessageDelta(_))));
         assert!(outcome
             .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
+    }
+
+    #[test]
+    fn begin_message_request_prepares_progress_without_calling_provider() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = CountingProvider {
+            calls: Arc::clone(&calls),
+        };
+        let mut runtime = runtime_with_provider(Box::new(provider), "counting");
+
+        let pending = runtime
+            .begin_message_request(RequestEnvelope::new(
+                RequestId::from("req_1"),
+                ClientId::from("cli_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "hello".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ))
+            .expect("message request should be prepared");
+
+        assert!(matches!(
+            pending.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(pending
+            .initial_events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::SessionStarted(_))));
+        assert!(pending.initial_events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentStatusChanged(payload)
+                    if payload.status == AgentStatus::Running
+            )
+        }));
+        assert!(!pending
+            .initial_events
             .iter()
             .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
     }
