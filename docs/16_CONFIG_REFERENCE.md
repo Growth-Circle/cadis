@@ -105,6 +105,9 @@ always_on_top = false
 
 [voice]
 enabled = false
+# Supported visible providers: "edge", "openai", "system".
+# "stub" is reserved for deterministic tests. Current provider implementations
+# are daemon-local stubs and do not call external APIs.
 provider = "edge"
 voice_id = "id-ID-GadisNeural"
 stt_language = "auto"
@@ -127,6 +130,12 @@ default_worker_role = "Worker"
 ```
 
 An example file is available at `config/cadis.example.toml`.
+
+Voice preferences are interpreted by `cadisd`. The speech policy respects
+`enabled`, `auto_speak`, and `max_spoken_chars` before dispatching text to a
+provider. The daemon blocks code, diffs, terminal logs, and long raw tool or
+test output from speech. HUD/Tauri remains the local microphone and playback
+bridge where platform APIs require it.
 
 ## 3. Profile Home Layout
 

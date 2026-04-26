@@ -591,6 +591,11 @@ remains the local capture/playback bridge for microphone permissions,
 `MediaRecorder`, WebAudio PCM fallback, whisper execution, and native audio
 playback.
 
+Supported daemon-visible TTS provider IDs are `edge`, `openai`, and `system`.
+The `stub` provider is available for deterministic tests. In this slice all
+provider implementations are daemon-local stubs: they validate policy and emit
+voice lifecycle events without calling external APIs or reading secrets.
+
 ```json
 {
   "type": "voice.preflight",
@@ -610,6 +615,12 @@ playback.
   ]
 }
 ```
+
+The daemon applies speech policy before provider dispatch. Final assistant
+messages may emit `voice.started` and `voice.completed` only after
+`message.completed`, only when `enabled` and `auto_speak` are true, and only for
+speakable content. Code, diffs, terminal logs, and long raw tool or test output
+must not produce voice playback events.
 
 `status` values are `ok`, `warn`, or `error`. The daemon also accepts HUD-local
 aliases such as `pass` and `fail` and normalizes them before emitting

@@ -39,7 +39,10 @@ always_on_top = false
 [voice]
 enabled = false
 # Supported daemon-visible providers: "edge", "openai", "system".
-# HUD/Tauri remains the local microphone and playback bridge for this slice.
+# Tests may use the deterministic "stub" provider. The current daemon provider
+# implementations are local stubs and do not call external APIs.
+# HUD/Tauri remains the local microphone and playback bridge where platform APIs
+# require it.
 provider = "edge"
 voice_id = "id-ID-GadisNeural"
 stt_language = "auto"

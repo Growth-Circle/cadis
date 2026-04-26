@@ -514,6 +514,10 @@ Drive the voice status and doctor rows in the HUD config dialog.
 daemon `ok`, `warn`, and `error` statuses to its existing pass/warn/fail doctor
 presentation.
 
+Daemon-visible TTS provider IDs are `edge`, `openai`, and `system`; `stub` is
+reserved for deterministic tests. Current daemon providers are local stubs that
+validate speech policy and emit lifecycle events without external API calls.
+
 ## 7. RamaClaw Topic Mapping
 
 | RamaClaw topic/message | CADIS request/event |
@@ -573,6 +577,11 @@ The HUD must speak only speakable content:
 | diff | no |
 | terminal_log | no |
 | test_result | short summary only |
+
+`cadisd` applies this policy before provider dispatch. Auto-speak waits for the
+final `message.completed` event and may then emit `voice.started` and
+`voice.completed` for short speakable content. Code, diffs, terminal logs, and
+long raw tool or test output must not emit voice playback events.
 
 ## 10. Validation
 

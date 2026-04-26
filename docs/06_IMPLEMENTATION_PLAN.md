@@ -181,6 +181,9 @@ Tasks:
 - Green slice: expose `voice.status`, `voice.doctor`, and `voice.preflight`
   so CLI/HUD can see daemon-owned voice status while HUD/Tauri remains the
   local capture/playback bridge.
+- Green slice: define the daemon TTS provider trait, local provider stubs for
+  `edge`, `openai`, and `system`, and speech policy that blocks code, diffs,
+  terminal logs, and long raw tool/test output before provider dispatch.
 - Handle daemon voice events in HUD.
 
 Exit criteria:

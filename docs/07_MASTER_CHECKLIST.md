@@ -245,22 +245,22 @@
 
 ## 14. Voice Output
 
-- [ ] Define TTS provider trait.
-- [ ] Define speech policy.
-- [ ] Add voice on/off config.
-- [ ] Add explicit TTS provider config (`edge`, `openai`, `system`).
+- [x] Define TTS provider trait.
+- [x] Define speech policy.
+- [x] Add voice on/off config.
+- [x] Add explicit TTS provider config (`edge`, `openai`, `system`).
 - [x] Separate HUD STT language from TTS voice.
 - [x] Add HUD-local voice doctor/preflight.
 - [x] Add WebAudio PCM fallback for WebKit MediaRecorder zero-chunk mic capture.
-- [ ] Promote voice doctor/preflight into daemon-visible status.
+- [x] Promote voice doctor/preflight into daemon-visible status.
 - [ ] Handle daemon voice events in HUD.
-- [ ] Add provider stub.
+- [x] Add provider stub.
 - [ ] Implement first provider.
-- [ ] Speak short normal answers.
+- [x] Speak short normal answers.
 - [ ] Summarize long answers.
-- [ ] Block code/diff/log speech.
+- [x] Block code/diff/log speech.
 - [ ] Speak approval risk summary.
-- [ ] Add speech routing tests.
+- [x] Add speech routing tests.
 
 ## 15. HUD
 
