@@ -9,14 +9,23 @@
  *
  * Mic button uses the Web Speech API; gracefully disabled if unavailable.
  */
-import { useState, useRef, useEffect } from "react";
-import { useHud, type ChatMessage } from "../hudState.js";
+import { useState, useRef, useEffect, useMemo } from "react";
+import type { KeyboardEvent } from "react";
+import { useHud, type AgentLive, type ChatMessage } from "../hudState.js";
 import { sendUserMessage } from "../cadisActions.js";
 import { speak, stopSpeaking } from "../../lib/voice/tts.js";
 import { available as sttAvailable, startListening, type SttSession } from "../../lib/voice/stt.js";
 import { VOICES } from "../../lib/voice/voices.js";
 
 const WAVE_BARS = Array.from({ length: 48 }, (_, i) => i);
+const MAX_MENTION_OPTIONS = 8;
+
+export type MentionOption = {
+  id: string;
+  name: string;
+  role: string;
+  status: string;
+};
 
 function fmtTime(ts: number): string {
   const d = new Date(ts);
@@ -31,19 +40,37 @@ export function ChatPanel() {
   const voiceState = useHud((s) => s.voiceState);
   const setVoiceState = useHud((s) => s.setVoiceState);
   const openConfig = useHud((s) => s.setConfigOpen);
+  const agents = useHud((s) => s.agents);
   const agentModels = useHud((s) => s.agentModels);
   const defaultModel = useHud((s) => s.defaultModel);
   const mainName = useHud((s) => s.agents.find((a) => a.spec.id === "main")?.spec.name ?? "CADIS");
   const [draft, setDraft] = useState("");
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [dismissedMentionDraft, setDismissedMentionDraft] = useState<string | null>(null);
   const [listening, setListening] = useState(false);
   const [partial, setPartial] = useState("");
   const sttRef = useRef<SttSession | null>(null);
   const scroll = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const lastSpokenIdRef = useRef<string | null>(null);
+  const mentionQuery = getActiveMentionQuery(draft);
+  const mentionOptions = useMemo(
+    () => (mentionQuery === null ? [] : buildMentionOptions(agents, mentionQuery)),
+    [agents, mentionQuery],
+  );
+  const showMentionMenu =
+    gateway === "connected" &&
+    mentionQuery !== null &&
+    dismissedMentionDraft !== draft &&
+    mentionOptions.length > 0;
 
   useEffect(() => {
     if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
   }, [messages.length]);
+
+  useEffect(() => {
+    setMentionIndex(0);
+  }, [mentionQuery, mentionOptions.length]);
 
   useEffect(() => {
     const last = messages[messages.length - 1];
@@ -124,6 +151,46 @@ export function ChatPanel() {
   };
 
   const submit = () => submitText(draft);
+
+  const applyMention = (option: MentionOption) => {
+    const next = `@${option.id} `;
+    setDraft(next);
+    setDismissedMentionDraft(null);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(next.length, next.length);
+    });
+  };
+
+  const handleDraftKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showMentionMenu) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setMentionIndex((index) => (index + 1) % mentionOptions.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setMentionIndex((index) => (index - 1 + mentionOptions.length) % mentionOptions.length);
+        return;
+      }
+      if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") {
+        event.preventDefault();
+        applyMention(mentionOptions[mentionIndex] ?? mentionOptions[0]!);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDismissedMentionDraft(draft);
+        return;
+      }
+    }
+
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    }
+  };
 
   const sttLang = (() => {
     const v = VOICES.find((x) => x.id === prefs.voiceId);
@@ -251,61 +318,93 @@ export function ChatPanel() {
           </button>
         ))}
       </div>
-      <form
-        className="chat-panel__compose"
-        onSubmit={(e) => {
-          e.preventDefault();
-          submit();
-        }}
-      >
-        <button
-          type="button"
-          className={`chat-panel__icon-btn${listening ? " chat-panel__icon-btn--active" : ""}`}
-          onClick={toggleMic}
-          title={listening ? "Stop listening" : `Talk to ${mainName}`}
-          aria-label="microphone"
-        >
-          {listening ? "●" : "○"}
-        </button>
-        <button
-          type="button"
-          className="chat-panel__icon-btn"
-          onClick={() => openConfig(true, "voice")}
-          title="Voice settings"
-          aria-label="voice settings"
-        >
-          ⚙
-        </button>
-        <button
-          type="button"
-          className="chat-panel__icon-btn"
-          onClick={() => openConfig(true, "models")}
-          title="Model settings"
-          aria-label="model settings"
-        >
-          ◊
-        </button>
-        <textarea
-          rows={1}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
+      <div className="chat-panel__compose-wrap">
+        {showMentionMenu && (
+          <div
+            id="agent-mention-list"
+            className="chat-panel__mentions"
+            role="listbox"
+            aria-label="agent mentions"
+          >
+            {mentionOptions.map((option, index) => (
+              <button
+                key={option.id}
+                type="button"
+                role="option"
+                aria-selected={index === mentionIndex}
+                className={`chat-panel__mention${index === mentionIndex ? " chat-panel__mention--active" : ""}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setMentionIndex(index)}
+                onClick={() => applyMention(option)}
+              >
+                <span className="chat-panel__mention-handle">@{option.id}</span>
+                <span className="chat-panel__mention-name">{option.name}</span>
+                <span className="chat-panel__mention-role">{option.role}</span>
+                <span className={`chat-panel__mention-status chat-panel__mention-status--${option.status}`}>
+                  {option.status}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+        <form
+          className="chat-panel__compose"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit();
           }}
-          placeholder={
-            gateway === "connected"
-              ? "or type a command..."
-              : "waiting for CADIS..."
-          }
-          disabled={gateway !== "connected"}
-        />
-        <button type="submit" disabled={!draft.trim() || gateway !== "connected"}>
-          SEND
-        </button>
-      </form>
+        >
+          <button
+            type="button"
+            className={`chat-panel__icon-btn${listening ? " chat-panel__icon-btn--active" : ""}`}
+            onClick={toggleMic}
+            title={listening ? "Stop listening" : `Talk to ${mainName}`}
+            aria-label="microphone"
+          >
+            {listening ? "●" : "○"}
+          </button>
+          <button
+            type="button"
+            className="chat-panel__icon-btn"
+            onClick={() => openConfig(true, "voice")}
+            title="Voice settings"
+            aria-label="voice settings"
+          >
+            ⚙
+          </button>
+          <button
+            type="button"
+            className="chat-panel__icon-btn"
+            onClick={() => openConfig(true, "models")}
+            title="Model settings"
+            aria-label="model settings"
+          >
+            ◊
+          </button>
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={draft}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setDismissedMentionDraft(null);
+            }}
+            onKeyDown={handleDraftKeyDown}
+            aria-autocomplete="list"
+            aria-controls={showMentionMenu ? "agent-mention-list" : undefined}
+            aria-expanded={showMentionMenu}
+            placeholder={
+              gateway === "connected"
+                ? "or type a command..."
+                : "waiting for CADIS..."
+            }
+            disabled={gateway !== "connected"}
+          />
+          <button type="submit" disabled={!draft.trim() || gateway !== "connected"}>
+            SEND
+          </button>
+        </form>
+      </div>
     </section>
   );
 }
@@ -357,4 +456,41 @@ function voiceStatusLabel(
 function compactModelLabel(model: string): string {
   const clean = model.replace(/^openai-codex\//, "").replace(/^openai\//, "");
   return clean.length > 22 ? `${clean.slice(0, 19)}...` : clean;
+}
+
+export function getActiveMentionQuery(value: string): string | null {
+  const match = value.match(/^@([A-Za-z0-9._-]*)$/);
+  return match ? (match[1] ?? "") : null;
+}
+
+export function buildMentionOptions(agents: AgentLive[], query: string): MentionOption[] {
+  const normalizedQuery = normalizeMentionSearch(query);
+  return agents
+    .map((agent) => ({
+      id: agent.spec.id,
+      name: agent.spec.name,
+      role: agent.spec.role,
+      status: agent.status,
+    }))
+    .filter((option) => {
+      if (!normalizedQuery) return true;
+      return [option.id, option.name, option.role].some((value) =>
+        normalizeMentionSearch(value).includes(normalizedQuery),
+      );
+    })
+    .sort((left, right) => mentionSortScore(left, normalizedQuery) - mentionSortScore(right, normalizedQuery))
+    .slice(0, MAX_MENTION_OPTIONS);
+}
+
+function mentionSortScore(option: MentionOption, normalizedQuery: string): number {
+  if (!normalizedQuery) return option.id === "main" ? -1 : 0;
+  const id = normalizeMentionSearch(option.id);
+  const name = normalizeMentionSearch(option.name);
+  if (id === normalizedQuery || name === normalizedQuery) return 0;
+  if (id.startsWith(normalizedQuery) || name.startsWith(normalizedQuery)) return 1;
+  return 2;
+}
+
+function normalizeMentionSearch(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }

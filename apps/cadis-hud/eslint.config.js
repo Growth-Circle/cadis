@@ -23,6 +23,8 @@ export default [
         clearTimeout: "readonly",
         setInterval: "readonly",
         clearInterval: "readonly",
+        Element: "readonly",
+        EventTarget: "readonly",
         HTMLDivElement: "readonly",
         HTMLElement: "readonly",
         HTMLInputElement: "readonly",
