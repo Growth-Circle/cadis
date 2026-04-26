@@ -6,7 +6,8 @@ workspace registry and active grants under the default profile, exposes
 `workspace list/register/grant/revoke/doctor` through the protocol and CLI, and
 keeps tool execution behind daemon-resolved workspace grants. Real worker
 worktree creation/cleanup, checkpoint rollback, workspace-local skill
-enforcement, and denied-path enforcement for mutating tools remain future work.
+enforcement, artifact production, and denied-path enforcement for mutating tools
+remain future work.
 
 ## 1. Purpose
 
@@ -51,10 +52,15 @@ Implemented baseline:
 - `workspace doctor` includes profile/agent-home diagnostics for missing,
   corrupt, and oversized agent files.
 - Worker events include planned worktree/artifact metadata.
+- Store helpers now resolve project worker worktree paths and metadata files
+  under `<project>/.cadis/worktrees/`, resolve worker artifact paths under
+  `profiles/<profile>/artifacts/workers/`, and let `workspace doctor` report
+  stale worker worktree metadata or missing artifact roots.
 
 Still future:
 
 - Worker worktree creation/cleanup.
+- Worker artifact production and durable worker runtime records.
 - Checkpoint and rollback manager.
 - Dedicated profile and agent doctor commands.
 - Workspace-local skills and project `.cadis/` metadata enforcement.
@@ -261,6 +267,19 @@ Worker state and artifacts live under the profile:
 ~/.cadis/profiles/default/workers/<worker-id>.jsonl
 ~/.cadis/profiles/default/artifacts/workers/<worker-id>/
 ```
+
+Project-local worker worktree metadata lives beside the project worktree root:
+
+```text
+<project>/.cadis/worktrees/
+|-- <worker-id>/                  # planned/actual git worktree checkout
+`-- .metadata/
+    `-- <worker-id>.toml          # worker ID, workspace ID, path, branch, base ref, state, artifact root
+```
+
+`workspace doctor` treats these metadata files as diagnostics only. It warns
+when a recorded worktree path or profile artifact root is stale/missing; it does
+not create, remove, or mutate git worktrees.
 
 Workers receive write/exec grants only for their worktree unless the user
 explicitly approves broader access. The parent project checkout remains

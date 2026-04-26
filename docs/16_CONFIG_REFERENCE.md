@@ -41,6 +41,7 @@ first run:
 |       |-- workers/
 |       |-- sessions/
 |       |-- artifacts/
+|       |   `-- workers/
 |       |-- checkpoints/
 |       |-- sandboxes/
 |       |-- eventlog/
@@ -161,6 +162,7 @@ profile state:
 |-- workers/
 |-- sessions/
 |-- artifacts/
+|   `-- workers/
 |-- checkpoints/
 |-- sandboxes/
 |-- eventlog/
@@ -255,6 +257,23 @@ execution.
 missing, invalid TOML, and oversized agent files. Dedicated `profile doctor` and
 `agent doctor` commands remain future work.
 
+## 3.2 Worker Artifact Paths
+
+Worker output artifacts are profile-scoped, not project-scoped:
+
+```text
+~/.cadis/profiles/<profile>/artifacts/workers/<worker-id>/
+|-- patch.diff
+|-- test-report.json
+|-- summary.md
+|-- changed-files.json
+`-- memory-candidates.jsonl
+```
+
+The store crate exposes path helpers for this layout. The current runtime can
+include these planned locations in worker events; producing the files is still
+part of the future worker runtime.
+
 ## 4. Workspace Registry
 
 Profile workspace metadata lives at:
@@ -330,6 +349,23 @@ media_root = ".cadis/media"
 missing, errors when `workspace_id` does not match the profile registry entry,
 and warns when project-local roots are absolute instead of project-relative.
 The file is metadata only; it does not create a workspace grant.
+
+## 4.2 Project Worker Worktree Metadata
+
+Worker worktree metadata is stored below the project worktree root:
+
+```text
+<project>/.cadis/worktrees/
+|-- <worker-id>/
+`-- .metadata/
+    `-- <worker-id>.toml
+```
+
+Each worker metadata file records the worker ID, workspace ID, planned or actual
+worktree path, branch name, optional base ref, lifecycle state, and profile
+artifact root. `workspace doctor` reports invalid TOML, stale/missing worktree
+paths, and stale/missing artifact roots. These checks are diagnostics only and
+do not run `git worktree` commands.
 
 ## 5. Native Avatar Config Contract
 

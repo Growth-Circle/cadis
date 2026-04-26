@@ -29,8 +29,8 @@ use cadis_protocol::{
 use cadis_store::{
     redact, AgentHomeDiagnostic, AgentHomeDoctorOptions, AgentHomeTemplate, ApprovalRecord,
     ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
-    GrantSource as StoreGrantSource, ProfileHome, ProjectWorkspaceStore, StateStore,
-    WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
+    GrantSource as StoreGrantSource, ProfileHome, ProjectWorkspaceStore, ProjectWorktreeDiagnostic,
+    StateStore, WorkerArtifactPathSet, WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
     WorkspaceGrantRecord as StoreWorkspaceGrantRecord, WorkspaceKind as StoreWorkspaceKind,
     WorkspaceMetadata, WorkspaceRegistry, WorkspaceVcs,
 };
@@ -761,7 +761,6 @@ impl Runtime {
         self.next_route += 1;
 
         let session_workspace = self.session_workspace(&session_id);
-        let artifact_root = self.options.cadis_home.join("artifacts").join("workers");
         let worker = route.worker_summary.as_ref().map(|summary| {
             let worker_id = self.next_worker_id();
             WorkerDelegation {
@@ -770,7 +769,9 @@ impl Runtime {
                     session_workspace.as_deref(),
                     &route.content,
                 ),
-                artifacts: worker_artifact_locations(&artifact_root, &worker_id),
+                artifacts: worker_artifact_locations(
+                    &self.profile_home.worker_artifact_paths(&worker_id),
+                ),
                 worker_id,
                 parent_agent_id: self
                     .agents
@@ -1462,6 +1463,7 @@ impl Runtime {
                 Ok(root) => {
                     checks.push(root_check("request.root", &root));
                     checks.extend(project_workspace_metadata_checks_for_root(&root));
+                    checks.extend(project_worker_worktree_checks_for_root(&root));
                 }
                 Err(error) => checks.push(WorkspaceDoctorCheck {
                     name: "request.root".to_owned(),
@@ -3009,6 +3011,7 @@ fn project_workspace_metadata_checks(workspace: &WorkspaceRecord) -> Vec<Workspa
     }
 
     let mut checks = project_workspace_metadata_checks_for_root(&workspace.root);
+    checks.extend(project_worker_worktree_checks_for_root(&workspace.root));
     let Some(metadata) = ProjectWorkspaceStore::new(&workspace.root)
         .load()
         .ok()
@@ -3078,6 +3081,31 @@ fn project_workspace_metadata_checks_for_root(root: &Path) -> Vec<WorkspaceDocto
                 store.workspace_toml_path().display()
             ),
         }],
+    }
+}
+
+fn project_worker_worktree_checks_for_root(root: &Path) -> Vec<WorkspaceDoctorCheck> {
+    let store = ProjectWorkspaceStore::new(root);
+    match store.worker_worktree_diagnostics() {
+        Ok(diagnostics) => diagnostics
+            .into_iter()
+            .map(project_worktree_diagnostic_check)
+            .collect(),
+        Err(error) => vec![WorkspaceDoctorCheck {
+            name: "workspace.worktrees.metadata".to_owned(),
+            status: "error".to_owned(),
+            message: format!("could not inspect worker worktree metadata: {error}"),
+        }],
+    }
+}
+
+fn project_worktree_diagnostic_check(
+    diagnostic: ProjectWorktreeDiagnostic,
+) -> WorkspaceDoctorCheck {
+    WorkspaceDoctorCheck {
+        name: diagnostic.name,
+        status: diagnostic.status,
+        message: diagnostic.message,
     }
 }
 
@@ -3386,9 +3414,11 @@ fn planned_worker_worktree(
 ) -> WorkerWorktreeIntent {
     let worktree_root = workspace
         .map(|workspace| {
-            Path::new(workspace)
-                .join(".cadis")
-                .join("worktrees")
+            let store = ProjectWorkspaceStore::new(workspace);
+            let metadata = store.load().ok().flatten();
+            store
+                .worker_worktree_paths(worker_id, metadata.as_ref())
+                .worktree_root
                 .display()
                 .to_string()
         })
@@ -3410,17 +3440,14 @@ fn planned_worker_worktree(
     }
 }
 
-fn worker_artifact_locations(root: &Path, worker_id: &str) -> WorkerArtifactLocations {
-    let root = root.join(worker_id);
-    let root_display = root.display().to_string();
-
+fn worker_artifact_locations(paths: &WorkerArtifactPathSet) -> WorkerArtifactLocations {
     WorkerArtifactLocations {
-        root: root_display,
-        patch: root.join("patch.diff").display().to_string(),
-        test_report: root.join("test-report.json").display().to_string(),
-        summary: root.join("summary.md").display().to_string(),
-        changed_files: root.join("changed-files.json").display().to_string(),
-        memory_candidates: root.join("memory-candidates.jsonl").display().to_string(),
+        root: paths.root.display().to_string(),
+        patch: paths.patch.display().to_string(),
+        test_report: paths.test_report.display().to_string(),
+        summary: paths.summary.display().to_string(),
+        changed_files: paths.changed_files.display().to_string(),
+        memory_candidates: paths.memory_candidates.display().to_string(),
     }
 }
 
@@ -3879,6 +3906,59 @@ mod tests {
                 CadisEvent::WorkspaceDoctorResponse(payload)
                     if payload.checks.iter().any(|check| check.name == "workspace.metadata"
                         && check.status == "warn")
+            )
+        }));
+    }
+
+    #[test]
+    fn workspace_doctor_reports_stale_worker_worktree_metadata() {
+        let workspace = test_workspace("doctor-stale-worktree");
+        let mut runtime = runtime();
+        let store = cadis_store::ProjectWorkspaceStore::new(&workspace);
+        store
+            .save(&cadis_store::ProjectWorkspaceMetadata {
+                workspace_id: "doctor-stale".to_owned(),
+                kind: cadis_store::WorkspaceKind::Project,
+                vcs: cadis_store::WorkspaceVcs::Git,
+                worktree_root: PathBuf::from(".cadis/worktrees"),
+                artifact_root: PathBuf::from(".cadis/artifacts"),
+                media_root: PathBuf::from(".cadis/media"),
+            })
+            .expect("project workspace metadata should save");
+        store
+            .save_worker_worktree_metadata(&cadis_store::ProjectWorkerWorktreeMetadata {
+                worker_id: "worker_000001".to_owned(),
+                workspace_id: "doctor-stale".to_owned(),
+                worktree_path: PathBuf::from(".cadis/worktrees/worker_000001"),
+                branch_name: "cadis/worker_000001/example".to_owned(),
+                base_ref: Some("HEAD".to_owned()),
+                state: cadis_store::ProjectWorkerWorktreeState::Planned,
+                artifact_root: runtime
+                    .profile_home
+                    .root()
+                    .join("artifacts/workers/worker_000001"),
+            })
+            .expect("worker worktree metadata should save");
+
+        register_workspace(&mut runtime, "doctor-stale", &workspace);
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_workspace_doctor"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceDoctor(WorkspaceDoctorRequest {
+                workspace_id: Some(WorkspaceId::from("doctor-stale")),
+                root: None,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkspaceDoctorResponse(payload)
+                    if payload.checks.iter().any(|check| check.name == "workspace.worktrees.worker_000001.path"
+                        && check.status == "warn")
+                        && payload.checks.iter().any(|check| check.name == "workspace.worktrees.worker_000001.artifacts"
+                            && check.status == "warn")
             )
         }));
     }
@@ -4788,8 +4868,8 @@ mod tests {
             "cadis/worker_000001/run-focused-tests"
         );
         let expected_patch = runtime
-            .options
-            .cadis_home
+            .profile_home
+            .root()
             .join("artifacts/workers/worker_000001/patch.diff")
             .display()
             .to_string();

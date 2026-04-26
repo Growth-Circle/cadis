@@ -422,6 +422,26 @@ impl ProfileHome {
         self.workspaces_dir().join("grants.jsonl")
     }
 
+    /// Returns the profile worker artifact root.
+    pub fn worker_artifacts_dir(&self) -> PathBuf {
+        self.root.join("artifacts").join("workers")
+    }
+
+    /// Returns conventional artifact paths for one worker.
+    pub fn worker_artifact_paths(&self, worker_id: impl AsRef<str>) -> WorkerArtifactPathSet {
+        WorkerArtifactPathSet::new(self.worker_artifacts_dir(), worker_id)
+    }
+
+    /// Ensures the artifact root for one worker exists.
+    pub fn ensure_worker_artifact_layout(
+        &self,
+        worker_id: impl AsRef<str>,
+    ) -> Result<WorkerArtifactPathSet, StoreError> {
+        let paths = self.worker_artifact_paths(worker_id);
+        create_private_dir(&paths.root)?;
+        Ok(paths)
+    }
+
     /// Ensures the profile directory skeleton exists with private permissions.
     pub fn ensure_layout(&self) -> Result<(), StoreError> {
         create_private_dir(&self.root)?;
@@ -1022,6 +1042,38 @@ pub struct AgentHomeDiagnostic {
     pub message: String,
 }
 
+/// Conventional worker artifact paths under a profile home.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkerArtifactPathSet {
+    /// Worker artifact root.
+    pub root: PathBuf,
+    /// Patch/diff artifact path.
+    pub patch: PathBuf,
+    /// Test report artifact path.
+    pub test_report: PathBuf,
+    /// Worker summary artifact path.
+    pub summary: PathBuf,
+    /// Changed-files manifest path.
+    pub changed_files: PathBuf,
+    /// Memory candidate JSONL path.
+    pub memory_candidates: PathBuf,
+}
+
+impl WorkerArtifactPathSet {
+    /// Creates conventional artifact paths below `artifacts/workers/<worker-id>`.
+    pub fn new(root: impl AsRef<Path>, worker_id: impl AsRef<str>) -> Self {
+        let root = root.as_ref().join(safe_file_stem(worker_id.as_ref()));
+        Self {
+            patch: root.join("patch.diff"),
+            test_report: root.join("test-report.json"),
+            summary: root.join("summary.md"),
+            changed_files: root.join("changed-files.json"),
+            memory_candidates: root.join("memory-candidates.jsonl"),
+            root,
+        }
+    }
+}
+
 /// Profile-local workspace registry stored as TOML.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 pub struct WorkspaceRegistry {
@@ -1236,10 +1288,40 @@ impl ProjectWorkspaceStore {
         self.cadis_dir().join("workspace.toml")
     }
 
+    /// Returns the project worktree root from metadata or the default convention.
+    pub fn worktree_root(&self, metadata: Option<&ProjectWorkspaceMetadata>) -> PathBuf {
+        let root = metadata
+            .map(|metadata| metadata.worktree_root.as_path())
+            .unwrap_or_else(|| Path::new(".cadis/worktrees"));
+        self.project_relative_path(root)
+    }
+
+    /// Returns the project-local worktree metadata directory.
+    pub fn worktree_metadata_dir(&self, metadata: Option<&ProjectWorkspaceMetadata>) -> PathBuf {
+        self.worktree_root(metadata).join(".metadata")
+    }
+
+    /// Returns worker-specific worktree and metadata paths.
+    pub fn worker_worktree_paths(
+        &self,
+        worker_id: impl AsRef<str>,
+        metadata: Option<&ProjectWorkspaceMetadata>,
+    ) -> ProjectWorkerWorktreePaths {
+        let worker_id = safe_file_stem(worker_id.as_ref());
+        let worktree_root = self.worktree_root(metadata);
+        let metadata_dir = self.worktree_metadata_dir(metadata);
+        ProjectWorkerWorktreePaths {
+            worker_id: worker_id.clone(),
+            worktree_root: worktree_root.clone(),
+            worktree_path: worktree_root.join(&worker_id),
+            metadata_path: metadata_dir.join(format!("{worker_id}.toml")),
+        }
+    }
+
     /// Ensures the non-secret project `.cadis` metadata skeleton exists.
     pub fn ensure_layout(&self) -> Result<(), StoreError> {
         fs::create_dir_all(self.cadis_dir())?;
-        for path in ["worktrees", "artifacts", "media"] {
+        for path in ["worktrees", "worktrees/.metadata", "artifacts", "media"] {
             fs::create_dir_all(self.cadis_dir().join(path))?;
         }
         write_template_file_if_missing(
@@ -1269,6 +1351,199 @@ impl ProjectWorkspaceStore {
         }
         atomic_write_private_file(&self.workspace_toml_path(), toml.as_bytes())
     }
+
+    /// Writes one project-local worker worktree metadata file.
+    pub fn save_worker_worktree_metadata(
+        &self,
+        metadata: &ProjectWorkerWorktreeMetadata,
+    ) -> Result<(), StoreError> {
+        let workspace_metadata = self.load()?;
+        let paths = self.worker_worktree_paths(&metadata.worker_id, workspace_metadata.as_ref());
+        let mut toml = redact(&toml::to_string_pretty(metadata)?);
+        if !toml.ends_with('\n') {
+            toml.push('\n');
+        }
+        atomic_write_private_file(&paths.metadata_path, toml.as_bytes())
+    }
+
+    /// Loads one project-local worker worktree metadata file.
+    pub fn load_worker_worktree_metadata(
+        &self,
+        worker_id: impl AsRef<str>,
+    ) -> Result<Option<ProjectWorkerWorktreeMetadata>, StoreError> {
+        let workspace_metadata = self.load()?;
+        let paths = self.worker_worktree_paths(worker_id, workspace_metadata.as_ref());
+        if !paths.metadata_path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(paths.metadata_path)?;
+        Ok(Some(toml::from_str::<ProjectWorkerWorktreeMetadata>(
+            &content,
+        )?))
+    }
+
+    /// Recovers project-local worker worktree metadata and reports invalid TOML.
+    pub fn recover_worker_worktree_metadata(
+        &self,
+    ) -> Result<ProjectWorkerWorktreeRecovery, StoreError> {
+        let workspace_metadata = self.load()?;
+        let metadata_dir = self.worktree_metadata_dir(workspace_metadata.as_ref());
+        if !metadata_dir.exists() {
+            return Ok(ProjectWorkerWorktreeRecovery::default());
+        }
+
+        let mut records = Vec::new();
+        let mut diagnostics = Vec::new();
+        for entry in fs::read_dir(metadata_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|value| value.to_str()) != Some("toml")
+            {
+                continue;
+            }
+
+            match fs::read_to_string(&path) {
+                Ok(content) => match toml::from_str::<ProjectWorkerWorktreeMetadata>(&content) {
+                    Ok(metadata) => records.push(ProjectWorkerWorktreeRecord { path, metadata }),
+                    Err(error) => diagnostics.push(ProjectWorktreeDiagnostic {
+                        name: "workspace.worktrees.metadata".to_owned(),
+                        status: "error".to_owned(),
+                        message: format!("{} is invalid TOML: {error}", path.display()),
+                    }),
+                },
+                Err(error) => diagnostics.push(ProjectWorktreeDiagnostic {
+                    name: "workspace.worktrees.metadata".to_owned(),
+                    status: "error".to_owned(),
+                    message: format!("could not read {}: {error}", path.display()),
+                }),
+            }
+        }
+
+        Ok(ProjectWorkerWorktreeRecovery {
+            records,
+            diagnostics,
+        })
+    }
+
+    /// Runs stale project worktree metadata and artifact-root diagnostics.
+    pub fn worker_worktree_diagnostics(
+        &self,
+    ) -> Result<Vec<ProjectWorktreeDiagnostic>, StoreError> {
+        let mut recovery = self.recover_worker_worktree_metadata()?;
+        let mut diagnostics = Vec::new();
+        diagnostics.append(&mut recovery.diagnostics);
+
+        diagnostics.push(ProjectWorktreeDiagnostic {
+            name: "workspace.worktrees.metadata".to_owned(),
+            status: "ok".to_owned(),
+            message: format!(
+                "{} worker worktree metadata record(s)",
+                recovery.records.len()
+            ),
+        });
+
+        for record in recovery.records {
+            let worker_id = safe_file_stem(&record.metadata.worker_id);
+            let worktree_path = self.project_relative_path(&record.metadata.worktree_path);
+            diagnostics.push(path_diagnostic(
+                &format!("workspace.worktrees.{worker_id}.path"),
+                &worktree_path,
+                format!("worker worktree path from {}", record.path.display()),
+            ));
+
+            let artifact_root = self.project_relative_path(&record.metadata.artifact_root);
+            diagnostics.push(path_diagnostic(
+                &format!("workspace.worktrees.{worker_id}.artifacts"),
+                &artifact_root,
+                "worker artifact root".to_owned(),
+            ));
+        }
+
+        Ok(diagnostics)
+    }
+
+    fn project_relative_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        }
+    }
+}
+
+/// Worker-specific project worktree path set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectWorkerWorktreePaths {
+    /// Redaction-safe worker ID path component.
+    pub worker_id: String,
+    /// Root directory where CADIS project worktrees live.
+    pub worktree_root: PathBuf,
+    /// Worker-specific worktree directory.
+    pub worktree_path: PathBuf,
+    /// Project-local metadata TOML path for this worker.
+    pub metadata_path: PathBuf,
+}
+
+/// Project-local worker worktree metadata stored below `.cadis/worktrees/.metadata/`.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct ProjectWorkerWorktreeMetadata {
+    /// Worker ID.
+    pub worker_id: String,
+    /// Workspace registry ID.
+    pub workspace_id: String,
+    /// Planned or actual worktree path. Relative paths resolve against the project root.
+    pub worktree_path: PathBuf,
+    /// Intended or actual branch name.
+    pub branch_name: String,
+    /// Base ref for branch creation, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    /// Current worktree metadata lifecycle state.
+    pub state: ProjectWorkerWorktreeState,
+    /// Profile-scoped worker artifact root. Relative paths resolve against the project root.
+    pub artifact_root: PathBuf,
+}
+
+/// Project-local worker worktree metadata lifecycle state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectWorkerWorktreeState {
+    /// Worktree has been planned but not created.
+    Planned,
+    /// Worktree exists and is assigned to the worker.
+    Ready,
+    /// Worktree has been removed while metadata remains for diagnostics/audit.
+    Removed,
+}
+
+/// Recovered project worker worktree metadata.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProjectWorkerWorktreeRecovery {
+    /// Valid metadata records.
+    pub records: Vec<ProjectWorkerWorktreeRecord>,
+    /// Invalid TOML diagnostics.
+    pub diagnostics: Vec<ProjectWorktreeDiagnostic>,
+}
+
+/// One recovered project worker worktree metadata record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectWorkerWorktreeRecord {
+    /// Metadata TOML path.
+    pub path: PathBuf,
+    /// Parsed metadata.
+    pub metadata: ProjectWorkerWorktreeMetadata,
+}
+
+/// Project worktree doctor diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectWorktreeDiagnostic {
+    /// Check name.
+    pub name: String,
+    /// `ok`, `warn`, or `error`.
+    pub status: String,
+    /// Human-readable diagnostic.
+    pub message: String,
 }
 
 /// Workspace access level granted to an agent or worker.
@@ -2122,6 +2397,22 @@ fn project_gitignore_template() -> &'static str {
     "worktrees/\nartifacts/\ntmp/\nlogs/\n*.key\n*.pem\n*.token\n.env\n"
 }
 
+fn path_diagnostic(name: &str, path: &Path, label: String) -> ProjectWorktreeDiagnostic {
+    if path.is_dir() {
+        ProjectWorktreeDiagnostic {
+            name: name.to_owned(),
+            status: "ok".to_owned(),
+            message: format!("{label} exists at {}", path.display()),
+        }
+    } else {
+        ProjectWorktreeDiagnostic {
+            name: name.to_owned(),
+            status: "warn".to_owned(),
+            message: format!("{label} is stale or missing at {}", path.display()),
+        }
+    }
+}
+
 fn default_agent_denied_paths() -> Vec<PathBuf> {
     [
         "~/.ssh",
@@ -2741,6 +3032,96 @@ mod tests {
             .expect("project metadata should load")
             .expect("project metadata should exist");
         assert_eq!(loaded, metadata);
+    }
+
+    #[test]
+    fn worker_artifact_paths_are_profile_scoped() {
+        let config = test_config("worker-artifacts");
+        let profile = CadisHome::new(&config.cadis_home)
+            .init_profile("default")
+            .expect("profile should initialize");
+
+        let paths = profile
+            .ensure_worker_artifact_layout("worker/1")
+            .expect("worker artifact layout should initialize");
+
+        assert_eq!(
+            paths.root,
+            profile.root().join("artifacts/workers/worker_1")
+        );
+        assert_eq!(paths.patch, paths.root.join("patch.diff"));
+        assert!(paths.root.is_dir());
+    }
+
+    #[test]
+    fn project_worker_worktree_metadata_round_trips_and_reports_stale_paths() {
+        let config = test_config("project-worker-worktree");
+        let root = config.cadis_home.join("project");
+        fs::create_dir_all(&root).expect("project root should be created");
+        let store = ProjectWorkspaceStore::new(&root);
+        store
+            .save(&ProjectWorkspaceMetadata {
+                workspace_id: "example-project".to_owned(),
+                kind: WorkspaceKind::Project,
+                vcs: WorkspaceVcs::Git,
+                worktree_root: PathBuf::from(".cadis/worktrees"),
+                artifact_root: PathBuf::from(".cadis/artifacts"),
+                media_root: PathBuf::from(".cadis/media"),
+            })
+            .expect("project metadata should save");
+
+        let paths = store.worker_worktree_paths("worker/1", store.load().unwrap().as_ref());
+        let metadata = ProjectWorkerWorktreeMetadata {
+            worker_id: "worker/1".to_owned(),
+            workspace_id: "example-project".to_owned(),
+            worktree_path: PathBuf::from(".cadis/worktrees/worker_1"),
+            branch_name: "cadis/worker_1/example".to_owned(),
+            base_ref: Some("HEAD".to_owned()),
+            state: ProjectWorkerWorktreeState::Planned,
+            artifact_root: config
+                .cadis_home
+                .join("profiles/default/artifacts/workers/worker_1"),
+        };
+
+        store
+            .save_worker_worktree_metadata(&metadata)
+            .expect("worker worktree metadata should save");
+
+        assert!(paths.metadata_path.is_file());
+        let loaded = store
+            .load_worker_worktree_metadata("worker/1")
+            .expect("worker worktree metadata should load")
+            .expect("worker worktree metadata should exist");
+        assert_eq!(loaded, metadata);
+
+        let diagnostics = store
+            .worker_worktree_diagnostics()
+            .expect("worker worktree diagnostics should run");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.name == "workspace.worktrees.worker_1.path" && diagnostic.status == "warn"
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.name == "workspace.worktrees.worker_1.artifacts"
+                && diagnostic.status == "warn"
+        }));
+
+        fs::create_dir_all(root.join(".cadis/worktrees/worker_1"))
+            .expect("worktree dir should be created");
+        fs::create_dir_all(
+            config
+                .cadis_home
+                .join("profiles/default/artifacts/workers/worker_1"),
+        )
+        .expect("artifact root should be created");
+        let diagnostics = store
+            .worker_worktree_diagnostics()
+            .expect("worker worktree diagnostics should run");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.name == "workspace.worktrees.worker_1.path" && diagnostic.status == "ok"
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.name == "workspace.worktrees.worker_1.artifacts" && diagnostic.status == "ok"
+        }));
     }
 
     #[test]
