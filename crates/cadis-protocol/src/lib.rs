@@ -438,6 +438,9 @@ pub struct MessageSendRequest {
     /// Optional existing session ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
+    /// Optional agent target selected by the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<AgentId>,
     /// Message content.
     pub content: String,
     /// Content routing hint.
@@ -479,6 +482,9 @@ pub struct AgentModelSetRequest {
 pub struct AgentSpawnRequest {
     /// Agent role identifier.
     pub role: String,
+    /// Optional parent agent that requested or owns this child agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<AgentId>,
     /// Optional display name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -568,6 +574,9 @@ pub enum CadisEvent {
     /// Agent spawned.
     #[serde(rename = "agent.spawned")]
     AgentSpawned(AgentEventPayload),
+    /// Agent roster snapshot.
+    #[serde(rename = "agent.list.response")]
+    AgentListResponse(AgentListPayload),
     /// Agent renamed.
     #[serde(rename = "agent.renamed")]
     AgentRenamed(AgentRenamedPayload),
@@ -586,6 +595,9 @@ pub enum CadisEvent {
     /// UI preferences changed.
     #[serde(rename = "ui.preferences.updated")]
     UiPreferencesUpdated(UiPreferencesPayload),
+    /// Orchestrator routed a user request to an agent.
+    #[serde(rename = "orchestrator.route")]
+    OrchestratorRoute(OrchestratorRoutePayload),
     /// Tool was requested.
     #[serde(rename = "tool.requested")]
     ToolRequested(ToolEventPayload),
@@ -653,6 +665,12 @@ pub struct MessageDeltaPayload {
     pub delta: String,
     /// Content routing kind.
     pub content_kind: ContentKind,
+    /// Agent that produced this content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    /// Display name for the producing agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 
 /// Message completion payload.
@@ -660,6 +678,15 @@ pub struct MessageDeltaPayload {
 pub struct MessageCompletedPayload {
     /// Final content kind.
     pub content_kind: ContentKind,
+    /// Optional final content snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// Agent that produced this content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    /// Display name for the producing agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
 }
 
 /// Agent event payload.
@@ -667,6 +694,28 @@ pub struct MessageCompletedPayload {
 pub struct AgentEventPayload {
     /// Agent ID.
     pub agent_id: AgentId,
+    /// Agent role identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// User-facing display name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Parent agent ID for child/subagents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<AgentId>,
+    /// Provider/model identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Current lifecycle status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<AgentStatus>,
+}
+
+/// Agent roster snapshot payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct AgentListPayload {
+    /// Known agents.
+    pub agents: Vec<AgentEventPayload>,
 }
 
 /// Agent rename event payload.
@@ -724,6 +773,21 @@ pub struct ModelDescriptor {
 pub struct UiPreferencesPayload {
     /// Full or partial preference object.
     pub preferences: serde_json::Value,
+}
+
+/// Orchestrator routing decision payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct OrchestratorRoutePayload {
+    /// Route identifier.
+    pub id: String,
+    /// Source surface or subsystem.
+    pub source: String,
+    /// Target agent ID.
+    pub target_agent_id: AgentId,
+    /// Target agent display name.
+    pub target_agent_name: String,
+    /// Redacted routing reason.
+    pub reason: String,
 }
 
 /// Generic tool event payload.
@@ -788,6 +852,24 @@ pub struct ApprovalResolvedPayload {
 pub struct WorkerEventPayload {
     /// Worker ID.
     pub worker_id: String,
+    /// Owning or reporting agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    /// Parent agent for tree display.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<AgentId>,
+    /// Worker status label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Optional CLI or runner label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli: Option<String>,
+    /// Optional working directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Redacted worker summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// Worker log delta payload.
@@ -797,6 +879,12 @@ pub struct WorkerLogDeltaPayload {
     pub worker_id: String,
     /// Log content delta.
     pub delta: String,
+    /// Owning or reporting agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    /// Parent agent for tree display.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<AgentId>,
 }
 
 /// Patch creation payload.
@@ -955,6 +1043,8 @@ mod tests {
             CadisEvent::MessageDelta(MessageDeltaPayload {
                 delta: "Halo".to_owned(),
                 content_kind: ContentKind::Chat,
+                agent_id: None,
+                agent_name: None,
             }),
         );
 

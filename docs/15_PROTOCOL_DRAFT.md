@@ -134,12 +134,14 @@ session.failed
 message.delta
 message.completed
 agent.spawned
+agent.list.response
 agent.renamed
 agent.model.changed
 agent.status.changed
 agent.completed
 models.list.response
 ui.preferences.updated
+orchestrator.route
 tool.requested
 tool.started
 tool.completed
@@ -221,6 +223,22 @@ Later:
 
 ## 10. HUD Request Drafts
 
+### `message.send`
+
+```json
+{
+  "type": "message.send",
+  "session_id": null,
+  "target_agent_id": "codex",
+  "content": "@codex run the focused tests",
+  "content_kind": "chat"
+}
+```
+
+`target_agent_id` is optional. If it is absent, `cadisd` may resolve a leading
+`@agent` mention against agent ID, display name, or role. The original
+`content` remains canonical for auditability.
+
 ### `approval.respond`
 
 ```json
@@ -251,6 +269,20 @@ Later:
   "model": "ollama/qwen2.5-coder"
 }
 ```
+
+### `agent.spawn`
+
+```json
+{
+  "type": "agent.spawn",
+  "role": "Coding",
+  "parent_agent_id": "main",
+  "display_name": "Builder",
+  "model": "codex-cli/chatgpt-plan"
+}
+```
+
+The daemon assigns the new `agent_id` and confirms with `agent.spawned`.
 
 ### `ui.preferences.set`
 

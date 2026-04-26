@@ -7,9 +7,9 @@ use std::process::{self, Command as ProcessCommand};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cadis_protocol::{
-    ApprovalDecision, ApprovalId, ApprovalResponseRequest, ClientId, ClientRequest, ContentKind,
-    DaemonResponse, EmptyPayload, ErrorPayload, MessageSendRequest, ModelsListPayload,
-    RequestEnvelope, RequestId, ServerFrame,
+    AgentEventPayload, AgentId, AgentSpawnRequest, ApprovalDecision, ApprovalId,
+    ApprovalResponseRequest, ClientId, ClientRequest, ContentKind, DaemonResponse, EmptyPayload,
+    ErrorPayload, MessageSendRequest, ModelsListPayload, RequestEnvelope, RequestId, ServerFrame,
 };
 use cadis_store::load_config;
 
@@ -43,11 +43,33 @@ fn run() -> Result<(), Box<dyn Error>> {
             let frames = send_request(&cli, ClientRequest::ModelsList(EmptyPayload::default()))?;
             render_models(&frames, cli.json)
         }
+        Command::Agents => {
+            let frames = send_request(&cli, ClientRequest::AgentList(EmptyPayload::default()))?;
+            render_agents(&frames, cli.json)
+        }
+        Command::Spawn {
+            role,
+            name,
+            parent,
+            model,
+        } => {
+            let frames = send_request(
+                &cli,
+                ClientRequest::AgentSpawn(AgentSpawnRequest {
+                    role: role.clone(),
+                    parent_agent_id: parent.as_ref().map(|value| AgentId::from(value.clone())),
+                    display_name: name.clone(),
+                    model: model.clone(),
+                }),
+            )?;
+            render_agents(&frames, cli.json)
+        }
         Command::Chat(message) => {
             let frames = send_request(
                 &cli,
                 ClientRequest::MessageSend(MessageSendRequest {
                     session_id: None,
+                    target_agent_id: None,
                     content: message.clone(),
                     content_kind: ContentKind::Chat,
                 }),
@@ -63,6 +85,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 &cli,
                 ClientRequest::MessageSend(MessageSendRequest {
                     session_id: None,
+                    target_agent_id: None,
                     content,
                     content_kind: ContentKind::Chat,
                 }),
@@ -189,6 +212,61 @@ fn render_models(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error
         }
     }
     Ok(())
+}
+
+fn render_agents(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {
+    if json {
+        return print_json_frames(frames);
+    }
+
+    render_rejections(frames)?;
+    let mut rendered = false;
+    for frame in frames {
+        let ServerFrame::Event(event) = frame else {
+            continue;
+        };
+        match &event.event {
+            cadis_protocol::CadisEvent::AgentListResponse(payload) => {
+                for agent in &payload.agents {
+                    print_agent(agent);
+                    rendered = true;
+                }
+            }
+            cadis_protocol::CadisEvent::AgentSpawned(agent)
+            | cadis_protocol::CadisEvent::AgentCompleted(agent) => {
+                print_agent(agent);
+                rendered = true;
+            }
+            _ => {}
+        }
+    }
+
+    if !rendered {
+        println!("no agents returned");
+    }
+    Ok(())
+}
+
+fn print_agent(agent: &AgentEventPayload) {
+    let name = agent
+        .display_name
+        .as_deref()
+        .unwrap_or_else(|| agent.agent_id.as_str());
+    let role = agent.role.as_deref().unwrap_or("agent");
+    let parent = agent
+        .parent_agent_id
+        .as_ref()
+        .map(|id| id.as_str())
+        .unwrap_or("-");
+    let model = agent.model.as_deref().unwrap_or("-");
+    let status = agent
+        .status
+        .map(|status| format!("{status:?}").to_lowercase())
+        .unwrap_or_else(|| "-".to_owned());
+    println!(
+        "{}\t{}\t{}\tparent={}\tmodel={}\tstatus={}",
+        agent.agent_id, name, role, parent, model, status
+    );
 }
 
 fn render_chat(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {
@@ -342,6 +420,8 @@ impl Cli {
             Some("status") => Command::Status,
             Some("doctor") => Command::Doctor,
             Some("models") => Command::Models,
+            Some("agents") => Command::Agents,
+            Some("spawn") => parse_spawn(args.collect())?,
             Some("chat") => {
                 Command::Chat(required_text(args.collect(), "chat requires a message")?)
             }
@@ -381,10 +461,62 @@ enum Command {
     Status,
     Doctor,
     Models,
+    Agents,
+    Spawn {
+        role: String,
+        name: Option<String>,
+        parent: Option<String>,
+        model: Option<String>,
+    },
     Chat(String),
-    Run { cwd: Option<PathBuf>, task: String },
+    Run {
+        cwd: Option<PathBuf>,
+        task: String,
+    },
     Approve(String),
     Deny(String),
+}
+
+fn parse_spawn(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    let mut role = Vec::new();
+    let mut name = None;
+    let mut parent = None;
+    let mut model = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--name" => {
+                name = Some(
+                    args.next()
+                        .ok_or_else(|| invalid_input("--name requires a value"))?,
+                );
+            }
+            "--parent" => {
+                parent = Some(
+                    args.next()
+                        .ok_or_else(|| invalid_input("--parent requires an agent ID"))?,
+                );
+            }
+            "--model" => {
+                model = Some(
+                    args.next()
+                        .ok_or_else(|| invalid_input("--model requires a model"))?,
+                );
+            }
+            value if value.starts_with("--") => {
+                return Err(invalid_input(format!("unknown spawn option: {value}")).into());
+            }
+            value => role.push(value.to_owned()),
+        }
+    }
+
+    Ok(Command::Spawn {
+        role: required_text(role, "spawn requires a role")?,
+        name,
+        parent,
+        model,
+    })
 }
 
 fn parse_run(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
@@ -430,7 +562,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn print_help() {
     println!(
-        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
+        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
         env!("CARGO_PKG_VERSION")
     );
 }

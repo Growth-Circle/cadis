@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   THEMES,
+  normalizeAgentName,
   useHud,
   type AgentLive,
   type ThemeKey,
@@ -67,6 +68,7 @@ export function connect(): void {
     }
 
     await Promise.all([
+      callCadis("agent.list", {}, activeGeneration),
       callCadis("models.list", {}, activeGeneration),
       callCadis("ui.preferences.get", {}, activeGeneration),
     ]);
@@ -84,11 +86,14 @@ export function disconnect(): void {
 
 export function sendUserMessage(text: string, _model?: string): boolean {
   if (!connected) return false;
-  void callCadis("message.send", {
+  const targetAgentId = parseMentionTargetAgentId(text);
+  const payload: Record<string, unknown> = {
     session_id: null,
     content: text,
     content_kind: "chat",
-  }).then((ok) => {
+  };
+  if (targetAgentId) payload.target_agent_id = targetAgentId;
+  void callCadis("message.send", payload).then((ok) => {
     if (!ok) {
       pushSystem("(CADIS request failed - message could not be delivered)");
       scheduleReconnect();
@@ -270,6 +275,14 @@ function handleMessage(type: string, payload: unknown, sessionId?: string): void
     handleMessageCompleted(payload, sessionId);
     return;
   }
+  if (type === "agent.list.response") {
+    handleAgentList(payload);
+    return;
+  }
+  if (type === "agent.spawned") {
+    handleAgentSpawned(payload);
+    return;
+  }
   if (type === "agent.renamed") {
     handleAgentRenamed(payload);
     return;
@@ -290,8 +303,18 @@ function handleMessage(type: string, payload: unknown, sessionId?: string): void
     handleApprovalResolved(payload);
     return;
   }
-  if (type === "worker.started" || type === "worker.log.delta" || type === "worker.completed") {
+  if (type === "orchestrator.route") {
+    handleOrchestratorRoute(payload);
+    return;
+  }
+  if (
+    type === "worker.started" ||
+    type === "worker.log.delta" ||
+    type === "worker.completed" ||
+    type === "worker.event"
+  ) {
     handleWorkerEvent(type, payload);
+    return;
   }
 }
 
@@ -387,6 +410,27 @@ function handleMessageCompleted(payload: unknown, sessionId?: string): void {
   streamingBySession.delete(sid);
 }
 
+function handleAgentList(payload: unknown): void {
+  const p = asRecord(payload);
+  const agents = Array.isArray(p.agents) ? p.agents : [];
+  for (const agent of agents) handleAgentSpawned(agent);
+}
+
+function handleAgentSpawned(payload: unknown): void {
+  const p = asRecord(payload);
+  const agentId = stringFrom(p.agent_id) ?? stringFrom(p.id);
+  if (!agentId) return;
+
+  const model = stringFrom(p.model);
+  const displayName = stringFrom(p.display_name) ?? stringFrom(p.name);
+  const role = stringFrom(p.role);
+  const parentAgentId = stringFrom(p.parent_agent_id);
+  const status = normalizeAgentStatus(stringFrom(p.status)) ?? "idle";
+
+  upsertDaemonAgent({ agentId, displayName, role, parentAgentId, model, status });
+  if (model) useHud.getState().setAgentModel(agentId, model);
+}
+
 function handleAgentRenamed(payload: unknown): void {
   const p = asRecord(payload);
   const agentId = stringFrom(p.agent_id);
@@ -440,18 +484,48 @@ function handleApprovalResolved(payload: unknown): void {
   if (approvalId) useHud.getState().removeApproval(approvalId);
 }
 
+function handleOrchestratorRoute(payload: unknown): void {
+  const p = asRecord(payload);
+  const targetAgentId = stringFrom(p.target_agent_id) ?? stringFrom(p.target);
+  const targetAgentName = stringFrom(p.target_agent_name) ?? agentDisplayName(targetAgentId);
+  if (targetAgentId && !targetAgentName) ensureKnownAgent(targetAgentId);
+
+  const source = stringFrom(p.source) ?? "orchestrator";
+  const target = targetAgentName ?? targetAgentId ?? "agent";
+  const reason = stringFrom(p.reason);
+  const routeId = stringFrom(p.id) ?? `route-${Date.now()}`;
+  useHud.getState().upsertChat({
+    id: `route-${routeId}`,
+    who: "system",
+    text: reason ? `(route: ${source} -> ${target}; ${reason})` : `(route: ${source} -> ${target})`,
+    ts: Date.now(),
+    agentId: targetAgentId,
+    agentName: targetAgentName,
+    final: true,
+  });
+}
+
 function handleWorkerEvent(type: string, payload: unknown): void {
   const p = asRecord(payload);
-  const workerId = stringFrom(p.worker_id);
+  const workerId = stringFrom(p.worker_id) ?? stringFrom(p.id) ?? stringFrom(p.agent_id);
   if (!workerId) return;
-  const status: WorkerStatus = type === "worker.completed" ? "completed" : "running";
+  const existing = useHud.getState().workers.find((worker) => worker.id === workerId);
+  const agentId = stringFrom(p.agent_id);
+  const parentAgentId = stringFrom(p.parent_agent_id) ?? agentId ?? existing?.parentAgentId ?? "main";
+  const status = normalizeWorkerStatus(stringFrom(p.status)) ?? defaultWorkerStatus(type);
+  const summary = stringFrom(p.summary);
+  const delta = stringFrom(p.delta);
   useHud.getState().upsertWorker({
     id: workerId,
-    parentAgentId: stringFrom(p.agent_id) ?? "main",
+    agentId,
+    parentAgentId,
+    cli: stringFrom(p.cli),
+    cwd: stringFrom(p.cwd),
     status,
-    lastText: stringFrom(p.delta) ?? stringFrom(p.summary),
-    startedAt: Date.now(),
-    updatedAt: Date.now(),
+    lastText: delta ?? summary ?? stringFrom(p.text),
+    summary,
+    startedAt: numberFrom(p.started_at) ?? existing?.startedAt ?? Date.now(),
+    updatedAt: numberFrom(p.updated_at) ?? Date.now(),
   });
 }
 
@@ -459,6 +533,82 @@ function handleRequestRejected(payload: unknown): void {
   const p = asRecord(payload);
   const message = stringFrom(p.message) ?? "CADIS request was rejected";
   pushSystem(`(${message})`);
+}
+
+function parseMentionTargetAgentId(text: string): string | undefined {
+  const match = text.match(/^@([A-Za-z0-9._-]+)(?:\s+|$)/);
+  const token = match?.[1];
+  if (!token) return undefined;
+  return resolveMentionTargetAgentId(token);
+}
+
+function resolveMentionTargetAgentId(token: string): string {
+  const target = normalizeMentionToken(token);
+  const known = useHud.getState().agents.find((agent) => {
+    const names = [agent.spec.id, agent.spec.name];
+    return names.some((name) => normalizeMentionToken(name) === target);
+  });
+  return known?.spec.id ?? token;
+}
+
+function normalizeMentionToken(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function agentDisplayName(agentId: string | undefined): string | undefined {
+  if (!agentId) return undefined;
+  return useHud.getState().agents.find((agent) => agent.spec.id === agentId)?.spec.name;
+}
+
+function upsertDaemonAgent({
+  agentId,
+  displayName,
+  role,
+  parentAgentId,
+  model,
+  status,
+}: {
+  agentId: string;
+  displayName?: string;
+  role?: string;
+  parentAgentId?: string;
+  model?: string;
+  status: AgentLive["status"];
+}): void {
+  const existing = useHud.getState().agents.find((agent) => agent.spec.id === agentId);
+  const rosterSpec = AGENT_ROSTER_BY_ID.get(agentId);
+  const baseSpec = existing?.spec ?? rosterSpec ?? {
+    id: agentId,
+    name: agentId,
+    role: "Agent",
+    icon: "◈",
+    hue: deterministicHue(agentId),
+    tasks: [],
+  };
+  const name = normalizeAgentName(displayName ?? baseSpec.name, baseSpec.name);
+  const nextRole = normalizeAgentName(role ?? baseSpec.role, baseSpec.role);
+  upsertAgent({
+    spec: {
+      ...baseSpec,
+      id: agentId,
+      name,
+      role: nextRole,
+    },
+    status,
+    currentTask: {
+      verb: status === "working" ? "working" : "ready",
+      target: parentAgentId ? `child of ${parentAgentId}` : `${name} agent`,
+      detail: model ?? existing?.currentTask.detail ?? FALLBACK_MAIN_MODEL,
+    },
+    uptimeSeconds: existing?.uptimeSeconds ?? 0,
+    parentAgentId,
+  });
+}
+
+function deterministicHue(value: string): number {
+  let hash = 0;
+  for (const char of value) hash = (hash * 31 + char.charCodeAt(0)) % 360;
+  return hash;
 }
 
 function upsertAgent(agent: AgentLive): void {
@@ -516,6 +666,27 @@ function normalizeAgentStatus(status: string | undefined): "working" | "idle" | 
   }
   if (normalized === "idle" || normalized === "completed" || normalized === "failed") return "idle";
   return null;
+}
+
+function normalizeWorkerStatus(status: string | undefined): WorkerStatus | null {
+  if (!status) return null;
+  const normalized = status.toLowerCase();
+  if (normalized === "spawning" || normalized === "starting" || normalized === "started") {
+    return "spawning";
+  }
+  if (normalized === "running" || normalized === "working") return "running";
+  if (normalized === "completed" || normalized === "complete" || normalized === "succeeded") {
+    return "completed";
+  }
+  if (normalized === "failed" || normalized === "error") return "failed";
+  if (normalized === "cancelled" || normalized === "canceled") return "cancelled";
+  return null;
+}
+
+function defaultWorkerStatus(type: string): WorkerStatus {
+  if (type === "worker.started") return "spawning";
+  if (type === "worker.completed") return "completed";
+  return "running";
 }
 
 function readSessionId(envelope: CadisEnvelope): string | undefined {
@@ -590,22 +761,5 @@ function isThemeKey(value: string | undefined): value is ThemeKey {
 
 export function ensureKnownAgent(agentId: string, model?: string): void {
   if (useHud.getState().agents.some((agent) => agent.spec.id === agentId)) return;
-  const spec = AGENT_ROSTER_BY_ID.get(agentId) ?? {
-    id: agentId,
-    name: agentId,
-    role: "Agent",
-    icon: "◈",
-    hue: 210,
-    tasks: [],
-  };
-  upsertAgent({
-    spec,
-    status: "idle",
-    currentTask: {
-      verb: "ready",
-      target: `${spec.name} agent`,
-      detail: model ?? FALLBACK_MAIN_MODEL,
-    },
-    uptimeSeconds: 0,
-  });
+  upsertDaemonAgent({ agentId, model, status: "idle" });
 }

@@ -340,6 +340,7 @@ impl HudApp {
         self.pending_assistant = None;
         self.request(ClientRequest::MessageSend(MessageSendRequest {
             session_id: None,
+            target_agent_id: None,
             content: message,
             content_kind: ContentKind::Chat,
         }));

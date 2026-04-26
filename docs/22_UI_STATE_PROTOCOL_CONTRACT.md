@@ -72,20 +72,15 @@ Sent when the user submits text in the chat panel.
 {
   "type": "message.send",
   "session_id": null,
-  "agent_id": "main",
-  "channel": "hud-chat",
-  "text": "fix the auth bug",
-  "model": "openai/gpt-5.5",
-  "agent_models": {
-    "main": "openai/gpt-5.5",
-    "coder": "openai/gpt-5.5"
-  },
-  "preferences": {
-    "thinking": false,
-    "fast": true
-  }
+  "target_agent_id": "codex",
+  "content": "@codex fix the auth bug",
+  "content_kind": "chat"
 }
 ```
+
+`target_agent_id` is optional. HUD may include it as a hint when a leading
+`@agent` mention resolves locally, but `cadisd` remains authoritative and emits
+`orchestrator.route` for the final route.
 
 ### `agent.rename`
 
@@ -200,6 +195,42 @@ Drives connection and status bar.
 }
 ```
 
+### `agent.list.response`
+
+Replaces the seeded roster with daemon-owned agent state.
+
+```json
+{
+  "type": "agent.list.response",
+  "agents": [
+    {
+      "agent_id": "codex",
+      "role": "Coding",
+      "display_name": "Codex",
+      "parent_agent_id": null,
+      "model": "codex-cli/chatgpt-plan",
+      "status": "idle"
+    }
+  ]
+}
+```
+
+### `agent.spawned`
+
+Adds a newly created agent or subagent to the HUD roster.
+
+```json
+{
+  "type": "agent.spawned",
+  "agent_id": "coding_1",
+  "role": "Coding",
+  "display_name": "Builder",
+  "parent_agent_id": "main",
+  "model": "codex-cli/chatgpt-plan",
+  "status": "idle"
+}
+```
+
 ### `models.list.response`
 
 Updates model catalog and default model.
@@ -240,19 +271,9 @@ failed
 cancelled
 ```
 
-### `agent.task.changed`
-
-Drives agent card current task.
-
-```json
-{
-  "type": "agent.task.changed",
-  "agent_id": "coder",
-  "verb": "Editing",
-  "target": "src/auth/session.rs",
-  "detail": "Refactoring token refresh logic"
-}
-```
+The optional `task` field on `agent.status.changed` drives the current task
+summary. A separate `agent.task.changed` event is reserved for a later protocol
+version.
 
 ### `agent.renamed`
 
@@ -274,11 +295,10 @@ Streams assistant text.
 {
   "type": "message.delta",
   "session_id": "ses_123",
-  "agent_id": "main",
-  "agent_name": "CADIS",
-  "text": "I found the failing test",
+  "delta": "I found the failing test",
   "content_kind": "chat",
-  "final": false
+  "agent_id": "main",
+  "agent_name": "CADIS"
 }
 ```
 
@@ -290,10 +310,10 @@ Marks final assistant output.
 {
   "type": "message.completed",
   "session_id": "ses_123",
+  "content_kind": "summary",
+  "content": "I found the failing test and opened the code window.",
   "agent_id": "main",
-  "agent_name": "CADIS",
-  "text": "I found the failing test and opened the code window.",
-  "content_kind": "summary"
+  "agent_name": "CADIS"
 }
 ```
 
@@ -328,22 +348,26 @@ Removes or updates approval card.
 }
 ```
 
-### `worker.event`
+### `worker.started` / `worker.log.delta` / `worker.completed`
 
 Updates worker tree and optional transient worker card.
 
 ```json
 {
-  "type": "worker.event",
+  "type": "worker.started",
   "worker_id": "worker_auth_01",
+  "agent_id": "coding_1",
   "parent_agent_id": "coder",
   "status": "running",
   "cli": "cadis",
   "cwd": "/home/user/Project/app",
-  "text": "running cargo test",
-  "updated_at": 1770000000000
+  "summary": "running cargo test"
 }
 ```
+
+`worker.log.delta` carries `worker_id`, `delta`, and optional `agent_id` /
+`parent_agent_id`. `worker.completed` carries the same metadata plus optional
+`summary`.
 
 ### `orchestrator.route`
 
@@ -354,7 +378,8 @@ Adds route transparency row.
   "type": "orchestrator.route",
   "id": "route_123",
   "source": "hud-chat",
-  "target": "coder",
+  "target_agent_id": "coder",
+  "target_agent_name": "Codex",
   "reason": "@coder prefix"
 }
 ```

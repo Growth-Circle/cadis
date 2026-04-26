@@ -6,11 +6,13 @@ use std::time::Instant;
 
 use cadis_models::ModelProvider;
 use cadis_protocol::{
-    AgentId, AgentModelChangedPayload, AgentRenamedPayload, AgentStatus, AgentStatusChangedPayload,
-    CadisEvent, ClientRequest, ContentKind, DaemonResponse, DaemonStatusPayload, ErrorPayload,
-    EventEnvelope, EventId, MessageCompletedPayload, MessageDeltaPayload, ModelDescriptor,
-    ModelsListPayload, ProtocolVersion, RequestAcceptedPayload, RequestEnvelope, RequestId,
-    ResponseEnvelope, SessionEventPayload, SessionId, Timestamp, UiPreferencesPayload,
+    AgentEventPayload, AgentId, AgentListPayload, AgentModelChangedPayload, AgentRenamedPayload,
+    AgentSpawnRequest, AgentStatus, AgentStatusChangedPayload, CadisEvent, ClientRequest,
+    DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope, EventId,
+    MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
+    ModelsListPayload, OrchestratorRoutePayload, ProtocolVersion, RequestAcceptedPayload,
+    RequestEnvelope, RequestId, ResponseEnvelope, SessionEventPayload, SessionId, Timestamp,
+    UiPreferencesPayload,
 };
 use chrono::{SecondsFormat, Utc};
 
@@ -43,9 +45,10 @@ pub struct Runtime {
     started_at: Instant,
     next_event: u64,
     next_session: u64,
+    next_agent: u64,
+    next_route: u64,
     sessions: HashMap<SessionId, SessionRecord>,
-    agent_names: HashMap<AgentId, String>,
-    agent_models: HashMap<AgentId, String>,
+    agents: HashMap<AgentId, AgentRecord>,
     ui_preferences: serde_json::Value,
 }
 
@@ -53,11 +56,7 @@ impl Runtime {
     /// Creates a runtime with the supplied model provider.
     pub fn new(options: RuntimeOptions, provider: Box<dyn ModelProvider>) -> Self {
         let ui_preferences = options.ui_preferences.clone();
-        let mut agent_names = HashMap::new();
-        agent_names.insert(AgentId::from("main"), "CADIS".to_owned());
-
-        let mut agent_models = HashMap::new();
-        agent_models.insert(AgentId::from("main"), options.model_provider.clone());
+        let agents = default_agents(&options.model_provider);
 
         Self {
             options,
@@ -65,9 +64,10 @@ impl Runtime {
             started_at: Instant::now(),
             next_event: 1,
             next_session: 1,
+            next_agent: 1,
+            next_route: 1,
             sessions: HashMap::new(),
-            agent_names,
-            agent_models,
+            agents,
             ui_preferences,
         }
     }
@@ -135,13 +135,18 @@ impl Runtime {
                     )
                 }
             }
-            ClientRequest::MessageSend(request) => {
-                self.handle_message(request_id, request.session_id, request.content)
-            }
+            ClientRequest::MessageSend(request) => self.handle_message(request_id, request),
             ClientRequest::AgentRename(request) => {
                 let display_name = normalize_agent_name(&request.display_name, &request.agent_id);
-                self.agent_names
-                    .insert(request.agent_id.clone(), display_name.clone());
+                let Some(agent) = self.agents.get_mut(&request.agent_id) else {
+                    return self.reject(
+                        request_id,
+                        "agent_not_found",
+                        format!("agent '{}' was not found", request.agent_id),
+                        false,
+                    );
+                };
+                agent.display_name = display_name.clone();
                 let event = self.event(
                     None,
                     CadisEvent::AgentRenamed(AgentRenamedPayload {
@@ -152,8 +157,15 @@ impl Runtime {
                 self.accept(request_id, vec![event])
             }
             ClientRequest::AgentModelSet(request) => {
-                self.agent_models
-                    .insert(request.agent_id.clone(), request.model.clone());
+                let Some(agent) = self.agents.get_mut(&request.agent_id) else {
+                    return self.reject(
+                        request_id,
+                        "agent_not_found",
+                        format!("agent '{}' was not found", request.agent_id),
+                        false,
+                    );
+                };
+                agent.model = request.model.clone();
                 let event = self.event(
                     None,
                     CadisEvent::AgentModelChanged(AgentModelChangedPayload {
@@ -163,6 +175,20 @@ impl Runtime {
                 );
                 self.accept(request_id, vec![event])
             }
+            ClientRequest::AgentList(_) => {
+                let agents = self
+                    .agent_records_sorted()
+                    .into_iter()
+                    .map(AgentRecord::event_payload)
+                    .collect();
+                let event = self.event(
+                    None,
+                    CadisEvent::AgentListResponse(AgentListPayload { agents }),
+                );
+                self.accept(request_id, vec![event])
+            }
+            ClientRequest::AgentSpawn(request) => self.spawn_agent(request_id, request),
+            ClientRequest::AgentKill(request) => self.kill_agent(request_id, request.agent_id),
             ClientRequest::ModelsList(_) => {
                 let event = self.event(
                     None,
@@ -246,9 +272,6 @@ impl Runtime {
             }
             ClientRequest::SessionUnsubscribe(_)
             | ClientRequest::ApprovalRespond(_)
-            | ClientRequest::AgentList(_)
-            | ClientRequest::AgentSpawn(_)
-            | ClientRequest::AgentKill(_)
             | ClientRequest::WorkerTail(_) => self.reject(
                 request_id,
                 "not_implemented",
@@ -284,10 +307,16 @@ impl Runtime {
     fn handle_message(
         &mut self,
         request_id: RequestId,
-        session_id: Option<SessionId>,
-        content: String,
+        request: MessageSendRequest,
     ) -> RequestOutcome {
-        let (session_id, mut events) = match session_id {
+        let content_kind = request.content_kind;
+        let content = request.content;
+        let route = match self.route_message(request.target_agent_id, &content) {
+            Ok(route) => route,
+            Err(error) => return self.reject(request_id, error.code, error.message, false),
+        };
+        let session_id_request = request.session_id;
+        let (session_id, mut events) = match session_id_request {
             Some(session_id) if self.sessions.contains_key(&session_id) => (session_id, Vec::new()),
             Some(session_id) => {
                 let title = Some(title_from_message(&content));
@@ -326,21 +355,52 @@ impl Runtime {
 
         events.push(self.session_event(
             session_id.clone(),
+            CadisEvent::OrchestratorRoute(OrchestratorRoutePayload {
+                id: format!("route_{:06}", self.next_route),
+                source: "cadisd".to_owned(),
+                target_agent_id: route.agent_id.clone(),
+                target_agent_name: route.agent_name.clone(),
+                reason: route.reason.clone(),
+            }),
+        ));
+        self.next_route += 1;
+
+        if route.agent_id.as_str() != "main" {
+            events.push(self.session_event(
+                session_id.clone(),
+                CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                    agent_id: AgentId::from("main"),
+                    status: AgentStatus::Running,
+                    task: Some(format!(
+                        "Routing request to {} ({})",
+                        route.agent_name, route.reason
+                    )),
+                }),
+            ));
+        }
+
+        events.push(self.session_event(
+            session_id.clone(),
             CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
-                agent_id: AgentId::from("main"),
+                agent_id: route.agent_id.clone(),
                 status: AgentStatus::Running,
-                task: Some(content.clone()),
+                task: Some(route.content.clone()),
             }),
         ));
 
-        match self.provider.chat(&content) {
+        let prompt = self.agent_prompt(&route.agent_id, &route.content);
+        match self.provider.chat(&prompt) {
             Ok(deltas) => {
+                let mut final_content = String::new();
                 for delta in deltas {
+                    final_content.push_str(&delta);
                     events.push(self.session_event(
                         session_id.clone(),
                         CadisEvent::MessageDelta(MessageDeltaPayload {
                             delta,
-                            content_kind: ContentKind::Chat,
+                            content_kind,
+                            agent_id: Some(route.agent_id.clone()),
+                            agent_name: Some(route.agent_name.clone()),
                         }),
                     ));
                 }
@@ -348,17 +408,30 @@ impl Runtime {
                 events.push(self.session_event(
                     session_id.clone(),
                     CadisEvent::MessageCompleted(MessageCompletedPayload {
-                        content_kind: ContentKind::Chat,
+                        content_kind,
+                        content: Some(final_content),
+                        agent_id: Some(route.agent_id.clone()),
+                        agent_name: Some(route.agent_name.clone()),
                     }),
                 ));
                 events.push(self.session_event(
                     session_id.clone(),
                     CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
-                        agent_id: AgentId::from("main"),
+                        agent_id: route.agent_id.clone(),
                         status: AgentStatus::Completed,
                         task: None,
                     }),
                 ));
+                if route.agent_id.as_str() != "main" {
+                    events.push(self.session_event(
+                        session_id.clone(),
+                        CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                            agent_id: AgentId::from("main"),
+                            status: AgentStatus::Completed,
+                            task: None,
+                        }),
+                    ));
+                }
                 events.push(self.session_event(
                     session_id.clone(),
                     CadisEvent::SessionCompleted(SessionEventPayload {
@@ -368,6 +441,14 @@ impl Runtime {
                 ));
             }
             Err(error) => {
+                events.push(self.session_event(
+                    session_id.clone(),
+                    CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                        agent_id: route.agent_id,
+                        status: AgentStatus::Failed,
+                        task: Some(error.to_string()),
+                    }),
+                ));
                 events.push(self.session_event(
                     session_id,
                     CadisEvent::SessionFailed(ErrorPayload {
@@ -380,6 +461,185 @@ impl Runtime {
         }
 
         self.accept(request_id, events)
+    }
+
+    fn spawn_agent(&mut self, request_id: RequestId, request: AgentSpawnRequest) -> RequestOutcome {
+        let role = normalize_role(&request.role);
+        if role.is_empty() {
+            return self.reject(
+                request_id,
+                "invalid_agent_role",
+                "agent role is empty",
+                false,
+            );
+        }
+
+        let parent_agent_id = if let Some(parent_agent_id) = request.parent_agent_id {
+            if !self.agents.contains_key(&parent_agent_id) {
+                return self.reject(
+                    request_id,
+                    "parent_agent_not_found",
+                    format!("parent agent '{parent_agent_id}' was not found"),
+                    false,
+                );
+            }
+            Some(parent_agent_id)
+        } else {
+            Some(AgentId::from("main"))
+        };
+        let agent_id = self.next_agent_id(&role);
+        let display_name = request
+            .display_name
+            .as_deref()
+            .map(|name| normalize_agent_name(name, &agent_id))
+            .unwrap_or_else(|| default_agent_name(&role, &agent_id));
+        let model = request
+            .model
+            .filter(|model| !model.trim().is_empty())
+            .unwrap_or_else(|| self.options.model_provider.clone());
+        let record = AgentRecord {
+            id: agent_id.clone(),
+            role,
+            display_name,
+            parent_agent_id,
+            model,
+            status: AgentStatus::Idle,
+        };
+        self.agents.insert(agent_id.clone(), record.clone());
+
+        let event = self.event(None, CadisEvent::AgentSpawned(record.event_payload()));
+        let status = self.event(
+            None,
+            CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                agent_id,
+                status: AgentStatus::Idle,
+                task: Some("spawned and ready".to_owned()),
+            }),
+        );
+        self.accept(request_id, vec![event, status])
+    }
+
+    fn kill_agent(&mut self, request_id: RequestId, agent_id: AgentId) -> RequestOutcome {
+        if agent_id.as_str() == "main" {
+            return self.reject(
+                request_id,
+                "cannot_kill_main_agent",
+                "the main orchestrator agent cannot be killed",
+                false,
+            );
+        }
+        let Some(mut record) = self.agents.remove(&agent_id) else {
+            return self.reject(
+                request_id,
+                "agent_not_found",
+                format!("agent '{agent_id}' was not found"),
+                false,
+            );
+        };
+        record.status = AgentStatus::Completed;
+        let event = self.event(None, CadisEvent::AgentCompleted(record.event_payload()));
+        self.accept(request_id, vec![event])
+    }
+
+    fn route_message(
+        &self,
+        explicit_agent_id: Option<AgentId>,
+        content: &str,
+    ) -> Result<RouteDecision, RouteError> {
+        if let Some(agent_id) = explicit_agent_id {
+            return self.route_to_agent(
+                agent_id,
+                content.to_owned(),
+                "explicit target_agent_id".to_owned(),
+            );
+        }
+
+        if let Some((mention, remaining)) = leading_mention(content) {
+            let Some(agent_id) = self.resolve_agent_mention(&mention) else {
+                return Err(RouteError {
+                    code: "agent_not_found",
+                    message: format!("no agent matches @{mention}"),
+                });
+            };
+            return self.route_to_agent(agent_id, remaining, format!("@{mention} mention"));
+        }
+
+        self.route_to_agent(
+            AgentId::from("main"),
+            content.to_owned(),
+            "default orchestrator".to_owned(),
+        )
+    }
+
+    fn route_to_agent(
+        &self,
+        agent_id: AgentId,
+        content: String,
+        reason: String,
+    ) -> Result<RouteDecision, RouteError> {
+        let Some(agent) = self.agents.get(&agent_id) else {
+            return Err(RouteError {
+                code: "agent_not_found",
+                message: format!("agent '{agent_id}' was not found"),
+            });
+        };
+        let content = content.trim().to_owned();
+        Ok(RouteDecision {
+            agent_id: agent.id.clone(),
+            agent_name: agent.display_name.clone(),
+            content: if content.is_empty() {
+                "Continue.".to_owned()
+            } else {
+                content
+            },
+            reason,
+        })
+    }
+
+    fn resolve_agent_mention(&self, mention: &str) -> Option<AgentId> {
+        let normalized = normalize_lookup(mention);
+        self.agents
+            .values()
+            .find(|agent| {
+                [
+                    agent.id.as_str(),
+                    agent.display_name.as_str(),
+                    agent.role.as_str(),
+                ]
+                .into_iter()
+                .any(|candidate| normalize_lookup(candidate) == normalized)
+            })
+            .map(|agent| agent.id.clone())
+    }
+
+    fn agent_prompt(&self, agent_id: &AgentId, content: &str) -> String {
+        let Some(agent) = self.agents.get(agent_id) else {
+            return content.to_owned();
+        };
+        if agent.id.as_str() == "main" {
+            return content.to_owned();
+        }
+        format!(
+            "You are {} ({}) in the CADIS multi-agent runtime. Answer only for your role and keep the response concise unless the user asks for detail.\n\nUser request:\n{}",
+            agent.display_name, agent.role, content
+        )
+    }
+
+    fn agent_records_sorted(&self) -> Vec<AgentRecord> {
+        let mut agents = self.agents.values().cloned().collect::<Vec<_>>();
+        agents.sort_by(|left, right| left.id.cmp(&right.id));
+        agents
+    }
+
+    fn next_agent_id(&mut self, role: &str) -> AgentId {
+        loop {
+            let suffix = self.next_agent;
+            self.next_agent += 1;
+            let id = AgentId::from(format!("{}_{}", slugify(role), suffix));
+            if !self.agents.contains_key(&id) {
+                return id;
+            }
+        }
     }
 
     fn create_session(&mut self, title: Option<String>, cwd: Option<String>) -> SessionId {
@@ -438,6 +698,77 @@ struct SessionRecord {
     _cwd: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentRecord {
+    id: AgentId,
+    role: String,
+    display_name: String,
+    parent_agent_id: Option<AgentId>,
+    model: String,
+    status: AgentStatus,
+}
+
+impl AgentRecord {
+    fn event_payload(self) -> AgentEventPayload {
+        AgentEventPayload {
+            agent_id: self.id,
+            role: Some(self.role),
+            display_name: Some(self.display_name),
+            parent_agent_id: self.parent_agent_id,
+            model: Some(self.model),
+            status: Some(self.status),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouteDecision {
+    agent_id: AgentId,
+    agent_name: String,
+    content: String,
+    reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RouteError {
+    code: &'static str,
+    message: String,
+}
+
+fn default_agents(model_provider: &str) -> HashMap<AgentId, AgentRecord> {
+    [
+        ("main", "Orchestrator", "CADIS"),
+        ("codex", "Coding", "Codex"),
+        ("atlas", "Research", "Atlas"),
+        ("forge", "Automation", "Forge"),
+        ("sentry", "System", "Sentry"),
+        ("bash", "Shell", "Bash"),
+        ("mneme", "Memory", "Mneme"),
+        ("chronos", "Schedule", "Chronos"),
+        ("muse", "Creative", "Muse"),
+        ("relay", "Network", "Relay"),
+        ("prism", "Data", "Prism"),
+        ("aegis", "Security", "Aegis"),
+        ("echo", "Voice I/O", "Echo"),
+    ]
+    .into_iter()
+    .map(|(id, role, display_name)| {
+        let id = AgentId::from(id);
+        (
+            id.clone(),
+            AgentRecord {
+                id,
+                role: role.to_owned(),
+                display_name: display_name.to_owned(),
+                parent_agent_id: None,
+                model: model_provider.to_owned(),
+                status: AgentStatus::Idle,
+            },
+        )
+    })
+    .collect()
+}
+
 fn now_timestamp() -> Timestamp {
     let value = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     Timestamp::new_utc(value).expect("chrono UTC timestamp should satisfy protocol")
@@ -471,6 +802,79 @@ fn normalize_agent_name(value: &str, agent_id: &AgentId) -> String {
     name.chars().take(32).collect()
 }
 
+fn normalize_role(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn default_agent_name(role: &str, agent_id: &AgentId) -> String {
+    let name = role
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!(
+                    "{}{}",
+                    first.to_ascii_uppercase(),
+                    chars.as_str().to_ascii_lowercase()
+                ),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    normalize_agent_name(&name, agent_id)
+}
+
+fn leading_mention(content: &str) -> Option<(String, String)> {
+    let trimmed = content.trim_start();
+    let rest = trimmed.strip_prefix('@')?;
+    let mut end = 0;
+    for (index, character) in rest.char_indices() {
+        if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+            end = index + character.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    let mention = rest[..end].to_owned();
+    let remaining = rest[end..].trim_start().to_owned();
+    Some((mention, remaining))
+}
+
+fn normalize_lookup(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+fn slugify(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator && !slug.is_empty() {
+            slug.push('_');
+            last_was_separator = true;
+        }
+    }
+    while slug.ends_with('_') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "agent".to_owned()
+    } else {
+        slug
+    }
+}
+
 fn merge_json(mut base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
     match (&mut base, patch) {
         (serde_json::Value::Object(base), serde_json::Value::Object(patch)) => {
@@ -489,8 +893,8 @@ mod tests {
     use super::*;
     use cadis_models::EchoProvider;
     use cadis_protocol::{
-        AgentModelSetRequest, AgentRenameRequest, ClientId, EmptyPayload, MessageSendRequest,
-        RequestId, ServerFrame, SessionCreateRequest,
+        AgentModelSetRequest, AgentRenameRequest, AgentSpawnRequest, ClientId, ContentKind,
+        EmptyPayload, MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest,
     };
 
     fn runtime() -> Runtime {
@@ -541,6 +945,7 @@ mod tests {
             ClientId::from("cli_1"),
             ClientRequest::MessageSend(MessageSendRequest {
                 session_id: None,
+                target_agent_id: None,
                 content: "hello".to_owned(),
                 content_kind: ContentKind::Chat,
             }),
@@ -629,5 +1034,107 @@ mod tests {
                         && payload.model == "ollama/llama3.2"
             )
         }));
+    }
+
+    #[test]
+    fn agent_list_returns_roster_snapshot() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("hud_1"),
+            ClientRequest::AgentList(EmptyPayload::default()),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentListResponse(payload)
+                    if payload.agents.iter().any(|agent| agent.agent_id.as_str() == "main")
+                        && payload.agents.iter().any(|agent| agent.agent_id.as_str() == "codex")
+            )
+        }));
+    }
+
+    #[test]
+    fn agent_spawn_registers_child_agent() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentSpawn(AgentSpawnRequest {
+                role: "Coding".to_owned(),
+                parent_agent_id: Some(AgentId::from("main")),
+                display_name: Some("Builder".to_owned()),
+                model: Some("openai/gpt-5.5".to_owned()),
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSpawned(payload)
+                    if payload.display_name.as_deref() == Some("Builder")
+                        && payload.role.as_deref() == Some("Coding")
+                        && payload.parent_agent_id.as_ref().map(AgentId::as_str) == Some("main")
+                        && payload.model.as_deref() == Some("openai/gpt-5.5")
+            )
+        }));
+    }
+
+    #[test]
+    fn message_send_routes_leading_mention() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: "@codex run tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::OrchestratorRoute(payload)
+                    if payload.target_agent_id.as_str() == "codex"
+                        && payload.reason == "@codex mention"
+            )
+        }));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::MessageDelta(payload)
+                    if payload.agent_id.as_ref().map(AgentId::as_str) == Some("codex")
+                        && payload.agent_name.as_deref() == Some("Codex")
+            )
+        }));
+    }
+
+    #[test]
+    fn unknown_mention_is_rejected() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: "@missing hello".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestRejected(ErrorPayload { code, .. }) if code == "agent_not_found"
+        ));
+        assert!(outcome.events.is_empty());
     }
 }

@@ -13,6 +13,7 @@ export type AgentLive = {
   status: AgentStatus;
   currentTask: { verb: string; target: string; detail: string };
   uptimeSeconds: number;
+  parentAgentId?: string;
 };
 
 export type ChatMessage = {
@@ -44,6 +45,7 @@ export type WorkerStatus = "spawning" | "running" | "completed" | "failed" | "ca
 
 export type WorkerRecord = {
   id: string;
+  agentId?: string;
   parentAgentId?: string;
   cli?: string;
   cwd?: string;
@@ -256,7 +258,10 @@ export const useHud = create<HudStore>((set) => ({
       const idx = s.workers.findIndex((candidate) => candidate.id === worker.id);
       if (idx === -1) return { workers: [...s.workers, worker] };
       const next = [...s.workers];
-      next[idx] = { ...next[idx]!, ...worker };
+      const definedWorker = Object.fromEntries(
+        Object.entries(worker).filter(([, value]) => value !== undefined),
+      ) as WorkerRecord;
+      next[idx] = { ...next[idx]!, ...definedWorker };
       return { workers: next };
     }),
   removeWorker: (id) => set((s) => ({ workers: s.workers.filter((w) => w.id !== id) })),
