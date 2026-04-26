@@ -144,7 +144,7 @@ frontend dependency failure is visible:
 
 - repository hygiene checks required public files
 - Rust checks run `cargo fmt --all --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`
-- native avatar checks are covered by workspace Rust checks; `cargo test -p cadis-avatar` is the focused local check for avatar-only changes
+- native avatar checks are covered by workspace Rust checks; `cargo test -p cadis-avatar` is the focused local check for avatar-only changes, and `cargo test -p cadis-avatar --all-features` also covers the feature-gated wgpu render-plan spike
 - HUD checks run from `apps/cadis-hud` with pnpm: `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build`
 - HUD native shell check runs `cargo check --manifest-path apps/cadis-hud/src-tauri/Cargo.toml --locked`
 - browser preview and Playwright E2E are local or later-stage checks until stable enough for required CI

@@ -70,7 +70,8 @@ The repository already includes a meaningful desktop MVP foundation:
 - `cadisd`: local daemon and protocol authority
 - `cadis`: CLI client for status, models, agents, spawn, chat, tools, and doctor checks
 - `apps/cadis-hud`: Tauri + React HUD prototype
-- `crates/cadis-avatar`: renderer-neutral Wulan avatar state engine contract
+- `crates/cadis-avatar`: renderer-neutral Wulan avatar state engine contract,
+  with a feature-gated adapter-ready wgpu render-plan spike
 - typed protocol events for messages, models, agents, approvals, workspaces, orchestrator routing, and workers
 - JSONL event persistence with redaction boundaries
 - profile-local workspace registry and grants for safe-read tools

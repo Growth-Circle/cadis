@@ -88,8 +88,14 @@ Contract:
 - `WgpuRendererContract` declares target, texture format, alpha mode, uniform
   version, and first primitive families: portrait plane, hologram material,
   reticle rings, particles, face overlay, and body gesture rig.
-- The contract is data-only until a renderer crate is added; this avoids
-  pulling heavy GPU dependencies into the state engine.
+- With the `wgpu-renderer` feature, `crates/cadis-avatar` also exposes an
+  adapter-ready `wgpu_renderer` spike. It turns `AvatarFrame` data into a
+  deterministic `WgpuAvatarRenderPlan` for portrait, reticle, particle, face,
+  and body-rig primitives without linking the `wgpu` crate. A concrete GPU
+  adapter can translate that plan into pipelines and draw calls later.
+- The public boundary stays data-only and renderer-neutral until HUD integration
+  chooses a concrete GPU surface; this avoids pulling heavy GPU dependencies
+  into the state engine or daemon.
 
 ### Bevy Renderer
 
@@ -150,6 +156,8 @@ The Rust state engine currently exposes:
   degrade to the CADIS orb or a static Wulan texture without blocking HUD
   launch.
 - `HeadlessAvatarRenderer` for tests and non-graphical planning.
+- Feature-gated `wgpu_renderer::WgpuAvatarSpikeRenderer` and
+  `WgpuAvatarRenderPlan` for the next native renderer adapter slice.
 
 ## 6. Body Gesture Set
 
@@ -251,15 +259,24 @@ Exit criteria:
 
 ### Phase B - Native Renderer Spike
 
-- Create a small Rust/wgpu renderer outside `cadisd`.
-- Load the Wulan portrait texture.
-- Render alpha-cutout portrait, reticle rings, particles, and state color.
+- Create a small Rust/wgpu renderer outside `cadisd`. The first feature-gated
+  spike now lives in `crates/cadis-avatar::wgpu_renderer` as an adapter-ready
+  render-plan builder.
+- Load the Wulan portrait texture. The spike requires a
+  `portrait_texture_ready` readiness bit and fails into fallback state when the
+  adapter reports it unavailable; real texture upload remains a HUD/native
+  adapter task.
+- Render alpha-cutout portrait, reticle rings, particles, and state color. The
+  spike emits deterministic draw-state for those primitives but does not yet
+  issue GPU draw calls.
 - Support a mock render-state feed.
 
 Exit criteria:
 
-- Native renderer can show idle, thinking, speaking, approval, and error states.
-- It runs without camera or microphone permission.
+- Adapter-ready render plans cover idle, thinking, speaking, approval, and error
+  states, including reduced-motion particle and reticle limits.
+- It runs without camera or microphone permission and rejects renderer contracts
+  that require camera access.
 
 ### Phase C - HUD Integration
 
