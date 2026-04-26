@@ -6,6 +6,7 @@
  *   - minimize / close buttons (only enabled in Tauri context)
  */
 import { useEffect, useState } from "react";
+import type { PointerEvent } from "react";
 import { useHud } from "./hudState.js";
 import { persistAlwaysOnTopPreference } from "./cadisActions.js";
 
@@ -13,6 +14,7 @@ type WindowApi = {
   setAlwaysOnTop: (v: boolean) => Promise<void>;
   minimize: () => Promise<void>;
   close: () => Promise<void>;
+  startDragging: () => Promise<void>;
 };
 
 async function getWindow(): Promise<WindowApi | null> {
@@ -23,10 +25,18 @@ async function getWindow(): Promise<WindowApi | null> {
       setAlwaysOnTop: (v) => win.setAlwaysOnTop(v),
       minimize: () => win.minimize(),
       close: () => win.close(),
+      startDragging: () => win.startDragging(),
     };
   } catch {
     return null;
   }
+}
+
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    Boolean(target.closest("button, input, textarea, select, [data-no-window-drag]"))
+  );
 }
 
 export function WindowChrome() {
@@ -46,13 +56,21 @@ export function WindowChrome() {
     persistAlwaysOnTopPreference(next);
   };
 
+  const startDrag = (event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || isInteractiveTarget(event.target)) return;
+    event.preventDefault();
+    void api?.startDragging().catch(() => {
+      /* data-tauri-drag-region remains as the fallback path */
+    });
+  };
+
   return (
-    <div className="window-chrome" data-tauri-drag-region>
+    <div className="window-chrome" data-tauri-drag-region onPointerDown={startDrag}>
       <div className="window-chrome__handle" data-tauri-drag-region>
         <span className="window-chrome__grip" data-tauri-drag-region>·  ·  ·</span>
         <span className="window-chrome__title" data-tauri-drag-region>CADIS</span>
       </div>
-      <div className="window-chrome__buttons">
+      <div className="window-chrome__buttons" data-no-window-drag>
         <button
           type="button"
           className="window-chrome__btn"
