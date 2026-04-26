@@ -1,0 +1,88 @@
+name: Tool runtime / approval task
+description: Track native tools, policy gates, approvals, workspace boundaries, and redaction work
+title: "tool: "
+labels: ["tool-runtime", "policy", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tool work is security-sensitive. CADIS tools must execute through `cadisd`, declare risk class, enforce workspace boundaries, redact output, and route risky actions through central approval.
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Tool or policy area
+      options:
+        - file.read
+        - file.search
+        - file.patch
+        - shell.run
+        - git.status
+        - git.diff
+        - git.worktree.create
+        - git.worktree.remove
+        - approval lifecycle
+        - policy classification
+        - redaction / logging
+        - cancellation / timeout
+        - tool registry / schemas
+        - other
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Expected risk class
+      options:
+        - safe-read
+        - workspace-edit
+        - network-access
+        - secret-access
+        - system-change
+        - dangerous-delete
+        - outside-workspace
+        - git-push-main
+        - git-force-push
+        - sudo-system
+        - unknown / needs design
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What should this tool/policy task do, and what is explicitly out of scope?
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety requirements
+      value: |
+        - [ ] Runs only through `cadisd`
+        - [ ] Enforces workspace/path boundaries where relevant
+        - [ ] Redacts secrets before events/logs/persistence
+        - [ ] Requires approval for risky behavior
+        - [ ] Fails closed on ambiguity, denial, timeout, or unsupported inputs
+    validations:
+      required: true
+  - type: textarea
+    id: events
+    attributes:
+      label: Protocol/events impact
+      description: Expected lifecycle events and structured output.
+      value: |
+        - `tool.requested`
+        - `tool.started` when executable
+        - `tool.completed` or `tool.failed`
+        - `approval.requested` / `approval.resolved` when gated
+  - type: textarea
+    id: tests
+    attributes:
+      label: Tests needed
+      placeholder: |
+        - [ ] success path
+        - [ ] policy denial / approval required
+        - [ ] unsafe path/input rejected
+        - [ ] redaction boundary
+    validations:
+      required: true

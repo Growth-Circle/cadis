@@ -1,0 +1,50 @@
+name: Docs / design task
+description: Update CADIS docs, standards, ADRs, or implementation plans
+title: "docs: "
+labels: ["documentation", "needs-triage"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Which doc/design gap should be fixed?
+    validations:
+      required: true
+  - type: dropdown
+    id: doc_area
+    attributes:
+      label: Documentation area
+      multiple: true
+      options:
+        - README / quick start
+        - Architecture
+        - Protocol
+        - Tool runtime standard
+        - Approval / policy standard
+        - Security threat model
+        - Implementation plan / checklist
+        - Contributor skills
+        - ADR / decisions
+        - CLI / daemon usage
+        - HUD / UI behavior
+        - Voice
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: changes
+    attributes:
+      label: Proposed changes
+    validations:
+      required: true
+  - type: checkboxes
+    id: consistency
+    attributes:
+      label: Consistency checks
+      options:
+        - label: This keeps CADIS Rust-first, local-first, and daemon-owned.
+          required: true
+        - label: This does not move core authority into a UI, Telegram, voice, mobile, or CLI client.
+          required: true
+        - label: Security/approval implications are documented when relevant.
+          required: true

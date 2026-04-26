@@ -1,0 +1,87 @@
+name: Bug report
+description: Report a reproducible CADIS problem
+title: "fix: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve CADIS. Please keep logs redacted: no API keys, auth files, tokens, private prompts, or full secret-bearing paths.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What broke, and what were you trying to do?
+      placeholder: "cadisd ..."
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      multiple: true
+      options:
+        - cadisd daemon
+        - cadis CLI
+        - HUD / desktop UI
+        - Protocol / events
+        - Tool runtime
+        - Policy / approvals
+        - Models / providers
+        - Store / persistence
+        - Voice
+        - Telegram / remote client
+        - Documentation
+        - CI / packaging
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Use a minimal, local-first reproduction when possible.
+      placeholder: |
+        1. Start cadisd with ...
+        2. Run cadis ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      value: |
+        - OS:
+        - CADIS commit/version:
+        - Rust version (`rustc -V`):
+        - Command/client used:
+        - Model provider, if relevant:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or output
+      description: Paste only the smallest useful excerpt. Redact secrets and private content.
+      render: text
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed credentials, tokens, auth files, and private prompts from this issue.
+          required: true
+        - label: This is not a private security vulnerability requiring confidential disclosure.
+          required: true

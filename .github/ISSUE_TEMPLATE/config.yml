@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability report
+    url: https://github.com/Growth-Circle/cadis/security/policy
+    about: Please report approval bypasses, credential leaks, sandbox escapes, or command execution issues privately.
+  - name: CADIS documentation
+    url: https://github.com/Growth-Circle/cadis/tree/main/docs
+    about: Read architecture, protocol, security, and implementation docs before opening broad design requests.
