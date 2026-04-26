@@ -81,7 +81,7 @@ The new direction replaces the earlier "OpenClaw as backend/core" assumption.
 - No full SaaS backend in v0.1.
 - No Android local coding runtime in v0.1.
 - No plugin marketplace in v0.1.
-- No complex memory graph in v0.1.
+- No complex memory graph in v0.1; see `25_MEMORY_CONCEPT.md` for Wulan's future memory architecture contribution.
 - No IDE replacement in v0.1.
 - No automatic cross-machine distributed execution in v0.1.
 - No voice wake-word in v0.1.
@@ -167,4 +167,4 @@ protocol -> daemon -> CLI -> model stream -> tools -> approvals -> agent runtime
 - `09_OPEN_SOURCE_STANDARD.md`: community and publishing standards.
 - `10_RISK_REGISTER.md`: risk tracking.
 - `11_DECISIONS.md`: architecture decisions and open questions.
-
+- `25_MEMORY_CONCEPT.md`: Wulan-contributed memory concept adapted as future work.

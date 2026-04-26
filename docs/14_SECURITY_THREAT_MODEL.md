@@ -25,6 +25,7 @@ This threat model covers the local CADIS runtime:
 | Shell access | Commands can change or damage the machine |
 | Git repositories | Agents can change source code |
 | Logs | May reveal secrets, commands, prompts, or paths |
+| Future memory store | May preserve user facts, project facts, summaries, embeddings, or tool history |
 | Approval state | Incorrect state can allow risky actions |
 | Model context | May contain private code or user data |
 
@@ -64,6 +65,7 @@ Important boundaries:
 | T-010 | Voice speaks private code or secrets | Content kind routing and speech policy |
 | T-011 | UI bypasses policy | UI clients cannot execute tools directly |
 | T-012 | Local protocol exposed beyond machine | Local-only transport by default |
+| T-013 | Future memory stores sensitive facts or stale secrets | Redact before memory persistence, enforce ACL, keep provider memory optional |
 
 ## 5. Security Requirements
 
@@ -74,6 +76,8 @@ Important boundaries:
 - Treat model-generated tool calls as untrusted input.
 - Make tool execution cancellable.
 - Keep audit events for approvals and tools.
+- Future memory writes must be daemon-owned, provenance-backed, and redacted
+  before Markdown, JSONL, SQLite, or vector indexing. See `25_MEMORY_CONCEPT.md`.
 
 ## 6. Pre-Alpha Security Gates
 

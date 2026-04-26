@@ -49,6 +49,9 @@ Still pending:
 - Approval storage and tool gating.
 - Agent runtime beyond the main chat path.
 - Worker isolation, Telegram, production voice output, full HUD parity, and code work window.
+- Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
+  memory records, scoped retrieval, provenance ledger, candidate promotion, and
+  memory capsules.
 
 ## 3. P0 - Repository Foundation
 

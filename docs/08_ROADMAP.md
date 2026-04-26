@@ -211,10 +211,10 @@ Exit criteria:
 - Windows desktop.
 - macOS desktop.
 - Android remote controller.
+- Daemon-owned memory runtime based on Wulan's `25_MEMORY_CONCEPT.md`.
 - Offline TTS provider.
 - Additional model providers.
 - MCP extension bridge.
 - Plugin SDK.
 - Optional remote relay.
 - Team policy packs.
-

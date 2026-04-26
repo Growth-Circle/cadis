@@ -274,6 +274,27 @@ Consequences:
 - UI preference changes are sent through `ui.preferences.set`; agent rename and
   model selection are confirmed by daemon events.
 
+### ADR-P007: Wulan Memory Architecture
+
+Options:
+
+- Simple session summaries only.
+- File-backed memory without indexing.
+- SQLite/FTS memory with a provenance ledger.
+- External memory provider as the primary store.
+
+Current recommendation:
+
+- Treat Wulan's memory concept in `docs/25_MEMORY_CONCEPT.md` as the future
+  CADIS memory direction.
+- Keep memory daemon-owned: `cadisd` controls ACL, retrieval, ranking,
+  promotion, persistence, and context compilation.
+- Start with Markdown plus JSONL ledger plus SQLite metadata/FTS before adding
+  vector retrieval or external providers.
+- Keep external providers optional and additive; local memory remains the source
+  of truth.
+- Keep complex memory outside v0.1 unless this pending decision becomes accepted.
+
 ## Decision Rules
 
 Require a new decision record when a change:

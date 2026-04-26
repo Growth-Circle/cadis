@@ -34,4 +34,5 @@ Supporting documents:
 - `22_UI_STATE_PROTOCOL_CONTRACT.md`
 - `23_UI_DESIGN_SYSTEM.md`
 - `24_CONTRIBUTOR_SKILLS.md`
+- `25_MEMORY_CONCEPT.md`
 - `standards/`

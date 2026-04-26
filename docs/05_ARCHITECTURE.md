@@ -288,6 +288,12 @@ MCP can be added later as an extension bridge, not as the default mechanism for 
 
 The store must protect against partial writes and log secret leakage.
 
+Future memory architecture is tracked in `25_MEMORY_CONCEPT.md`. That concept
+extends persistence with daemon-owned memory capsules, scoped Markdown memory,
+SQLite metadata/FTS, append-only memory ledger events, ACL enforcement, and
+optional local vector retrieval. It remains future work until accepted by a
+decision record and protocol update.
+
 ## 13. Security Architecture
 
 Security-sensitive behavior is centralized:
