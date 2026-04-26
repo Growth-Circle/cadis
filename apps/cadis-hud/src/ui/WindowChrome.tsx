@@ -5,8 +5,9 @@
  *   - pin button toggles always-on-top
  *   - minimize / close buttons (only enabled in Tauri context)
  */
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
-import type { PointerEvent } from "react";
+import type { MouseEvent } from "react";
 import { useHud } from "./hudState.js";
 import { persistAlwaysOnTopPreference } from "./cadisActions.js";
 
@@ -25,7 +26,13 @@ async function getWindow(): Promise<WindowApi | null> {
       setAlwaysOnTop: (v) => win.setAlwaysOnTop(v),
       minimize: () => win.minimize(),
       close: () => win.close(),
-      startDragging: () => win.startDragging(),
+      startDragging: async () => {
+        try {
+          await invoke("window_start_dragging");
+        } catch {
+          await win.startDragging();
+        }
+      },
     };
   } catch {
     return null;
@@ -56,16 +63,15 @@ export function WindowChrome() {
     persistAlwaysOnTopPreference(next);
   };
 
-  const startDrag = (event: PointerEvent<HTMLDivElement>) => {
+  const startDrag = (event: MouseEvent<HTMLDivElement>) => {
     if (event.button !== 0 || isInteractiveTarget(event.target)) return;
-    event.preventDefault();
-    void api?.startDragging().catch(() => {
-      /* data-tauri-drag-region remains as the fallback path */
+    void api?.startDragging().catch((error) => {
+      console.warn("CADIS HUD window drag failed", error);
     });
   };
 
   return (
-    <div className="window-chrome" data-tauri-drag-region onPointerDown={startDrag}>
+    <div className="window-chrome" data-tauri-drag-region onMouseDown={startDrag}>
       <div className="window-chrome__handle" data-tauri-drag-region>
         <span className="window-chrome__grip" data-tauri-drag-region>·  ·  ·</span>
         <span className="window-chrome__title" data-tauri-drag-region>CADIS</span>

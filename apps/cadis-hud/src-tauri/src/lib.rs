@@ -28,6 +28,11 @@ async fn cadis_request(request: Value, socket_path: Option<String>) -> Result<Ve
     .map_err(|error| format!("CADIS request worker failed: {error}"))?
 }
 
+#[tauri::command]
+fn window_start_dragging(window: tauri::Window) -> Result<(), String> {
+    window.start_dragging().map_err(|error| error.to_string())
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn edge_tts_speak(
     state: tauri::State<'_, Arc<TtsPlaybackState>>,
@@ -82,6 +87,7 @@ pub fn run() {
         .manage(Arc::new(TtsPlaybackState::default()))
         .invoke_handler(tauri::generate_handler![
             cadis_request,
+            window_start_dragging,
             edge_tts_speak,
             edge_tts_stop,
             local_stt_transcribe,

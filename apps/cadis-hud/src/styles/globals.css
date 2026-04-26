@@ -82,6 +82,7 @@ html, body, #root {
   border-bottom: 1px solid var(--border-d);
   user-select: none;
   cursor: grab;
+  -webkit-app-region: drag;
 }
 .window-chrome:active { cursor: grabbing; }
 
@@ -91,6 +92,7 @@ html, body, #root {
   gap: 14px;
   flex: 1;
   height: 100%;
+  -webkit-app-region: drag;
 }
 
 .window-chrome__grip {
@@ -98,6 +100,7 @@ html, body, #root {
   font-size: 10px;
   color: var(--faint);
   letter-spacing: 0.2em;
+  -webkit-app-region: drag;
 }
 
 .window-chrome__title {
@@ -105,6 +108,7 @@ html, body, #root {
   font-size: 10px;
   letter-spacing: 0.32em;
   color: var(--dim);
+  -webkit-app-region: drag;
 }
 
 .window-chrome__buttons {
