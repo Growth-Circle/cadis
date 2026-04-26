@@ -44,6 +44,8 @@ first run:
 |   |   `-- <session-id>.json
 |   |-- agents/
 |   |   `-- <agent-id>.json
+|   |-- agent-sessions/
+|   |   `-- <agent-session-id>.json
 |   |-- workers/
 |   |   `-- <worker-id>.json
 |   `-- approvals/
@@ -382,6 +384,7 @@ The store crate provides atomic JSON helpers for these exact durable files:
 ```text
 ~/.cadis/state/sessions/<session-id>.json
 ~/.cadis/state/agents/<agent-id>.json
+~/.cadis/state/agent-sessions/<agent-session-id>.json
 ~/.cadis/state/workers/<worker-id>.json
 ~/.cadis/state/approvals/<approval-id>.json
 ```
@@ -400,3 +403,9 @@ The store writes redacted pretty JSON, syncs the temporary file, renames it over
 the target `.json`, and syncs the parent directory. Recovery only reads final
 `.json` files. Partial temp files are ignored, and corrupt final JSON files are
 skipped with diagnostics instead of becoming trusted runtime state.
+
+The daemon persists per-route `AgentSession` records in
+`state/agent-sessions/` on lifecycle transitions. On restart, valid records are
+replayed through `events.snapshot` as `agent.session.*` events. Corrupt final
+AgentSession JSON is skipped and surfaced as a redacted `daemon.error`
+diagnostic; partial `.tmp` files are ignored.

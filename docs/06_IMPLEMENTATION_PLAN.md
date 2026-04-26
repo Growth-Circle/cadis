@@ -49,9 +49,10 @@ Implemented in the first runnable baseline:
 - Orchestrator baseline: daemon-owned `@agent` routing, `orchestrator.route`
   events, route-time `agent.status.changed` events, request-driven
   `agent.spawn`, and spawn limits.
-- Agent Runtime baseline: in-memory per-route `AgentSession` records with route,
+- Agent Runtime baseline: durable per-route `AgentSession` records with route,
   task, result, timeout deadline, step budget, cancellation, and parent-child
-  metadata exposed through `agent.session.*` lifecycle events.
+  metadata exposed through `agent.session.*` lifecycle events and replayed in
+  snapshot responses after daemon restart.
 - Track C worker baseline: in-memory daemon worker registry, route-time
   `worker.log.delta` lifecycle logs, `events.snapshot` worker lifecycle
   snapshots, and one-shot `worker.tail` replay.
@@ -74,10 +75,11 @@ Still pending:
 
 - Native mutating file/shell tools.
 - Agent runtime beyond the current route-and-answer path: async cancellation,
-  model-driven spawn, multi-step budgets, durable AgentSession recovery, and a
-  provider/tool-call loop remain future work.
-- Daemon startup wiring for durable session, agent, worker, and approval
-  recovery. The store-level atomic write and fail-safe recovery helpers exist.
+  model-driven spawn, multi-step budgets, and a provider/tool-call loop remain
+  future work.
+- Daemon startup wiring for durable worker recovery and Track D approval
+  recovery. Session, agent, and AgentSession metadata recovery now has daemon
+  integration on the AgentSession baseline.
 - Worker execution lifecycle, isolated worktrees, Telegram/mobile adapters,
   daemon-owned production voice output, and code work window.
 - Agent home manager, denied-path enforcement for all mutating tools,
@@ -204,12 +206,14 @@ Owner: store/recovery agents.
 
 Tasks:
 
-- Store session metadata, agent metadata, worker metadata, and approval metadata
-  with atomic writes. Store-level helpers are implemented under
-  `~/.cadis/state`; daemon runtime integration remains pending.
-- Load durable state on daemon start.
+- Store session metadata, agent metadata, AgentSession metadata, worker
+  metadata, and approval metadata with atomic writes. Store-level helpers are
+  implemented under `~/.cadis/state`; AgentSession records use
+  `state/agent-sessions/<agent-session-id>.json`.
+- Load durable session, agent, and AgentSession state on daemon start.
 - Keep append-only JSONL as audit log, not the only runtime state.
-- Add recovery tests for partial writes and stale worker/session records.
+- Add recovery tests for partial writes, corrupt AgentSession files, and stale
+  worker/session records.
 
 Exit criteria:
 
@@ -502,9 +506,11 @@ Tasks:
 - Append JSONL event logs.
 - Provide store-level durable metadata files:
   `state/sessions/<session-id>.json`, `state/agents/<agent-id>.json`,
+  `state/agent-sessions/<agent-session-id>.json`,
   `state/workers/<worker-id>.json`, and
   `state/approvals/<approval-id>.json`.
 - Store session metadata.
+- Store AgentSession metadata.
 - Store approval metadata.
 - Implement redaction.
 - Use atomic writes for state.
@@ -512,6 +518,7 @@ Tasks:
 Exit criteria:
 
 - Session events survive daemon restart as logs.
+- AgentSession snapshots survive daemon restart as durable state.
 - Secret redaction tests pass.
 - Store-level partial and corrupt state recovery tests pass.
 

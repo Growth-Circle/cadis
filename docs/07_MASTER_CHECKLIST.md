@@ -184,6 +184,7 @@
 - [x] Load `config.toml`.
 - [x] Write session metadata.
 - [x] Write agent metadata.
+- [x] Write AgentSession metadata.
 - [ ] Write worker metadata.
 - [x] Write JSONL event logs.
 - [ ] Write approval state.
@@ -194,6 +195,8 @@
 - [x] Add redaction tests.
 - [x] Add store-level recovery tests for partial and corrupt metadata files.
 - [x] Add daemon persistence integration tests for session/agent restart recovery.
+- [x] Add daemon persistence integration tests for AgentSession restart snapshot recovery.
+- [x] Add corrupt/partial AgentSession state fail-safe tests.
 
 ## 11. Agent Runtime
 
@@ -315,9 +318,10 @@
   model-driven spawn, worker failed/cancelled events, and executable workers.
 - [ ] Track D: policy-backed tools and approval persistence.
 - [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
-- [ ] Track F: durable metadata and restart recovery for sessions, agents, workers, and approvals.
+- [ ] Track F: durable metadata and restart recovery for sessions, agents, AgentSessions, workers, and approvals.
 - [x] Track F store baseline: atomic JSON helpers and fail-safe metadata recovery.
 - [x] Track F daemon baseline: session/agent metadata survives runtime restart and cancelled sessions are removed.
+- [x] Track F AgentSession baseline: per-route AgentSession metadata survives runtime restart, snapshots replay recovered records, and corrupt final JSON reports daemon diagnostics while partial temp files are ignored.
 - [ ] Track G: CADIS-native Wulan avatar engine.
 - [ ] Track H: profile homes, agent homes, workspace registry, grants, and worker worktrees.
 - [x] Track H baseline: default profile layout plus persistent workspace registry/grants.
