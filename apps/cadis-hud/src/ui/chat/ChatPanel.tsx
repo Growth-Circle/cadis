@@ -7,7 +7,7 @@
  *                       → store.pushChat fires
  *                       → if voicePrefs.autoSpeak: edge-tts speaks the text
  *
- * Mic button uses the Web Speech API; gracefully disabled if unavailable.
+ * Mic button captures local audio and sends a WAV payload to the Tauri STT command.
  */
 import { useState, useRef, useEffect, useMemo } from "react";
 import type { KeyboardEvent } from "react";
@@ -49,7 +49,9 @@ export function ChatPanel() {
   const [dismissedMentionDraft, setDismissedMentionDraft] = useState<string | null>(null);
   const [listening, setListening] = useState(false);
   const [partial, setPartial] = useState("");
+  const [audioLevel, setAudioLevel] = useState(0);
   const sttRef = useRef<SttSession | null>(null);
+  const voiceSubmittedRef = useRef(false);
   const scroll = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const lastSpokenIdRef = useRef<string | null>(null);
@@ -201,9 +203,11 @@ export function ChatPanel() {
     if (listening) {
       sttRef.current?.stop();
       sttRef.current = null;
+      voiceSubmittedRef.current = false;
       setListening(false);
       setVoiceState("idle");
       setPartial("");
+      setAudioLevel(0);
       return;
     }
     if (!sttAvailable()) {
@@ -218,16 +222,22 @@ export function ChatPanel() {
     await stopSpeaking();
     setVoiceState("listening");
     setListening(true);
+    setAudioLevel(0);
+    voiceSubmittedRef.current = false;
     sttRef.current = startListening(sttLang, {
+      onLevel: ({ level }) => setAudioLevel(level),
       onPartial: setPartial,
       onFinal: (t) => {
         setPartial("");
+        setAudioLevel(0);
         setListening(false);
         sttRef.current = null;
-        setVoiceState("idle");
+        voiceSubmittedRef.current = true;
         submitText(t);
       },
       onError: (msg) => {
+        setAudioLevel(0);
+        voiceSubmittedRef.current = false;
         setListening(false);
         sttRef.current = null;
         setVoiceState("idle");
@@ -239,8 +249,13 @@ export function ChatPanel() {
         });
       },
       onEnd: () => {
+        setAudioLevel(0);
         setListening(false);
         sttRef.current = null;
+        if (voiceSubmittedRef.current) {
+          voiceSubmittedRef.current = false;
+          return;
+        }
         setVoiceState("idle");
       },
     });
@@ -285,7 +300,7 @@ export function ChatPanel() {
           <div className="chat-line chat-line--user chat-line--listening">
             <span className="chat-line__ts">...</span>
             <span className="chat-line__who">you ›</span>
-            <WaveformLine />
+            <WaveformLine level={audioLevel} />
           </div>
         )}
         {isAwaitingReply && (
@@ -425,16 +440,22 @@ function ChatLine({ m }: { m: ChatMessage }) {
   );
 }
 
-function WaveformLine() {
+function WaveformLine({ level }: { level: number }) {
+  const normalized = Math.max(0, Math.min(1, level));
+  const gain = Math.pow(normalized, 0.72);
   return (
-    <span className="chat-wave" aria-hidden="true">
+    <span
+      className="chat-wave"
+      data-signal={normalized > 0.08 ? "active" : "quiet"}
+      aria-hidden="true"
+    >
       {WAVE_BARS.map((i) => (
         <span
           key={i}
           className="chat-wave__bar"
           style={{
-            ["--delay" as string]: `${-(i % 12) * 0.07}s`,
-            ["--peak" as string]: `${6 + ((i * 5) % 12)}px`,
+            height: `${3 + gain * (5 + Math.abs(Math.sin(i * 0.74 + normalized * 7)) * 15)}px`,
+            opacity: `${0.32 + gain * 0.62}`,
           }}
         />
       ))}
@@ -449,7 +470,7 @@ function MicIcon({ active }: { active: boolean }) {
       <path d="M6.5 10.5v1.1a5.5 5.5 0 0 0 11 0v-1.1" />
       <path d="M12 17.2v3.3" />
       <path d="M8.6 20.5h6.8" />
-      {active && <path d="M4.5 4.5 19.5 19.5" />}
+      {active && <path d="M18.5 7.2c1 1.3 1.5 2.9 1.5 4.8s-.5 3.5-1.5 4.8" />}
     </svg>
   );
 }

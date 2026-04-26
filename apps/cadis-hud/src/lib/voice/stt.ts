@@ -5,6 +5,7 @@ export type SttHandlers = {
   onFinal: (text: string) => void;
   onError?: (msg: string) => void;
   onEnd?: () => void;
+  onLevel?: (state: { level: number; rms: number }) => void;
   onLoading?: (state: { stage: "model" | "recording" | "transcribing" }) => void;
 };
 
@@ -16,8 +17,11 @@ type LocalSttResult = {
 };
 
 const SAMPLE_RATE = 16_000;
-const SILENCE_RMS = 0.012;
-const SILENCE_TAIL_MS = 1200;
+const VOICE_RMS = 0.006;
+const NO_SIGNAL_RMS = 0.0015;
+const SILENCE_TAIL_MS = 1800;
+const MIN_RECORDING_MS = 1400;
+const NO_SIGNAL_TIMEOUT_MS = 10_000;
 const MAX_DURATION_MS = 30_000;
 
 export function available(): boolean {
@@ -25,13 +29,13 @@ export function available(): boolean {
 }
 
 export function startListening(lang: string, handlers: SttHandlers): SttSession {
-  void lang;
-
   let stopped = false;
   let finalizing = false;
   let mediaStream: MediaStream | null = null;
   let recorder: MediaRecorder | null = null;
   let analyserCtx: AudioContext | null = null;
+  let heardVoice = false;
+  let noSignalTimedOut = false;
   const chunks: Blob[] = [];
 
   const cleanup = () => {
@@ -41,6 +45,7 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
       analyserCtx.close().catch(() => {});
     }
     analyserCtx = null;
+    handlers.onLevel?.({ level: 0, rms: 0 });
   };
 
   const finalize = async () => {
@@ -52,6 +57,11 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
       handlers.onEnd?.();
       return;
     }
+    if (noSignalTimedOut && !heardVoice) {
+      handlers.onError?.("microphone is connected, but CADIS did not receive a voice signal.");
+      handlers.onEnd?.();
+      return;
+    }
 
     handlers.onLoading?.({ stage: "transcribing" });
     try {
@@ -59,7 +69,8 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
       const samples = await blobToFloat32Mono16k(blob);
       const wav = encodeWavPcm16(samples, SAMPLE_RATE);
       const audioBase64 = uint8ToBase64(wav);
-      const result = await invoke<LocalSttResult>("local_stt_transcribe", { audioBase64 });
+      const language = whisperLanguageFromLocale(lang);
+      const result = await invoke<LocalSttResult>("local_stt_transcribe", { audioBase64, language });
       const text = result.text.trim();
       if (text) handlers.onFinal(text);
     } catch (err) {
@@ -86,7 +97,16 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
   (async () => {
     try {
       handlers.onLoading?.({ stage: "recording" });
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
+      if (mediaStream.getAudioTracks().length === 0) {
+        throw new Error("no microphone audio track was opened");
+      }
       const ctor = (window as unknown as { MediaRecorder?: typeof MediaRecorder }).MediaRecorder;
       if (!ctor) {
         handlers.onError?.("MediaRecorder unavailable in this webview");
@@ -105,6 +125,9 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
       recorder.start(150);
 
       analyserCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      if (analyserCtx.state === "suspended") {
+        await analyserCtx.resume().catch(() => {});
+      }
       const src = analyserCtx.createMediaStreamSource(mediaStream);
       const analyser = analyserCtx.createAnalyser();
       analyser.fftSize = 1024;
@@ -112,6 +135,7 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
 
       const buf = new Float32Array(analyser.fftSize);
       let lastVoice = Date.now();
+      let lastLevelEmit = 0;
       const startedAt = Date.now();
 
       const tick = () => {
@@ -124,11 +148,28 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
         }
 
         const rms = Math.sqrt(sum / buf.length);
-        if (rms > SILENCE_RMS) lastVoice = Date.now();
+        const now = Date.now();
+        if (now - lastLevelEmit > 42) {
+          handlers.onLevel?.({ level: rmsToLevel(rms), rms });
+          lastLevelEmit = now;
+        }
+        if (rms > VOICE_RMS) {
+          heardVoice = true;
+          lastVoice = now;
+        }
 
-        const silentMs = Date.now() - lastVoice;
-        const totalMs = Date.now() - startedAt;
-        if (silentMs > SILENCE_TAIL_MS || totalMs > MAX_DURATION_MS) {
+        const silentMs = now - lastVoice;
+        const totalMs = now - startedAt;
+        if (!heardVoice && rms < NO_SIGNAL_RMS && totalMs > NO_SIGNAL_TIMEOUT_MS) {
+          noSignalTimedOut = true;
+          stopRecording();
+          return;
+        }
+        if (heardVoice && totalMs > MIN_RECORDING_MS && silentMs > SILENCE_TAIL_MS) {
+          stopRecording();
+          return;
+        }
+        if (totalMs > MAX_DURATION_MS) {
           stopRecording();
           return;
         }
@@ -166,6 +207,16 @@ function friendlySttError(err: unknown): string {
     return "no microphone was found by the system.";
   }
   return message;
+}
+
+function rmsToLevel(rms: number): number {
+  if (!Number.isFinite(rms) || rms <= 0) return 0;
+  return Math.max(0, Math.min(1, Math.sqrt(rms * 18)));
+}
+
+function whisperLanguageFromLocale(locale: string): string {
+  const base = locale.trim().toLowerCase().split(/[-_]/)[0];
+  return base || "auto";
 }
 
 async function blobToFloat32Mono16k(blob: Blob): Promise<Float32Array> {

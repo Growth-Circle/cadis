@@ -48,7 +48,7 @@ side for `whisper-cli` transcription. Configure these paths if needed:
 
 ```bash
 export CADIS_WHISPER_CLI="$HOME/.local/bin/whisper-cli"
-export CADIS_WHISPER_MODEL="$HOME/.local/share/cadis/whisper-models/ggml-base.en.bin"
+export CADIS_WHISPER_MODEL="$HOME/.local/share/cadis/whisper-models/ggml-base.bin"
 ```
 
 On Linux, the HUD installs a WebKitGTK permission handler for audio capture.

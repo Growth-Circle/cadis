@@ -65,10 +65,15 @@ fn edge_tts_stop(state: tauri::State<'_, Arc<TtsPlaybackState>>) -> Result<(), S
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn local_stt_transcribe(audio_base64: String) -> Result<Value, String> {
-    tauri::async_runtime::spawn_blocking(move || local_stt_transcribe_blocking(audio_base64))
-        .await
-        .map_err(|error| format!("STT worker failed: {error}"))?
+async fn local_stt_transcribe(
+    audio_base64: String,
+    language: Option<String>,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        local_stt_transcribe_blocking(audio_base64, language)
+    })
+    .await
+    .map_err(|error| format!("STT worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -186,7 +191,10 @@ fn edge_tts_speak_blocking(
     playback_result
 }
 
-fn local_stt_transcribe_blocking(audio_base64: String) -> Result<Value, String> {
+fn local_stt_transcribe_blocking(
+    audio_base64: String,
+    language: Option<String>,
+) -> Result<Value, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(audio_base64.as_bytes())
         .map_err(|error| format!("invalid STT audio payload: {error}"))?;
@@ -199,7 +207,7 @@ fn local_stt_transcribe_blocking(audio_base64: String) -> Result<Value, String> 
 
     let path = write_temp_bytes("cadis-stt", "wav", &bytes)?;
     let started = Instant::now();
-    let result = run_whisper_cli(&path);
+    let result = run_whisper_cli(&path, language.as_deref());
     let _ = fs::remove_file(&path);
     result.map(|text| {
         serde_json::json!(LocalSttResult {
@@ -215,8 +223,9 @@ fn write_temp_bytes(prefix: &str, ext: &str, bytes: &[u8]) -> Result<PathBuf, St
     Ok(path)
 }
 
-fn run_whisper_cli(path: &Path) -> Result<String, String> {
+fn run_whisper_cli(path: &Path, language: Option<&str>) -> Result<String, String> {
     let model = whisper_model_path()?;
+    let language = whisper_language(language, &model);
     let library_path = whisper_library_path_env();
     let mut last_error = String::new();
 
@@ -227,6 +236,8 @@ fn run_whisper_cli(path: &Path) -> Result<String, String> {
             .arg(&model)
             .arg("-f")
             .arg(path)
+            .arg("-l")
+            .arg(&language)
             .arg("-nt")
             .arg("-np")
             .stdin(Stdio::null())
@@ -267,6 +278,8 @@ fn whisper_model_path() -> Result<PathBuf, String> {
     push_env_path(&mut candidates, "CADIS_WHISPER_MODEL");
     push_env_path(&mut candidates, "WHISPER_MODEL");
     if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        candidates.push(home.join(".local/share/cadis/whisper-models/ggml-base.bin"));
+        candidates.push(home.join(".local/share/ramaclaw/whisper-models/ggml-base.bin"));
         candidates.push(home.join(".local/share/cadis/whisper-models/ggml-base.en.bin"));
         candidates.push(home.join(".local/share/ramaclaw/whisper-models/ggml-base.en.bin"));
     }
@@ -283,8 +296,49 @@ fn whisper_model_path() -> Result<PathBuf, String> {
         .collect::<Vec<_>>()
         .join(", ");
     Err(format!(
-        "whisper model not found; set CADIS_WHISPER_MODEL or install ggml-base.en.bin under ~/.local/share/cadis/whisper-models ({searched})"
+        "whisper model not found; set CADIS_WHISPER_MODEL or install ggml-base.bin under ~/.local/share/cadis/whisper-models ({searched})"
     ))
+}
+
+fn whisper_language(language: Option<&str>, model: &Path) -> String {
+    let requested = env::var("CADIS_WHISPER_LANGUAGE")
+        .ok()
+        .or_else(|| env::var("WHISPER_LANGUAGE").ok())
+        .or_else(|| language.map(str::to_owned))
+        .and_then(|value| normalize_whisper_language(&value))
+        .unwrap_or_else(|| "auto".to_owned());
+
+    if is_english_only_whisper_model(model) && requested != "en" {
+        "en".to_owned()
+    } else {
+        requested
+    }
+}
+
+fn normalize_whisper_language(language: &str) -> Option<String> {
+    let normalized = language.trim().to_lowercase().replace('_', "-");
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized == "auto" {
+        return Some(normalized);
+    }
+    let base = normalized.split('-').next().unwrap_or(&normalized);
+    if base == "in" {
+        return Some("id".to_owned());
+    }
+    if base.len() >= 2 {
+        return Some(base.to_owned());
+    }
+    None
+}
+
+fn is_english_only_whisper_model(model: &Path) -> bool {
+    model
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .map(|file_name| file_name.contains(".en."))
+        .unwrap_or(false)
 }
 
 fn whisper_cli_candidates() -> Vec<PathBuf> {

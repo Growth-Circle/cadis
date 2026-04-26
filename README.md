@@ -128,7 +128,7 @@ records locally and asks Tauri to transcribe via `whisper-cli`.
 
 ```bash
 export CADIS_WHISPER_CLI="$HOME/.local/bin/whisper-cli"
-export CADIS_WHISPER_MODEL="$HOME/.local/share/cadis/whisper-models/ggml-base.en.bin"
+export CADIS_WHISPER_MODEL="$HOME/.local/share/cadis/whisper-models/ggml-base.bin"
 ```
 
 On Linux, CADIS installs a WebKitGTK audio permission handler for the HUD. If

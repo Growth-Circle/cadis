@@ -842,7 +842,7 @@ html, body, #root {
 
 .chat-wave {
   flex: 1;
-  height: 16px;
+  height: 24px;
   min-width: 0;
   display: flex;
   align-items: center;
@@ -855,12 +855,10 @@ html, body, #root {
   background: var(--accent);
   opacity: 0.82;
   box-shadow: 0 0 7px oklch(0.78 0.16 var(--hue) / 0.55);
-  animation: chat-wave 0.8s ease-in-out infinite;
-  animation-delay: var(--delay);
+  transition: height 72ms ease-out, opacity 72ms ease-out, filter 72ms ease-out;
 }
-@keyframes chat-wave {
-  0%, 100% { height: 3px; opacity: 0.36; }
-  50% { height: var(--peak); opacity: 0.95; }
+.chat-wave[data-signal="active"] .chat-wave__bar {
+  filter: brightness(1.28);
 }
 
 .chat-panel__chips {
