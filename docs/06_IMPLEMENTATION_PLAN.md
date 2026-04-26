@@ -49,6 +49,9 @@ Implemented in the first runnable baseline:
 - Orchestrator baseline: daemon-owned `@agent` routing, `orchestrator.route`
   events, route-time `agent.status.changed` events, request-driven
   `agent.spawn`, and spawn limits.
+- Track C worker baseline: in-memory daemon worker registry, route-time
+  `worker.log.delta` lifecycle logs, `events.snapshot` worker lifecycle
+  snapshots, and one-shot `worker.tail` replay.
 - P13 HUD subset: Tauri + React `apps/cadis-hud` desktop app, orbital shell,
   chat command panel, agent cards, mention picker, config dialog, six themes,
   model controls, rename dialog, local mic debug, HUD-local voice doctor,
@@ -71,8 +74,8 @@ Still pending:
   `agent.spawn` is client-requested, not agent-driven.
 - Daemon startup wiring for durable session, agent, worker, and approval
   recovery. The store-level atomic write and fail-safe recovery helpers exist.
-- Worker lifecycle, isolated worktrees, Telegram/mobile adapters, daemon-owned
-  production voice output, and code work window.
+- Worker execution lifecycle, isolated worktrees, Telegram/mobile adapters,
+  daemon-owned production voice output, and code work window.
 - Agent home manager, denied-path enforcement for all mutating tools,
   checkpoint/rollback manager, and media asset manifests.
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including

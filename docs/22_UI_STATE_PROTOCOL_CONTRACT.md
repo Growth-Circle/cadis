@@ -415,7 +415,9 @@ Updates worker tree and optional transient worker card.
 
 `worker.log.delta` carries `worker_id`, `delta`, and optional `agent_id` /
 `parent_agent_id`. `worker.completed` carries the same metadata plus optional
-`summary`.
+`summary`. `worker.tail` returns recent daemon-owned log lines as
+`worker.log.delta` events for an existing worker; clients should apply those
+events through the same worker reducer used for live updates.
 
 ### `orchestrator.route`
 

@@ -217,8 +217,8 @@
 
 - [ ] Define worker scheduler.
 - [ ] Define worker state.
-- [ ] Implement daemon worker registry.
-- [ ] Implement `worker.tail`.
+- [x] Implement daemon worker registry.
+- [x] Implement `worker.tail`.
 - [ ] Create git worktree.
 - [ ] Stream worker logs.
 - [ ] Add worker cancellation.

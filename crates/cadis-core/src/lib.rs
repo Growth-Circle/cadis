@@ -21,10 +21,11 @@ use cadis_protocol::{
     ProtocolVersion, RequestAcceptedPayload, RequestEnvelope, RequestId, ResponseEnvelope,
     SessionEventPayload, SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload,
     ToolFailedPayload, UiPreferencesPayload, WorkerArtifactLocations, WorkerEventPayload,
-    WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent, WorkerWorktreeState, WorkspaceAccess,
-    WorkspaceDoctorCheck, WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantId,
-    WorkspaceGrantPayload, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload,
-    WorkspaceListRequest, WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
+    WorkerLogDeltaPayload, WorkerTailRequest, WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent,
+    WorkerWorktreeState, WorkspaceAccess, WorkspaceDoctorCheck, WorkspaceDoctorPayload,
+    WorkspaceDoctorRequest, WorkspaceGrantId, WorkspaceGrantPayload, WorkspaceGrantRequest,
+    WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest, WorkspaceRecordPayload,
+    WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
 use cadis_store::{
     redact, ApprovalRecord, ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
@@ -40,6 +41,8 @@ const FILE_READ_LIMIT_BYTES: usize = 64 * 1024;
 const FILE_SEARCH_LIMIT_BYTES: u64 = 1024 * 1024;
 const FILE_SEARCH_DEFAULT_LIMIT: usize = 50;
 const APPROVAL_TIMEOUT_MINUTES: i64 = 5;
+const WORKER_TAIL_DEFAULT_LINES: usize = 64;
+const WORKER_TAIL_MAX_LINES: usize = 1_000;
 
 /// Runtime options supplied by the daemon process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,6 +120,7 @@ pub struct Runtime {
     next_worker: u64,
     sessions: HashMap<SessionId, SessionRecord>,
     agents: HashMap<AgentId, AgentRecord>,
+    workers: HashMap<String, WorkerRecord>,
     orchestrator: Orchestrator,
     ui_preferences: serde_json::Value,
     spawn_limits: AgentSpawnLimits,
@@ -171,6 +175,7 @@ impl Runtime {
             next_worker: 1,
             sessions,
             agents,
+            workers: HashMap::new(),
             orchestrator,
             ui_preferences,
             spawn_limits,
@@ -374,7 +379,8 @@ impl Runtime {
                     self.event(None, CadisEvent::VoicePreviewCompleted(Default::default()));
                 self.accept(request_id, vec![completed])
             }
-            ClientRequest::SessionUnsubscribe(_) | ClientRequest::WorkerTail(_) => self.reject(
+            ClientRequest::WorkerTail(request) => self.worker_tail(request_id, request),
+            ClientRequest::SessionUnsubscribe(_) => self.reject(
                 request_id,
                 "not_implemented",
                 "this request is defined in the protocol but is not implemented in the desktop MVP",
@@ -780,20 +786,7 @@ impl Runtime {
         });
 
         if let Some(worker) = &worker {
-            events.push(self.session_event(
-                session_id.clone(),
-                CadisEvent::WorkerStarted(WorkerEventPayload {
-                    worker_id: worker.worker_id.clone(),
-                    agent_id: Some(route.agent_id.clone()),
-                    parent_agent_id: worker.parent_agent_id.clone(),
-                    status: Some("running".to_owned()),
-                    cli: None,
-                    cwd: None,
-                    summary: Some(worker.summary.clone()),
-                    worktree: Some(worker.worktree.clone()),
-                    artifacts: Some(worker.artifacts.clone()),
-                }),
-            ));
+            events.extend(self.start_worker(session_id.clone(), route.agent_id.clone(), worker));
         }
 
         if route.agent_id.as_str() != "main" {
@@ -888,19 +881,10 @@ impl Runtime {
                     ));
                 }
                 if let Some(worker) = &worker {
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::WorkerCompleted(WorkerEventPayload {
-                            worker_id: worker.worker_id.clone(),
-                            agent_id: Some(route.agent_id.clone()),
-                            parent_agent_id: worker.parent_agent_id.clone(),
-                            status: Some("completed".to_owned()),
-                            cli: None,
-                            cwd: None,
-                            summary: Some(worker.summary.clone()),
-                            worktree: Some(worker.worktree.clone()),
-                            artifacts: Some(worker.artifacts.clone()),
-                        }),
+                    events.extend(self.complete_worker(
+                        &worker.worker_id,
+                        "completed",
+                        worker.summary.clone(),
                     ));
                 }
                 events.push(self.session_event(
@@ -922,19 +906,10 @@ impl Runtime {
                     }),
                 ));
                 if let Some(worker) = &worker {
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::WorkerCompleted(WorkerEventPayload {
-                            worker_id: worker.worker_id.clone(),
-                            agent_id: Some(route.agent_id.clone()),
-                            parent_agent_id: worker.parent_agent_id.clone(),
-                            status: Some("failed".to_owned()),
-                            cli: None,
-                            cwd: None,
-                            summary: Some(error_message.clone()),
-                            worktree: Some(worker.worktree.clone()),
-                            artifacts: Some(worker.artifacts.clone()),
-                        }),
+                    events.extend(self.complete_worker(
+                        &worker.worker_id,
+                        "failed",
+                        error_message.clone(),
                     ));
                 }
                 events.push(self.session_event(
@@ -947,6 +922,40 @@ impl Runtime {
                 ));
             }
         }
+
+        self.accept(request_id, events)
+    }
+
+    fn worker_tail(&mut self, request_id: RequestId, request: WorkerTailRequest) -> RequestOutcome {
+        let Some(worker) = self.workers.get(&request.worker_id).cloned() else {
+            return self.reject(
+                request_id,
+                "worker_not_found",
+                format!("worker '{}' was not found", request.worker_id),
+                false,
+            );
+        };
+
+        let line_limit = request
+            .lines
+            .and_then(|lines| usize::try_from(lines).ok())
+            .unwrap_or(WORKER_TAIL_DEFAULT_LINES)
+            .min(WORKER_TAIL_MAX_LINES);
+        let start = worker.log_lines.len().saturating_sub(line_limit);
+        let events = worker.log_lines[start..]
+            .iter()
+            .map(|line| {
+                self.session_event(
+                    worker.session_id.clone(),
+                    CadisEvent::WorkerLogDelta(WorkerLogDeltaPayload {
+                        worker_id: worker.worker_id.clone(),
+                        delta: line.clone(),
+                        agent_id: worker.agent_id.clone(),
+                        parent_agent_id: worker.parent_agent_id.clone(),
+                    }),
+                )
+            })
+            .collect();
 
         self.accept(request_id, events)
     }
@@ -1295,6 +1304,12 @@ impl Runtime {
         sessions
     }
 
+    fn worker_records_sorted(&self) -> Vec<WorkerRecord> {
+        let mut workers = self.workers.values().cloned().collect::<Vec<_>>();
+        workers.sort_by(|left, right| left.worker_id.cmp(&right.worker_id));
+        workers
+    }
+
     fn snapshot_events(&mut self) -> Vec<EventEnvelope> {
         let agents = self
             .agent_records_sorted()
@@ -1331,6 +1346,15 @@ impl Runtime {
             ));
         }
 
+        for worker in self.worker_records_sorted() {
+            let event = if worker.status == "running" {
+                CadisEvent::WorkerStarted(worker.event_payload())
+            } else {
+                CadisEvent::WorkerCompleted(worker.event_payload())
+            };
+            events.push(self.session_event(worker.session_id.clone(), event));
+        }
+
         events
     }
 
@@ -1349,6 +1373,84 @@ impl Runtime {
         let worker_id = format!("worker_{:06}", self.next_worker);
         self.next_worker += 1;
         worker_id
+    }
+
+    fn start_worker(
+        &mut self,
+        session_id: SessionId,
+        agent_id: AgentId,
+        worker: &WorkerDelegation,
+    ) -> Vec<EventEnvelope> {
+        let record = WorkerRecord::from_delegation(session_id, Some(agent_id), worker);
+        let worker_id = record.worker_id.clone();
+        let mut events = vec![self.session_event(
+            record.session_id.clone(),
+            CadisEvent::WorkerStarted(record.event_payload()),
+        )];
+        self.workers.insert(worker_id.clone(), record);
+        if let Some(event) =
+            self.append_worker_log(&worker_id, format!("started: {}\n", worker.summary))
+        {
+            events.push(event);
+        }
+        events
+    }
+
+    fn complete_worker(
+        &mut self,
+        worker_id: &str,
+        status: &str,
+        summary: String,
+    ) -> Vec<EventEnvelope> {
+        let mut events = Vec::new();
+        if let Some(event) = self.append_worker_log(worker_id, format!("{status}: {summary}\n")) {
+            events.push(event);
+        }
+        if let Some(event) = self.update_worker_status(worker_id, status, Some(summary)) {
+            events.push(event);
+        }
+        events
+    }
+
+    fn append_worker_log(
+        &mut self,
+        worker_id: &str,
+        delta: impl Into<String>,
+    ) -> Option<EventEnvelope> {
+        let delta = redact(&delta.into());
+        let (session_id, payload) = {
+            let worker = self.workers.get_mut(worker_id)?;
+            worker.log_lines.push(delta.clone());
+            (
+                worker.session_id.clone(),
+                WorkerLogDeltaPayload {
+                    worker_id: worker.worker_id.clone(),
+                    delta,
+                    agent_id: worker.agent_id.clone(),
+                    parent_agent_id: worker.parent_agent_id.clone(),
+                },
+            )
+        };
+
+        Some(self.session_event(session_id, CadisEvent::WorkerLogDelta(payload)))
+    }
+
+    fn update_worker_status(
+        &mut self,
+        worker_id: &str,
+        status: &str,
+        summary: Option<String>,
+    ) -> Option<EventEnvelope> {
+        let (session_id, payload) = {
+            let worker = self.workers.get_mut(worker_id)?;
+            worker.status = status.to_owned();
+            if let Some(summary) = summary {
+                worker.summary = Some(summary);
+            }
+            (worker.session_id.clone(), worker.event_payload())
+        };
+
+        Some(self.session_event(session_id, CadisEvent::WorkerCompleted(payload)))
     }
 
     fn next_tool_call_id(&mut self) -> ToolCallId {
@@ -2307,6 +2409,57 @@ struct WorkerDelegation {
     summary: String,
     worktree: WorkerWorktreeIntent,
     artifacts: WorkerArtifactLocations,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkerRecord {
+    worker_id: String,
+    session_id: SessionId,
+    agent_id: Option<AgentId>,
+    parent_agent_id: Option<AgentId>,
+    status: String,
+    cli: Option<String>,
+    cwd: Option<String>,
+    summary: Option<String>,
+    worktree: Option<WorkerWorktreeIntent>,
+    artifacts: Option<WorkerArtifactLocations>,
+    log_lines: Vec<String>,
+}
+
+impl WorkerRecord {
+    fn from_delegation(
+        session_id: SessionId,
+        agent_id: Option<AgentId>,
+        worker: &WorkerDelegation,
+    ) -> Self {
+        Self {
+            worker_id: worker.worker_id.clone(),
+            session_id,
+            agent_id,
+            parent_agent_id: worker.parent_agent_id.clone(),
+            status: "running".to_owned(),
+            cli: None,
+            cwd: None,
+            summary: Some(worker.summary.clone()),
+            worktree: Some(worker.worktree.clone()),
+            artifacts: Some(worker.artifacts.clone()),
+            log_lines: Vec::new(),
+        }
+    }
+
+    fn event_payload(&self) -> WorkerEventPayload {
+        WorkerEventPayload {
+            worker_id: self.worker_id.clone(),
+            agent_id: self.agent_id.clone(),
+            parent_agent_id: self.parent_agent_id.clone(),
+            status: Some(self.status.clone()),
+            cli: self.cli.clone(),
+            cwd: self.cwd.clone(),
+            summary: self.summary.clone(),
+            worktree: self.worktree.clone(),
+            artifacts: self.artifacts.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3337,8 +3490,8 @@ mod tests {
         AgentModelSetRequest, AgentRenameRequest, AgentSpawnRequest, ApprovalResponseRequest,
         ClientId, ContentKind, EmptyPayload, EventSubscriptionRequest, EventsSnapshotRequest,
         MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest, SessionTargetRequest,
-        ToolCallRequest, WorkspaceAccess, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
-        WorkspaceRegisterRequest,
+        ToolCallRequest, WorkerTailRequest, WorkspaceAccess, WorkspaceGrantRequest, WorkspaceId,
+        WorkspaceKind, WorkspaceRegisterRequest,
     };
 
     fn runtime() -> Runtime {
@@ -4518,6 +4671,96 @@ mod tests {
                 .map(|artifacts| artifacts.patch.as_str()),
             Some(expected_patch.as_str())
         );
+    }
+
+    #[test]
+    fn worker_tail_replays_registered_worker_log_lines() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_route"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: "/route @codex run focused tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        let worker_id = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerStarted(payload) => Some(payload.worker_id.clone()),
+                _ => None,
+            })
+            .expect("worker.started should be emitted");
+        let live_log_count = outcome
+            .events
+            .iter()
+            .filter(|event| matches!(event.event, CadisEvent::WorkerLogDelta(_)))
+            .count();
+        assert_eq!(live_log_count, 2);
+
+        let tail = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_tail"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkerTail(WorkerTailRequest {
+                worker_id: worker_id.clone(),
+                lines: Some(1),
+            }),
+        ));
+        assert!(matches!(
+            tail.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        let deltas = tail
+            .events
+            .iter()
+            .filter_map(|event| match &event.event {
+                CadisEvent::WorkerLogDelta(payload) => Some(payload),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].worker_id, worker_id);
+        assert_eq!(
+            deltas[0].agent_id.as_ref().map(AgentId::as_str),
+            Some("codex")
+        );
+        assert_eq!(
+            deltas[0].delta,
+            "completed: Route @codex: run focused tests\n"
+        );
+
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_snapshot_workers"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCompleted(payload)
+                    if payload.worker_id == worker_id
+                        && payload.status.as_deref() == Some("completed")
+            )
+        }));
+    }
+
+    #[test]
+    fn worker_tail_rejects_unknown_worker() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_missing_worker_tail"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkerTail(WorkerTailRequest {
+                worker_id: "worker_missing".to_owned(),
+                lines: Some(10),
+            }),
+        ));
+
+        assert_rejected(outcome, "worker_not_found");
     }
 
     #[test]

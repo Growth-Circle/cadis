@@ -1475,6 +1475,34 @@ mod tests {
     }
 
     #[test]
+    fn worker_tail_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkerTail(WorkerTailRequest {
+                worker_id: "worker_000001".to_owned(),
+                lines: Some(20),
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_1",
+                "client_id": "cli_1",
+                "type": "worker.tail",
+                "payload": {
+                    "worker_id": "worker_000001",
+                    "lines": 20
+                }
+            })
+        );
+    }
+
+    #[test]
     fn tool_call_request_matches_documented_shape() {
         let envelope = RequestEnvelope::new(
             RequestId::from("req_1"),

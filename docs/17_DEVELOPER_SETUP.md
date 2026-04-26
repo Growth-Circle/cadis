@@ -13,6 +13,8 @@ CADIS now has a desktop MVP runtime:
 - Ollama optional model adapter with local fallback.
 - OpenAI optional model adapter using env-only API keys.
 - Official Codex CLI optional adapter using `codex exec`.
+- In-memory worker registry and `worker.tail` replay for route-time worker
+  delegation logs.
 - Tauri `cadis-hud` desktop prototype under `apps/cadis-hud`.
 - HUD-local voice doctor preflight for mic, `whisper-cli`, Whisper model, Node
   helper, and audio player checks.
@@ -217,9 +219,9 @@ message completed, and agent status events as follow-up frames for a request.
 It also supports request-driven `agent.spawn` with configured depth, child, and
 total-agent limits.
 
-The `session.subscribe` and worker-tail protocol surfaces exist, but live
-multi-client event fan-out, persistent subscriptions, and daemon worker
-execution are not implemented yet.
+The `session.subscribe` protocol surface exists, and `worker.tail` can replay
+recent in-memory daemon worker logs. Persistent worker recovery and daemon
+worker execution are not implemented yet.
 
 ## 13. Durable State Notes
 

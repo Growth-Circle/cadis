@@ -129,8 +129,30 @@ Example:
 
 `events.snapshot` is a one-shot request for daemon-owned state. The desktop MVP
 snapshot is represented as normal event frames, currently including
-`agent.list.response`, `ui.preferences.updated`, and `session.updated` for known
-sessions.
+`agent.list.response`, `ui.preferences.updated`, `session.updated` for known
+sessions, and worker lifecycle snapshots for workers known to the in-memory
+daemon worker registry.
+
+`worker.tail` is a one-shot request for recent daemon-owned worker log lines.
+The desktop MVP replays log lines from the in-memory worker registry as
+`worker.log.delta` events. `lines` is optional; when absent the daemon returns
+up to 64 recent lines, capped at 1000. Unknown workers are rejected with
+`worker_not_found`.
+
+Example:
+
+```json
+{
+  "protocol_version": "0.1",
+  "request_id": "req_...",
+  "client_id": "cli_...",
+  "type": "worker.tail",
+  "payload": {
+    "worker_id": "worker_000001",
+    "lines": 20
+  }
+}
+```
 
 `tool.call` requests daemon-owned native tool execution. Tool calls must resolve
 a registered workspace and an active workspace grant before execution or
