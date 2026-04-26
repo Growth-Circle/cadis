@@ -247,6 +247,33 @@ Current recommendation:
 - Revisit direct integration only after daemon, protocol, policy, and tool
   runtime are stable.
 
+### ADR-P006: RamaClaw-Parity HUD App
+
+Decision:
+
+- Add `apps/cadis-hud` as the production-oriented Tauri + React desktop HUD.
+- Keep `crates/cadis-hud` as the lightweight Rust prototype while the richer HUD
+  uses the existing RamaClaw visual language.
+- The Tauri HUD is a protocol client only. It talks to `cadisd` through the
+  `cadis_request` command and does not own credentials, sessions, approvals, or
+  model provider state.
+
+Rationale:
+
+- The user already has a working RamaClaw visual design and wants CADIS to use
+  that interaction model on desktop.
+- `cadisd` remains the authority boundary, so ChatGPT Plus/Pro access continues
+  through the official Codex CLI adapter instead of importing or reading Codex
+  credentials from the HUD.
+
+Consequences:
+
+- Frontend dependencies are isolated under `apps/cadis-hud`.
+- Generated frontend output, `node_modules`, Tauri build output, local sockets,
+  logs, and credential-like files stay ignored.
+- UI preference changes are sent through `ui.preferences.set`; agent rename and
+  model selection are confirmed by daemon events.
+
 ## Decision Rules
 
 Require a new decision record when a change:

@@ -1,0 +1,360 @@
+/**
+ * Chat panel - real round-trip to CADIS through the Tauri command adapter.
+ *
+ *   user types / speaks → sendUserMessage()
+ *                       → CADIS routes to the active chat agent
+ *                       → assistant message arrives as message delta/completed frames
+ *                       → store.pushChat fires
+ *                       → if voicePrefs.autoSpeak: edge-tts speaks the text
+ *
+ * Mic button uses the Web Speech API; gracefully disabled if unavailable.
+ */
+import { useState, useRef, useEffect } from "react";
+import { useHud, type ChatMessage } from "../hudState.js";
+import { sendUserMessage } from "../cadisActions.js";
+import { speak, stopSpeaking } from "../../lib/voice/tts.js";
+import { available as sttAvailable, startListening, type SttSession } from "../../lib/voice/stt.js";
+import { VOICES } from "../../lib/voice/voices.js";
+
+const WAVE_BARS = Array.from({ length: 48 }, (_, i) => i);
+
+function fmtTime(ts: number): string {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+export function ChatPanel() {
+  const messages = useHud((s) => s.chat);
+  const push = useHud((s) => s.pushChat);
+  const gateway = useHud((s) => s.gateway);
+  const prefs = useHud((s) => s.voicePrefs);
+  const voiceState = useHud((s) => s.voiceState);
+  const setVoiceState = useHud((s) => s.setVoiceState);
+  const openConfig = useHud((s) => s.setConfigOpen);
+  const agentModels = useHud((s) => s.agentModels);
+  const defaultModel = useHud((s) => s.defaultModel);
+  const mainName = useHud((s) => s.agents.find((a) => a.spec.id === "main")?.spec.name ?? "CADIS");
+  const [draft, setDraft] = useState("");
+  const [listening, setListening] = useState(false);
+  const [partial, setPartial] = useState("");
+  const sttRef = useRef<SttSession | null>(null);
+  const scroll = useRef<HTMLDivElement | null>(null);
+  const lastSpokenIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
+  }, [messages.length]);
+
+  useEffect(() => {
+    const last = messages[messages.length - 1];
+    if (!prefs.autoSpeak && last?.who === "cadis" && last.final !== false) {
+      setVoiceState("idle");
+    }
+  }, [messages, prefs.autoSpeak, setVoiceState]);
+
+  // Auto-speak CADIS final replies immediately; hold back partial streams.
+  const lastTextRef = useRef<string>("");
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!prefs.autoSpeak) return;
+    const last = messages[messages.length - 1];
+    if (!last || last.who !== "cadis") return;
+    if (lastSpokenIdRef.current === last.id) return;
+    if (last.final === false) {
+      lastTextRef.current = last.text;
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      return;
+    }
+    if (last.text === lastTextRef.current && last.final !== true) return;
+    lastTextRef.current = last.text;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    const snapshot = last.text;
+    const id = last.id;
+    const delay = last.final === true ? 80 : 700;
+    debounceRef.current = setTimeout(() => {
+      if (snapshot !== lastTextRef.current) return; // newer chunk arrived
+      lastSpokenIdRef.current = id;
+      setVoiceState("speaking");
+      speak(snapshot, prefs, {
+        onEnd: () => setVoiceState("idle"),
+        onError: (err) => {
+          setVoiceState("idle");
+          const msg = err instanceof Error ? err.message : String(err);
+          push({
+            id: `m-${Date.now()}-tts`,
+            who: "system",
+            text: `(tts error: ${msg})`,
+            ts: Date.now(),
+          });
+        },
+      }).catch((err) => {
+        setVoiceState("idle");
+        const msg = err instanceof Error ? err.message : String(err);
+        push({
+          id: `m-${Date.now()}-tts`,
+          who: "system",
+          text: `(tts error: ${msg})`,
+          ts: Date.now(),
+        });
+      });
+    }, delay);
+  }, [messages, prefs, setVoiceState, push]);
+
+  const submitText = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const model = agentModels.main ?? defaultModel ?? undefined;
+    const ok = sendUserMessage(trimmed, model);
+    if (ok) setVoiceState("thinking");
+    push({
+      id: `m-${Date.now()}`,
+      who: "user",
+      text: trimmed,
+      ts: Date.now(),
+    });
+    if (!ok) {
+      push({
+        id: `m-${Date.now()}-warn`,
+        who: "system",
+        text: "(CADIS not connected - message could not be delivered)",
+        ts: Date.now(),
+      });
+    }
+    setDraft("");
+  };
+
+  const submit = () => submitText(draft);
+
+  const sttLang = (() => {
+    const v = VOICES.find((x) => x.id === prefs.voiceId);
+    return v?.locale ?? "en-US";
+  })();
+
+  const toggleMic = async () => {
+    if (listening) {
+      sttRef.current?.stop();
+      sttRef.current = null;
+      setListening(false);
+      setVoiceState("idle");
+      setPartial("");
+      return;
+    }
+    if (!sttAvailable()) {
+      push({
+        id: `m-${Date.now()}-stt`,
+        who: "system",
+        text: "(stt error: microphone capture is not available in this webview)",
+        ts: Date.now(),
+      });
+      return;
+    }
+    await stopSpeaking();
+    setVoiceState("listening");
+    setListening(true);
+    sttRef.current = startListening(sttLang, {
+      onPartial: setPartial,
+      onFinal: (t) => {
+        setPartial("");
+        setListening(false);
+        sttRef.current = null;
+        setVoiceState("idle");
+        submitText(t);
+      },
+      onError: (msg) => {
+        setListening(false);
+        sttRef.current = null;
+        setVoiceState("idle");
+        push({
+          id: `m-${Date.now()}-stterr`,
+          who: "system",
+          text: `(stt error: ${msg})`,
+          ts: Date.now(),
+        });
+      },
+      onEnd: () => {
+        setListening(false);
+        sttRef.current = null;
+        setVoiceState("idle");
+      },
+    });
+  };
+
+  const modelLabel = compactModelLabel(agentModels.main ?? defaultModel ?? "openai/codex");
+  const statusLabel = voiceStatusLabel(voiceState, gateway);
+  const isAwaitingReply = voiceState === "thinking" && messages[messages.length - 1]?.who === "user";
+  const quickActions = [
+    { label: "yes", run: () => submitText("yes") },
+    { label: "no", run: () => submitText("no") },
+    { label: "cancel", run: () => submitText("cancel") },
+    { label: "expand", run: () => submitText("expand on that") },
+    { label: "route -> codex", run: () => setDraft("@codex ") },
+  ];
+
+  return (
+    <section className="chat-panel" aria-label="CADIS chat">
+      <header className="chat-panel__head">
+        <div className="chat-panel__head-main">
+          <span className="chat-panel__brand">▸ VOICE I/O</span>
+          <span className="chat-panel__sep">·</span>
+          <span className="chat-panel__meta">{mainName} · whisper.cpp · edge-tts</span>
+          <span className="chat-panel__sep">·</span>
+          <span className="chat-panel__meta">{modelLabel}</span>
+        </div>
+        <span className={`chat-panel__state chat-panel__state--${voiceState}`}>
+          {statusLabel}
+        </span>
+      </header>
+      <div ref={scroll} className="chat-panel__log">
+        {messages.length === 0 && gateway === "connected" && (
+          <div className="chat-panel__placeholder">{mainName.toLowerCase()} › ready. linked to CADIS.</div>
+        )}
+        {messages.length === 0 && gateway !== "connected" && (
+          <div className="chat-panel__placeholder">
+            cadis › {gateway}. waiting for CADIS daemon.
+          </div>
+        )}
+        {messages.map((m) => <ChatLine key={m.id} m={m} />)}
+        {listening && !partial && (
+          <div className="chat-line chat-line--user chat-line--listening">
+            <span className="chat-line__ts">...</span>
+            <span className="chat-line__who">you ›</span>
+            <WaveformLine />
+          </div>
+        )}
+        {isAwaitingReply && (
+          <div className="chat-line chat-line--cadis chat-line--thinking">
+            <span className="chat-line__ts">...</span>
+            <span className="chat-line__who">{mainName.toLowerCase()} ›</span>
+            <span className="chat-line__text">
+              consulting CADIS<span className="chat-line__cursor">▌</span>
+            </span>
+          </div>
+        )}
+        {partial && (
+          <div className="chat-line chat-line--user chat-line--partial">
+            <span className="chat-line__ts">...</span>
+            <span className="chat-line__who">you ›</span>
+            <span className="chat-line__text">{partial}</span>
+          </div>
+        )}
+      </div>
+      <div className="chat-panel__chips" aria-label="quick commands">
+        {quickActions.map((action) => (
+          <button
+            key={action.label}
+            type="button"
+            className="chat-panel__chip"
+            onClick={action.run}
+            disabled={gateway !== "connected" && !action.label.includes("route")}
+          >
+            {action.label}
+          </button>
+        ))}
+      </div>
+      <form
+        className="chat-panel__compose"
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+      >
+        <button
+          type="button"
+          className={`chat-panel__icon-btn${listening ? " chat-panel__icon-btn--active" : ""}`}
+          onClick={toggleMic}
+          title={listening ? "Stop listening" : `Talk to ${mainName}`}
+          aria-label="microphone"
+        >
+          {listening ? "●" : "○"}
+        </button>
+        <button
+          type="button"
+          className="chat-panel__icon-btn"
+          onClick={() => openConfig(true, "voice")}
+          title="Voice settings"
+          aria-label="voice settings"
+        >
+          ⚙
+        </button>
+        <button
+          type="button"
+          className="chat-panel__icon-btn"
+          onClick={() => openConfig(true, "models")}
+          title="Model settings"
+          aria-label="model settings"
+        >
+          ◊
+        </button>
+        <textarea
+          rows={1}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              submit();
+            }
+          }}
+          placeholder={
+            gateway === "connected"
+              ? "or type a command..."
+              : "waiting for CADIS..."
+          }
+          disabled={gateway !== "connected"}
+        />
+        <button type="submit" disabled={!draft.trim() || gateway !== "connected"}>
+          SEND
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function ChatLine({ m }: { m: ChatMessage }) {
+  const whoLabel =
+    m.who === "user"
+      ? "you ›"
+      : m.who === "cadis"
+        ? `${(m.agentName ?? "cadis").toLowerCase()} ›`
+        : "sys ›";
+  return (
+    <div className={`chat-line chat-line--${m.who}`}>
+      <span className="chat-line__ts">{fmtTime(m.ts)}</span>
+      <span className="chat-line__who">{whoLabel}</span>
+      <span className="chat-line__text">{m.text}</span>
+    </div>
+  );
+}
+
+function WaveformLine() {
+  return (
+    <span className="chat-wave" aria-hidden="true">
+      {WAVE_BARS.map((i) => (
+        <span
+          key={i}
+          className="chat-wave__bar"
+          style={{
+            ["--delay" as string]: `${-(i % 12) * 0.07}s`,
+            ["--peak" as string]: `${6 + ((i * 5) % 12)}px`,
+          }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function voiceStatusLabel(
+  state: "idle" | "listening" | "thinking" | "speaking",
+  gateway: string,
+): string {
+  if (gateway !== "connected") return `○ ${gateway.toUpperCase()}`;
+  if (state === "listening") return "● LISTENING";
+  if (state === "speaking") return "● SPEAKING";
+  if (state === "thinking") return "◌ THINKING";
+  return "○ IDLE";
+}
+
+function compactModelLabel(model: string): string {
+  const clean = model.replace(/^openai-codex\//, "").replace(/^openai\//, "");
+  return clean.length > 22 ? `${clean.slice(0, 19)}...` : clean;
+}

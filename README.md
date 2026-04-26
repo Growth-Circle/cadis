@@ -6,9 +6,9 @@ The project name is written as `cadis` for packages, binaries, directories, and 
 
 ## Status
 
-Desktop MVP implementation baseline. The repository now includes the typed protocol crate, a local `cadisd` daemon, a `cadis` CLI client, a native `cadis-hud` desktop prototype, JSONL event persistence with redaction, optional Ollama/OpenAI model adapters, a credential-free local fallback, and an official Codex CLI adapter for ChatGPT-plan auth.
+Desktop MVP implementation baseline. The repository now includes the typed protocol crate, a local `cadisd` daemon, a `cadis` CLI client, a native `cadis-hud` desktop prototype, a Tauri/React CADIS HUD app, JSONL event persistence with redaction, optional Ollama/OpenAI model adapters, a credential-free local fallback, and an official Codex CLI adapter for ChatGPT-plan auth.
 
-Tools, approval-gated shell/file execution, workers, Telegram, full voice runtime, full HUD parity, and code work windows are still planned work.
+Tools, approval-gated shell/file execution, workers, Telegram, full voice runtime, and code work windows are still planned work.
 
 This repository starts from a clean architecture instead of using OpenClaw as the core backend. CADIS does not fork Codex CLI for v0.1; it can call the installed official CLI as an adapter while keeping daemon authority in `cadisd`.
 
@@ -51,6 +51,18 @@ target/release/cadis chat "hello"
 target/release/cadis-hud
 ```
 
+Run the RamaClaw-style desktop HUD:
+
+```bash
+cd apps/cadis-hud
+pnpm install
+pnpm tauri:dev
+```
+
+The Tauri HUD discovers the daemon socket from `CADIS_HUD_SOCKET`, `CADIS_SOCKET`,
+`~/.cadis/config.toml`, `$XDG_RUNTIME_DIR/cadis/cadisd.sock`, or
+`~/.cadis/run/cadisd.sock`.
+
 The default model mode is `auto`: CADIS tries Ollama at `http://127.0.0.1:11434` and falls back to a local credential-free response if Ollama is not running. To use OpenAI API billing, set `[model].provider = "openai"` and provide `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` in the daemon environment. To use ChatGPT Plus/Pro through Codex, install the official Codex CLI, run `codex login`, then set `[model].provider = "codex-cli"`.
 
 ## Initial Scope
@@ -63,7 +75,7 @@ The current MVP proves the daemon, typed event protocol, local CLI client, nativ
 
 ```text
 cadis/
-|-- apps/                  # Desktop/mobile/server application entrypoints later
+|-- apps/                  # Tauri HUD and future desktop/mobile/server apps
 |-- config/                # Example agents, tools, and policy config
 |-- crates/                # Rust workspace crates later
 |-- docs/                  # Product, business, functional, technical docs
