@@ -469,9 +469,10 @@ mod tests {
     use cadis_models::{ModelInvocation, ModelProvider, ModelResponse};
     use cadis_protocol::{
         CadisEvent, ClientId, ContentKind, DaemonResponse, EmptyPayload, MessageSendRequest,
-        RequestEnvelope, SessionEventPayload, Timestamp,
+        RequestEnvelope, ServerFrame, SessionCreateRequest, SessionEventPayload, Timestamp,
     };
     use std::sync::Condvar;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn bounded_replay_returns_events_after_retained_event_id() {
@@ -635,6 +636,163 @@ mod tests {
         assert_eq!(response.deltas, vec!["done".to_owned()]);
     }
 
+    #[test]
+    fn socket_clients_share_session_events_while_status_and_agent_list_stay_live() {
+        let cadis_home = test_workspace("cadis-daemon-socket-live-subscribe");
+        let socket_path = cadis_home.join("run").join("cadisd-test.sock");
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let config = CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        };
+        ensure_layout(&config).expect("test CADIS layout should be created");
+
+        let runtime = Arc::new(Mutex::new(Runtime::new(
+            RuntimeOptions {
+                cadis_home,
+                profile_id: "default".to_owned(),
+                socket_path: Some(socket_path.clone()),
+                model_provider: "waiting".to_owned(),
+                ui_preferences: serde_json::json!({}),
+            },
+            Box::new(WaitingProvider {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+        )));
+        let event_log = EventLog::new(&config);
+        let event_bus = EventBus::new(32);
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let accept_runtime = Arc::clone(&runtime);
+        let accept_event_log = event_log.clone();
+        let accept_event_bus = event_bus.clone();
+        let accept_thread = thread::spawn(move || {
+            for _ in 0..4 {
+                let (stream, _) = listener.accept().expect("test client should connect");
+                let runtime = Arc::clone(&accept_runtime);
+                let event_log = accept_event_log.clone();
+                let event_bus = accept_event_bus.clone();
+                thread::spawn(move || {
+                    let _ = serve_unix_stream(stream, runtime, event_log, event_bus);
+                });
+            }
+        });
+
+        let mut control = TestClient::connect(&socket_path);
+        let mut subscriber_one = TestClient::connect(&socket_path);
+        let mut subscriber_two = TestClient::connect(&socket_path);
+        let mut messenger = TestClient::connect(&socket_path);
+        accept_thread
+            .join()
+            .expect("test accept thread should not panic");
+
+        control.send(RequestEnvelope::new(
+            RequestId::from("req_create_session"),
+            ClientId::from("cli_control"),
+            ClientRequest::SessionCreate(SessionCreateRequest {
+                title: Some("Socket fan-out".to_owned()),
+                cwd: None,
+            }),
+        ));
+        assert!(matches!(
+            control.read_frame(),
+            ServerFrame::Response(ResponseEnvelope {
+                response: DaemonResponse::RequestAccepted(_),
+                ..
+            })
+        ));
+        let session_id = match control.read_frame() {
+            ServerFrame::Event(EventEnvelope {
+                event: CadisEvent::SessionStarted(payload),
+                ..
+            }) => payload.session_id,
+            other => panic!("expected session.started event, got {other:?}"),
+        };
+
+        let subscribe = |request_id: &str| {
+            RequestEnvelope::new(
+                RequestId::from(request_id),
+                ClientId::from(request_id),
+                ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
+                    session_id: session_id.clone(),
+                    since_event_id: None,
+                    replay_limit: Some(16),
+                    include_snapshot: false,
+                }),
+            )
+        };
+        subscriber_one.send(subscribe("req_subscribe_one"));
+        subscriber_two.send(subscribe("req_subscribe_two"));
+        assert_accepted_response(&mut subscriber_one);
+        assert_accepted_response(&mut subscriber_two);
+
+        messenger.send(RequestEnvelope::new(
+            RequestId::from("req_message"),
+            ClientId::from("cli_message"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: Some(session_id.clone()),
+                target_agent_id: None,
+                content: "hold generation open".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+        assert_accepted_response(&mut messenger);
+
+        wait_for_flag(&entered);
+
+        let route_one = subscriber_one
+            .read_event_matching(|event| matches!(event.event, CadisEvent::OrchestratorRoute(_)));
+        let route_two = subscriber_two
+            .read_event_matching(|event| matches!(event.event, CadisEvent::OrchestratorRoute(_)));
+        assert_eq!(route_one.event_id, route_two.event_id);
+        assert_eq!(route_one.session_id.as_ref(), Some(&session_id));
+        assert_eq!(route_two.session_id.as_ref(), Some(&session_id));
+
+        let status_one = subscriber_one
+            .read_event_matching(|event| matches!(event.event, CadisEvent::AgentStatusChanged(_)));
+        let status_two = subscriber_two
+            .read_event_matching(|event| matches!(event.event, CadisEvent::AgentStatusChanged(_)));
+        assert_eq!(status_one.event_id, status_two.event_id);
+
+        control.send(RequestEnvelope::new(
+            RequestId::from("req_status"),
+            ClientId::from("cli_control"),
+            ClientRequest::DaemonStatus(EmptyPayload::default()),
+        ));
+        match control.read_frame() {
+            ServerFrame::Response(ResponseEnvelope {
+                response: DaemonResponse::DaemonStatus(status),
+                ..
+            }) => assert_eq!(status.status, "ok"),
+            other => panic!("expected daemon.status.response during generation, got {other:?}"),
+        }
+
+        control.send(RequestEnvelope::new(
+            RequestId::from("req_agent_list"),
+            ClientId::from("cli_control"),
+            ClientRequest::AgentList(EmptyPayload::default()),
+        ));
+        assert_accepted_response(&mut control);
+        let agent_list = control
+            .read_event_matching(|event| matches!(event.event, CadisEvent::AgentListResponse(_)));
+        assert!(agent_list.session_id.is_none());
+
+        set_flag(&release);
+
+        let delta_one = subscriber_one
+            .read_event_matching(|event| matches!(event.event, CadisEvent::MessageDelta(_)));
+        let delta_two = subscriber_two
+            .read_event_matching(|event| matches!(event.event, CadisEvent::MessageDelta(_)));
+        assert_eq!(delta_one.event_id, delta_two.event_id);
+
+        let completed_one = subscriber_one
+            .read_event_matching(|event| matches!(event.event, CadisEvent::MessageCompleted(_)));
+        let completed_two = subscriber_two
+            .read_event_matching(|event| matches!(event.event, CadisEvent::MessageCompleted(_)));
+        assert_eq!(completed_one.event_id, completed_two.event_id);
+    }
+
     #[derive(Clone, Debug)]
     struct WaitingProvider {
         entered: Arc<(Mutex<bool>, Condvar)>,
@@ -688,6 +846,77 @@ mod tests {
         let (lock, condvar) = &**flag;
         *lock.lock().expect("flag mutex should lock") = true;
         condvar.notify_all();
+    }
+
+    struct TestClient {
+        reader: BufReader<UnixStream>,
+        writer: UnixStream,
+    }
+
+    impl TestClient {
+        fn connect(socket_path: &Path) -> Self {
+            let stream = UnixStream::connect(socket_path).expect("test client should connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("test client read timeout should be set");
+            let reader_stream = stream
+                .try_clone()
+                .expect("test client stream should clone for reading");
+            reader_stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("test client reader timeout should be set");
+            Self {
+                reader: BufReader::new(reader_stream),
+                writer: stream,
+            }
+        }
+
+        fn send(&mut self, request: RequestEnvelope) {
+            serde_json::to_writer(&mut self.writer, &request)
+                .expect("request frame should serialize");
+            self.writer
+                .write_all(b"\n")
+                .expect("request frame newline should write");
+            self.writer.flush().expect("request frame should flush");
+        }
+
+        fn read_frame(&mut self) -> ServerFrame {
+            let mut line = String::new();
+            self.reader
+                .read_line(&mut line)
+                .expect("server frame should be readable before timeout");
+            assert!(!line.is_empty(), "server closed the test client stream");
+            serde_json::from_str(&line).expect("server frame should deserialize")
+        }
+
+        fn read_event_matching(
+            &mut self,
+            mut predicate: impl FnMut(&EventEnvelope) -> bool,
+        ) -> EventEnvelope {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let frame = self.read_frame();
+                if let ServerFrame::Event(event) = frame {
+                    if predicate(&event) {
+                        return event;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for matching event"
+                );
+            }
+        }
+    }
+
+    fn assert_accepted_response(client: &mut TestClient) {
+        assert!(matches!(
+            client.read_frame(),
+            ServerFrame::Response(ResponseEnvelope {
+                response: DaemonResponse::RequestAccepted(_),
+                ..
+            })
+        ));
     }
 
     fn test_workspace(name: &str) -> PathBuf {

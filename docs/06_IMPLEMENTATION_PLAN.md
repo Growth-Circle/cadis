@@ -102,6 +102,10 @@ Tasks:
 - Emit `session.started`, `orchestrator.route`, `agent.status.changed`,
   `message.delta`, and `message.completed` as they happen.
 - Add integration tests for two clients receiving the same session events.
+  Baseline now includes a real Unix socket integration test with two
+  `session.subscribe` clients receiving the same route/status/message events
+  while a separate client receives `daemon.status` and `agent.list` responses
+  during a deliberately paused provider generation.
 
 Exit criteria:
 

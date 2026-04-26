@@ -120,7 +120,8 @@
 - [ ] Add shutdown handling.
 - [x] Add structured logging.
 - [x] Add focused daemon runtime mutex regression test.
-- [ ] Add full daemon socket integration test.
+- [x] Add full daemon socket integration test for two session subscribers and
+  non-blocked status/agent-list requests during in-flight generation.
 
 ## 6. CLI
 
@@ -308,7 +309,7 @@
 
 ## 15.1 Next Multi-Agent Execution Tracks
 
-- [ ] Track A: daemon event bus, live session subscription, and non-blocking generation path.
+- [x] Track A: daemon event bus, live session subscription, and non-blocking generation path.
 - [ ] Track B: provider readiness, effective model metadata, and provider streaming.
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
 - [ ] Track D: policy-backed tools and approval persistence.

@@ -151,3 +151,6 @@ frontend dependency failure is visible:
 - current orchestrator coverage should include route events, agent status events,
   request-driven spawn limits, and live `session.subscribe` fan-out to multiple
   session-filtered subscribers
+- current daemon socket coverage should include two clients receiving the same
+  session events and unrelated `daemon.status` / `agent.list` requests
+  completing while message generation is in flight
