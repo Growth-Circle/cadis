@@ -71,7 +71,8 @@ Required elements:
 - dashed spokes from orb to agents
 - 12 non-overlapping perimeter slots
 - agent satellite cards
-- nested worker tree under each agent
+- nested worker tree under each agent, derived from daemon `agent.session.*` and
+  `worker.*` events
 - model, context, mode, and voice readouts around the orb
 - state-driven orb animation
 

@@ -1,4 +1,7 @@
+import "@testing-library/jest-dom/vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { createElement } from "react";
 import {
   _resetCadisActionsForTest,
   _emitCadisSubscriptionFrameForTest,
@@ -8,6 +11,8 @@ import {
   sendUserMessage,
 } from "./cadisActions.js";
 import { useHud } from "./hudState.js";
+import { WorkerTree } from "./orbital/WorkerTree.js";
+import { mockCadisDaemonWorkerStream } from "./fixtures/mockCadisDaemonEventStream.js";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const listenMock = vi.hoisted(() => vi.fn());
@@ -36,6 +41,7 @@ beforeEach(() => {
     agentModels: INITIAL_AGENT_MODELS,
     availableModels: INITIAL_AVAILABLE_MODELS,
     defaultModel: INITIAL_DEFAULT_MODEL,
+    agentSessions: [],
     chat: [],
     approvals: [],
     workers: [],
@@ -267,8 +273,53 @@ describe("cadisActions", () => {
         status: "completed",
         lastText: "tests passed",
         summary: "tests passed",
+        logLineCount: 1,
+        logTail: ["running tests"],
       },
     ]);
+  });
+
+  it("renders worker progress from a mock daemon event stream", () => {
+    for (const frame of mockCadisDaemonWorkerStream) {
+      handleCadisFrameForTest(frame);
+    }
+
+    const state = useHud.getState();
+    expect(state.agentSessions).toMatchObject([
+      {
+        id: "ags_mock_001",
+        agentId: "codex",
+        status: "completed",
+        stepsUsed: 3,
+        budgetSteps: 3,
+        result: "focused HUD worker tests passed",
+      },
+    ]);
+    expect(state.workers).toMatchObject([
+      {
+        id: "worker_mock_001",
+        agentId: "codex",
+        parentAgentId: "main",
+        status: "completed",
+        summary: "completed: focused HUD worker tests passed",
+        logLineCount: 1,
+        worktree: {
+          state: "planned",
+          branchName: "cadis/worker_mock_001/hud-worker-progress",
+        },
+        artifacts: {
+          summary: "/home/user/.cadis/artifacts/workers/worker_mock_001/summary.md",
+          testReport: "/home/user/.cadis/artifacts/workers/worker_mock_001/test-report.json",
+        },
+      },
+    ]);
+
+    render(createElement(WorkerTree, { agentId: "codex" }));
+
+    expect(screen.getByText(/workers · 1/)).toBeInTheDocument();
+    expect(screen.getByText("ags_mock_001")).toBeInTheDocument();
+    expect(screen.getByText("worker_mock_001")).toBeInTheDocument();
+    expect(screen.getByText(/focused HUD worker tests passed/)).toBeInTheDocument();
   });
 
   it("computes bounded reconnect backoff", () => {

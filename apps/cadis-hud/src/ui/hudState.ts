@@ -42,7 +42,45 @@ export type ApprovalRecord = {
   timeoutMs?: number;
 };
 
+export type AgentSessionStatus =
+  | "started"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "timed_out"
+  | "budget_exceeded";
+
+export type AgentSessionRecord = {
+  id: string;
+  sessionId: string;
+  routeId: string;
+  agentId: string;
+  parentAgentId?: string;
+  task: string;
+  status: AgentSessionStatus;
+  timeoutAt?: string;
+  budgetSteps: number;
+  stepsUsed: number;
+  result?: string;
+  error?: string;
+  updatedAt: number;
+};
+
 export type WorkerStatus = "spawning" | "running" | "completed" | "failed" | "cancelled";
+
+export type WorkerWorktreeInfo = {
+  state?: string;
+  branchName?: string;
+  worktreePath?: string;
+  cleanupPolicy?: string;
+};
+
+export type WorkerArtifactInfo = {
+  summary?: string;
+  patch?: string;
+  testReport?: string;
+};
 
 export type WorkerRecord = {
   id: string;
@@ -54,6 +92,10 @@ export type WorkerRecord = {
   lastText?: string;
   reason?: string;
   summary?: string;
+  logLineCount: number;
+  logTail: string[];
+  worktree?: WorkerWorktreeInfo;
+  artifacts?: WorkerArtifactInfo;
   startedAt: number;
   updatedAt: number;
 };
@@ -66,6 +108,7 @@ export type ChatPreferences = {
 export type HudStore = {
   gateway: GatewayState;
   agents: AgentLive[];
+  agentSessions: AgentSessionRecord[];
   chat: ChatMessage[];
   approvals: ApprovalRecord[];
   workers: WorkerRecord[];
@@ -104,6 +147,7 @@ export type HudStore = {
   setChatPreferences: (patch: Partial<ChatPreferences>) => void;
   pushApproval: (a: ApprovalRecord) => void;
   removeApproval: (id: string) => void;
+  upsertAgentSession: (session: AgentSessionRecord) => void;
   upsertWorker: (w: WorkerRecord) => void;
   removeWorker: (id: string) => void;
 };
@@ -170,6 +214,7 @@ const INITIAL_AGENTS = AGENT_ROSTER.map((agent) => buildSeedAgent(agent, INITIAL
 export const useHud = create<HudStore>((set) => ({
   gateway: "disconnected",
   agents: INITIAL_AGENTS,
+  agentSessions: [],
   chat: [],
   approvals: [],
   workers: [],
@@ -263,6 +308,17 @@ export const useHud = create<HudStore>((set) => ({
       return { approvals: next };
     }),
   removeApproval: (id) => set((s) => ({ approvals: s.approvals.filter((a) => a.id !== id) })),
+  upsertAgentSession: (session) =>
+    set((s) => {
+      const idx = s.agentSessions.findIndex((candidate) => candidate.id === session.id);
+      if (idx === -1) return { agentSessions: [...s.agentSessions, session] };
+      const next = [...s.agentSessions];
+      const definedSession = Object.fromEntries(
+        Object.entries(session).filter(([, value]) => value !== undefined),
+      ) as AgentSessionRecord;
+      next[idx] = { ...next[idx]!, ...definedSession };
+      return { agentSessions: next };
+    }),
   upsertWorker: (worker) =>
     set((s) => {
       const idx = s.workers.findIndex((candidate) => candidate.id === worker.id);
@@ -278,4 +334,5 @@ export const useHud = create<HudStore>((set) => ({
 }));
 
 export const selectApprovals = (s: HudStore): ApprovalRecord[] => s.approvals;
+export const selectAgentSessions = (s: HudStore): AgentSessionRecord[] => s.agentSessions;
 export const selectWorkers = (s: HudStore): WorkerRecord[] => s.workers;
