@@ -1033,8 +1033,8 @@ html, body, #root {
   background: oklch(0.10 0.02 var(--hue) / 0.44);
   color: var(--dim);
   border: 1px solid var(--border-d);
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   border-radius: 50%;
   font-size: 16px;
@@ -1046,18 +1046,18 @@ html, body, #root {
 }
 
 .chat-panel__icon-svg {
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.8;
+  stroke-width: 1.75;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
 .chat-panel__icon-btn--model .chat-panel__icon-svg {
-  width: 17px;
-  height: 17px;
+  width: 23px;
+  height: 23px;
 }
 
 .chat-panel__icon-btn:hover {
