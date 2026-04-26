@@ -1,0 +1,152 @@
+# CI/CD Standard
+
+## Purpose
+
+This standard defines the checks and automation CADIS should use to keep the repository releasable, secure, and aligned with daemon-first architecture.
+
+CI should catch correctness, formatting, security, documentation, dependency, and release issues before they reach users.
+
+## CI Principles
+
+- Run fast checks on every pull request.
+- Run deeper checks on merge to `main` and before release.
+- Keep checks reproducible locally where practical.
+- Treat security-sensitive failures as blocking.
+- Do not require secrets for normal pull request validation.
+- Do not allow CI to publish artifacts from untrusted pull requests.
+- Keep release credentials scoped and protected.
+
+## Required Pull Request Checks
+
+Baseline checks:
+
+- repository hygiene check
+- Markdown and documentation path check where tooling exists
+- no committed secrets
+- no generated artifacts unless expected
+- no forbidden runtime defaults such as OpenClaw paths
+
+Rust checks once crates exist:
+
+```text
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+Security and dependency checks once tooling is configured:
+
+```text
+cargo audit
+cargo deny check
+```
+
+Protocol, policy, and tool checks should include:
+
+- serialization and compatibility tests
+- approval allow and deny tests
+- approval expiry and first-response-wins tests
+- cancellation and timeout tests
+- redaction tests before log persistence
+- workspace-boundary tests for file, shell, git, and patch tools
+
+## Required Release Checks
+
+Release workflows must run:
+
+- all pull request checks
+- clean checkout build
+- dependency license audit
+- vulnerability audit
+- changelog check
+- release notes check
+- artifact build on supported platforms
+- artifact checksum generation
+- smoke tests for packaged binaries
+
+Release workflows should not publish unless the tag matches the expected version format:
+
+```text
+v0.x.y
+v0.x.y-alpha.N
+v0.x.y-beta.N
+v0.x.y-rc.N
+```
+
+## Workflow Files
+
+Recommended workflows:
+
+- `.github/workflows/ci.yml`
+- `.github/workflows/security.yml`
+- `.github/workflows/docs.yml`
+- `.github/workflows/release.yml`
+
+Recommended templates:
+
+- `.github/pull_request_template.md`
+- `.github/ISSUE_TEMPLATE/bug_report.md`
+- `.github/ISSUE_TEMPLATE/feature_request.md`
+- `.github/ISSUE_TEMPLATE/security_report.md`
+- `.github/ISSUE_TEMPLATE/docs_report.md`
+
+## Cadis-Specific CI Gates
+
+CI should protect daemon-first boundaries with targeted checks as the codebase grows:
+
+- clients must not call tools directly when the daemon protocol should mediate
+- clients must not own approval state
+- clients must not own persisted session truth
+- risky tools must declare risk class and policy requirements
+- logs and persisted events must pass redaction tests
+- model providers must stream through core provider traits
+- UI and voice clients must consume daemon state through typed protocol events
+
+Some of these checks may start as review checklist items and become automated as package boundaries stabilize.
+
+## Secrets and Permissions
+
+CI must not expose:
+
+- model provider API keys
+- signing keys
+- release tokens
+- private package credentials
+- maintainer personal tokens
+
+Rules:
+
+- Pull request checks from forks must run without privileged secrets.
+- Release signing should happen only on protected tags or approved release jobs.
+- Logs must redact secrets and tokens.
+- CI should fail closed when required release credentials are missing.
+
+## Local Reproduction
+
+Contributors should be able to reproduce core CI with:
+
+```text
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+Additional documented commands should be added as CI expands, including docs checks, dependency checks, and package smoke tests.
+
+## Failure Handling
+
+When CI fails:
+
+- identify the failing job and command
+- reproduce locally when possible
+- fix the smallest responsible change
+- do not bypass failing security, policy, protocol, or release checks without maintainer approval
+- record persistent infrastructure issues if they block contributors
+
+## References
+
+- `AGENT.md`
+- `docs/09_OPEN_SOURCE_STANDARD.md`
+- `docs/12_TEST_STRATEGY.md`
+- `docs/14_SECURITY_THREAT_MODEL.md`
+- `docs/standards/07_RELEASE_STANDARD.md`

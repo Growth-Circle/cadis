@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  repo-hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check required files
+        run: |
+          test -f README.md
+          test -f LICENSE
+          test -f CONTRIBUTING.md
+          test -f SECURITY.md
+          test -f docs/01_PRD.md
+          test -f docs/06_IMPLEMENTATION_PLAN.md
+          test -f docs/07_MASTER_CHECKLIST.md
+          test -f docs/standards/00_STANDARD_INDEX.md
+      - name: Rust format
+        run: cargo fmt --all --check
+      - name: Rust clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Rust tests
+        run: cargo test --all-targets --all-features

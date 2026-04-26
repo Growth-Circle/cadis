@@ -1,0 +1,37 @@
+# CADIS Documentation
+
+This folder is the planning and execution source of truth for CADIS.
+
+Recommended reading order:
+
+1. `00_PROJECT_CHARTER.md`
+2. `BLUEPRINT.md`
+3. `01_PRD.md`
+4. `02_BRD.md`
+5. `03_FRD.md`
+6. `04_TRD.md`
+7. `05_ARCHITECTURE.md`
+8. `06_IMPLEMENTATION_PLAN.md`
+9. `07_MASTER_CHECKLIST.md`
+10. `11_DECISIONS.md`
+11. `standards/00_STANDARD_INDEX.md`
+
+Supporting documents:
+
+- `08_ROADMAP.md`
+- `09_OPEN_SOURCE_STANDARD.md`
+- `10_RISK_REGISTER.md`
+- `12_TEST_STRATEGY.md`
+- `13_GLOSSARY.md`
+- `14_SECURITY_THREAT_MODEL.md`
+- `15_PROTOCOL_DRAFT.md`
+- `16_CONFIG_REFERENCE.md`
+- `17_DEVELOPER_SETUP.md`
+- `18_INSTALLATION.md`
+- `19_REQUIREMENTS_TRACEABILITY.md`
+- `20_RAMACLAW_UI_ADAPTATION.md`
+- `21_UI_FEATURE_PARITY_CHECKLIST.md`
+- `22_UI_STATE_PROTOCOL_CONTRACT.md`
+- `23_UI_DESIGN_SYSTEM.md`
+- `24_CONTRIBUTOR_SKILLS.md`
+- `standards/`

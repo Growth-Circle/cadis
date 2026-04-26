@@ -1,0 +1,28 @@
+# Rust
+/target/
+
+# CADIS local state
+.cadis/
+*.jsonl
+*.tmp
+
+# Secrets
+.env
+.env.*
+!.env.example
+secrets/
+tokens/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
