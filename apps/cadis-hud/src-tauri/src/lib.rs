@@ -11,9 +11,13 @@ const CADIS_CONFIG_RELATIVE_PATH: &str = ".cadis/config.toml";
 const CADIS_SOCKET_RELATIVE_PATH: &str = ".cadis/run/cadisd.sock";
 
 #[tauri::command(rename_all = "camelCase")]
-fn cadis_request(request: Value, socket_path: Option<String>) -> Result<Vec<Value>, String> {
-    let socket_path = discover_socket_path(socket_path)?;
-    send_cadis_request(&socket_path, request).map_err(|error| error.to_string())
+async fn cadis_request(request: Value, socket_path: Option<String>) -> Result<Vec<Value>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let socket_path = discover_socket_path(socket_path)?;
+        send_cadis_request(&socket_path, request).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("CADIS request worker failed: {error}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
