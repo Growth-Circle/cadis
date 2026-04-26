@@ -1,34 +1,69 @@
-# CADIS
+<p align="center">
+  <img src="icon.png" alt="CADIS logo" width="132" />
+</p>
 
-CADIS is a Rust-first, local-first, model-agnostic multi-agent runtime for coordinating AI agents, tools, approvals, desktop HUDs, Telegram control, voice output, and isolated coding workflows.
+<h1 align="center">CADIS</h1>
 
-The project name is written as `cadis` for packages, binaries, directories, and commands. The product display name is `CADIS`.
+<p align="center">
+  Local-first multi-agent runtime for desktop work, voice, tools, approvals, and code orchestration.
+</p>
 
-## Status
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <img alt="Rust first" src="https://img.shields.io/badge/runtime-Rust-orange.svg">
+  <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-brightgreen.svg">
+  <img alt="Linux desktop MVP" src="https://img.shields.io/badge/target-Linux%20desktop-6f42c1.svg">
+</p>
 
-Desktop MVP implementation baseline. The repository now includes the typed protocol crate, a local `cadisd` daemon, a `cadis` CLI client, a native `cadis-hud` desktop prototype, a Tauri/React CADIS HUD app, JSONL event persistence with redaction, optional Ollama/OpenAI model adapters, a credential-free local fallback, and an official Codex CLI adapter for ChatGPT-plan auth.
+CADIS is a Rust-first, local-first, model-agnostic runtime for coordinating AI
+agents across a desktop HUD, CLI, tools, voice, approvals, and isolated coding
+workflows.
 
-Tools, approval-gated shell/file execution, workers, Telegram, full voice runtime, and code work windows are still planned work.
-
-This repository starts from a clean architecture instead of using OpenClaw as the core backend. CADIS does not fork Codex CLI for v0.1; it can call the installed official CLI as an adapter while keeping daemon authority in `cadisd`.
-
-## Product Direction
-
-CADIS is designed around one local daemon and many interfaces:
+The daemon, `cadisd`, owns runtime authority. Every UI, voice, Telegram, mobile,
+or CLI surface is just a protocol client.
 
 ```text
-Telegram  -> cadisd
-HUD       -> cadisd
-CLI       -> cadisd
-Voice     -> cadisd
-Android   -> cadisd
+HUD / CLI / Voice / Telegram / Android
+                |
+              cadisd
+                |
+     agents, models, tools, policy, store
 ```
 
-The daemon owns orchestration, events, tools, policy, persistence, sessions, and approvals. Interfaces are clients only and must not contain core agent logic.
+## Why CADIS
+
+Modern AI tools are powerful, but the control plane is often scattered across
+browser tabs, CLIs, background scripts, and private app state. CADIS pulls that
+work into one local daemon with typed events, explicit approvals, and a desktop
+HUD built for repeated daily use.
+
+- **Local-first:** sessions, events, policy, and orchestration live on your machine.
+- **Model-agnostic:** use Ollama, OpenAI-compatible APIs, or the official Codex CLI adapter.
+- **Daemon-owned:** UI clients do not own agent runtime logic.
+- **Approval-oriented:** risky actions belong behind a central policy engine.
+- **Voice-aware:** short assistant replies can be spoken; long code/logs stay visual.
+- **Open-source baseline:** clean docs, typed protocol, and a contributor-friendly layout.
+
+## Current Status
+
+CADIS is an early desktop MVP. The repository includes:
+
+- `cadisd`: local daemon and protocol authority
+- `cadis`: CLI client for status, models, agents, spawn, chat, and doctor checks
+- `apps/cadis-hud`: Tauri + React RamaClaw-style HUD
+- typed protocol events for messages, models, agents, approvals, and workers
+- JSONL event persistence with redaction boundaries
+- optional Ollama/OpenAI model adapters
+- official Codex CLI adapter for ChatGPT Plus/Pro login flows
+- Edge TTS playback and local `whisper-cli` voice input path
+
+Planned work still includes production-grade tool execution, full policy
+coverage, richer worker isolation, Telegram/mobile clients, and code work
+windows.
 
 ## Quick Start
 
-Build from source:
+Build the workspace:
 
 ```bash
 cargo build --release
@@ -41,17 +76,17 @@ target/release/cadisd --check
 target/release/cadisd
 ```
 
-In another terminal:
+Use the CLI:
 
 ```bash
 target/release/cadis status
 target/release/cadis doctor
 target/release/cadis models
+target/release/cadis agents
 target/release/cadis chat "hello"
-target/release/cadis-hud
 ```
 
-Run the RamaClaw-style desktop HUD:
+Run the desktop HUD:
 
 ```bash
 cd apps/cadis-hud
@@ -59,80 +94,89 @@ pnpm install
 pnpm tauri:dev
 ```
 
-The Tauri HUD discovers the daemon socket from `CADIS_HUD_SOCKET`, `CADIS_SOCKET`,
+The HUD discovers the daemon socket from `CADIS_HUD_SOCKET`, `CADIS_SOCKET`,
 `~/.cadis/config.toml`, `$XDG_RUNTIME_DIR/cadis/cadisd.sock`, or
 `~/.cadis/run/cadisd.sock`.
 
-The default model mode is `auto`: CADIS tries Ollama at `http://127.0.0.1:11434` and falls back to a local credential-free response if Ollama is not running. To use OpenAI API billing, set `[model].provider = "openai"` and provide `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` in the daemon environment. To use ChatGPT Plus/Pro through Codex, install the official Codex CLI, run `codex login`, then set `[model].provider = "codex-cli"`.
+## Models
 
-## Initial Scope
+Default mode is `auto`: CADIS tries Ollama at `http://127.0.0.1:11434`, then
+falls back to a local credential-free response if Ollama is not running.
 
-Linux desktop is the first target.
+For OpenAI API billing, set `[model].provider = "openai"` and provide
+`CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` in the daemon environment.
 
-The current MVP proves the daemon, typed event protocol, local CLI client, native HUD prototype, model response path, and event persistence. Native tool dispatch and central approval policy are next.
+For ChatGPT Plus/Pro through Codex:
+
+```bash
+codex login
+```
+
+Then set:
+
+```toml
+[model]
+provider = "codex-cli"
+```
+
+CADIS does not store ChatGPT credentials; the official Codex CLI owns that auth.
+
+## Voice
+
+The HUD can speak final CADIS replies through Edge TTS. For mic input, the HUD
+records locally and asks Tauri to transcribe via `whisper-cli`.
+
+```bash
+export CADIS_WHISPER_CLI="$HOME/.local/bin/whisper-cli"
+export CADIS_WHISPER_MODEL="$HOME/.local/share/cadis/whisper-models/ggml-base.en.bin"
+```
+
+On Linux, CADIS installs a WebKitGTK audio permission handler for the HUD. If
+your desktop portal blocks the mic, allow microphone access for CADIS in system
+settings and click the mic again.
 
 ## Repository Layout
 
 ```text
 cadis/
-|-- apps/                  # Tauri HUD and future desktop/mobile/server apps
+|-- apps/                  # Tauri HUD and future apps
 |-- config/                # Example agents, tools, and policy config
-|-- crates/                # Rust workspace crates later
-|-- docs/                  # Product, business, functional, technical docs
-|-- examples/              # Example configs and usage flows later
-|-- .github/               # Open-source workflow and issue templates
-|-- Cargo.toml             # Workspace manifest placeholder
-|-- CONTRIBUTING.md
+|-- crates/                # Rust daemon, CLI, protocol, model, store crates
+|-- docs/                  # Product, architecture, protocol, and standards docs
+|-- examples/              # Example configs and usage flows
+|-- skills/                # Project-local contributor skills
+|-- AGENT.md               # Canonical guide for coding agents
+|-- Cargo.toml             # Rust workspace manifest
 |-- SECURITY.md
 `-- LICENSE
 ```
 
-## Core Principles
-
-- Fast by default: emit status immediately and keep runtime overhead low.
-- Rust-first: daemon, CLI, protocol, tools, scheduler, policy, and persistence should be native Rust.
-- Local-first: primary state and orchestration live on the user's machine.
-- Model-agnostic: support OpenAI, Anthropic, Gemini, OpenRouter, Ollama, LM Studio, and custom HTTP providers.
-- Interface-agnostic: Telegram, HUD, CLI, Android, and voice clients use the same daemon protocol.
-- Safe by design: risky actions go through one approval engine.
-- Code is visual, not spoken: long code, diffs, logs, and test output belong in a code work window.
-
 ## Documentation
 
 - [Project Charter](docs/00_PROJECT_CHARTER.md)
-- [Blueprint](docs/BLUEPRINT.md)
-- [PRD](docs/01_PRD.md)
-- [BRD](docs/02_BRD.md)
-- [FRD](docs/03_FRD.md)
-- [Technical Requirements](docs/04_TRD.md)
 - [Architecture](docs/05_ARCHITECTURE.md)
 - [Implementation Plan](docs/06_IMPLEMENTATION_PLAN.md)
 - [Master Checklist](docs/07_MASTER_CHECKLIST.md)
-- [Roadmap](docs/08_ROADMAP.md)
-- [Open Source Standard](docs/09_OPEN_SOURCE_STANDARD.md)
-- [Risk Register](docs/10_RISK_REGISTER.md)
-- [Decisions](docs/11_DECISIONS.md)
-- [Test Strategy](docs/12_TEST_STRATEGY.md)
-- [Glossary](docs/13_GLOSSARY.md)
-- [Threat Model](docs/14_SECURITY_THREAT_MODEL.md)
 - [Protocol Draft](docs/15_PROTOCOL_DRAFT.md)
 - [Configuration Reference](docs/16_CONFIG_REFERENCE.md)
 - [Developer Setup](docs/17_DEVELOPER_SETUP.md)
 - [Installation](docs/18_INSTALLATION.md)
-- [Requirements Traceability](docs/19_REQUIREMENTS_TRACEABILITY.md)
 - [RamaClaw UI Adaptation](docs/20_RAMACLAW_UI_ADAPTATION.md)
-- [UI Feature Parity Checklist](docs/21_UI_FEATURE_PARITY_CHECKLIST.md)
 - [UI State Protocol Contract](docs/22_UI_STATE_PROTOCOL_CONTRACT.md)
 - [UI Design System](docs/23_UI_DESIGN_SYSTEM.md)
-- [Contributor Skills](docs/24_CONTRIBUTOR_SKILLS.md)
-- [Project Standards](docs/standards/00_STANDARD_INDEX.md)
+- [Open Source Standard](docs/09_OPEN_SOURCE_STANDARD.md)
 
-## Contributor Agent Guides
+## Security
 
-- [AGENT.md](AGENT.md)
-- [CLAUDE.md](CLAUDE.md)
-- [Project skills](skills/README.md)
+CADIS is built to keep credentials out of git and logs. Local auth artifacts,
+tokens, `.env` files, JSONL traces, sockets, and crash diagnostics are ignored
+by default. See [SECURITY.md](SECURITY.md) for reporting and handling guidance.
+
+## Contributing
+
+Start with [AGENT.md](AGENT.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
+[docs/standards/00_STANDARD_INDEX.md](docs/standards/00_STANDARD_INDEX.md).
 
 ## License
 
-CADIS is licensed under the Apache License 2.0. No third-party source code has been imported into this baseline.
+CADIS is licensed under the Apache License 2.0.

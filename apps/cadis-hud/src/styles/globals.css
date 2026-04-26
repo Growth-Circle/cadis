@@ -1044,6 +1044,22 @@ html, body, #root {
   justify-content: center;
   transition: all 120ms;
 }
+
+.chat-panel__icon-svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-panel__icon-btn--model .chat-panel__icon-svg {
+  width: 17px;
+  height: 17px;
+}
+
 .chat-panel__icon-btn:hover {
   border-color: var(--accent);
   color: var(--accent);

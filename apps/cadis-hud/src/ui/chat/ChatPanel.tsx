@@ -361,7 +361,7 @@ export function ChatPanel() {
             title={listening ? "Stop listening" : `Talk to ${mainName}`}
             aria-label="microphone"
           >
-            {listening ? "●" : "○"}
+            <MicIcon active={listening} />
           </button>
           <button
             type="button"
@@ -370,16 +370,16 @@ export function ChatPanel() {
             title="Voice settings"
             aria-label="voice settings"
           >
-            ⚙
+            <VoiceSettingsIcon />
           </button>
           <button
             type="button"
-            className="chat-panel__icon-btn"
+            className="chat-panel__icon-btn chat-panel__icon-btn--model"
             onClick={() => openConfig(true, "models")}
-            title="Model settings"
-            aria-label="model settings"
+            title={`Model settings: ${modelLabel}`}
+            aria-label={`model settings: ${modelLabel}`}
           >
-            ◊
+            <ModelSettingsIcon />
           </button>
           <textarea
             ref={textareaRef}
@@ -439,6 +439,38 @@ function WaveformLine() {
         />
       ))}
     </span>
+  );
+}
+
+function MicIcon({ active }: { active: boolean }) {
+  return (
+    <svg className="chat-panel__icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3Z" />
+      <path d="M6.5 10.5v1.1a5.5 5.5 0 0 0 11 0v-1.1" />
+      <path d="M12 17.2v3.3" />
+      <path d="M8.6 20.5h6.8" />
+      {active && <path d="M4.5 4.5 19.5 19.5" />}
+    </svg>
+  );
+}
+
+function VoiceSettingsIcon() {
+  return (
+    <svg className="chat-panel__icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 12h2.8l3.4-4.2v8.4L6.8 12H4Z" />
+      <path d="M14 8.5c1.1 1 1.6 2.1 1.6 3.5S15.1 14.5 14 15.5" />
+      <path d="M17 5.8c1.9 1.7 2.8 3.8 2.8 6.2s-.9 4.5-2.8 6.2" />
+    </svg>
+  );
+}
+
+function ModelSettingsIcon() {
+  return (
+    <svg className="chat-panel__icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+      <path d="M9.5 9.5h5v5h-5Z" />
+      <path d="M9 3.5v2.5M15 3.5v2.5M9 18v2.5M15 18v2.5M3.5 9h2.5M3.5 15h2.5M18 9h2.5M18 15h2.5" />
+    </svg>
   );
 }
 

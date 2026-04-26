@@ -6,9 +6,11 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use serde_json::Value;
+use tauri::Manager;
 
 const CADIS_CONFIG_RELATIVE_PATH: &str = ".cadis/config.toml";
 const CADIS_SOCKET_RELATIVE_PATH: &str = ".cadis/run/cadisd.sock";
@@ -16,6 +18,13 @@ const CADIS_SOCKET_RELATIVE_PATH: &str = ".cadis/run/cadisd.sock";
 #[derive(Default)]
 struct TtsPlaybackState {
     active_pid: Mutex<Option<u32>>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalSttResult {
+    text: String,
+    latency_ms: u128,
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -56,9 +65,10 @@ fn edge_tts_stop(state: tauri::State<'_, Arc<TtsPlaybackState>>) -> Result<(), S
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn local_stt_transcribe(audio_base64: String) -> Result<Value, String> {
-    let _ = audio_base64;
-    Err("local STT is not configured in this CADIS HUD build".to_owned())
+async fn local_stt_transcribe(audio_base64: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || local_stt_transcribe_blocking(audio_base64))
+        .await
+        .map_err(|error| format!("STT worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -96,9 +106,55 @@ pub fn run() {
             voice_stt_start,
             voice_stt_stop
         ])
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = set_cadis_window_icon(&window);
+                install_microphone_permission_handler(&window);
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.center();
+                let _ = window.set_focus();
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("failed to run CADIS HUD");
 }
+
+fn set_cadis_window_icon(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))
+        .map_err(|error| format!("could not load CADIS icon: {error}"))?;
+    window
+        .set_icon(icon)
+        .map_err(|error| format!("could not set CADIS window icon: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn install_microphone_permission_handler(window: &tauri::WebviewWindow) {
+    let _ = window.with_webview(|webview| {
+        use webkit2gtk::glib::prelude::Cast;
+        use webkit2gtk::{
+            PermissionRequestExt, UserMediaPermissionRequest, UserMediaPermissionRequestExt,
+            WebViewExt,
+        };
+
+        webview.inner().connect_permission_request(|_, request| {
+            let Some(user_media) = request.dynamic_cast_ref::<UserMediaPermissionRequest>() else {
+                return false;
+            };
+
+            if user_media.is_for_audio_device() && !user_media.is_for_video_device() {
+                user_media.allow();
+                return true;
+            }
+
+            false
+        });
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn install_microphone_permission_handler(_window: &tauri::WebviewWindow) {}
 
 fn edge_tts_speak_blocking(
     state: &Arc<TtsPlaybackState>,
@@ -128,6 +184,156 @@ fn edge_tts_speak_blocking(
     let playback_result = play_audio_file(state, &path);
     let _ = fs::remove_file(&path);
     playback_result
+}
+
+fn local_stt_transcribe_blocking(audio_base64: String) -> Result<Value, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(audio_base64.as_bytes())
+        .map_err(|error| format!("invalid STT audio payload: {error}"))?;
+    if bytes.is_empty() {
+        return Err("empty STT audio".to_owned());
+    }
+    if bytes.len() > 25 * 1024 * 1024 {
+        return Err("STT audio is too large".to_owned());
+    }
+
+    let path = write_temp_bytes("cadis-stt", "wav", &bytes)?;
+    let started = Instant::now();
+    let result = run_whisper_cli(&path);
+    let _ = fs::remove_file(&path);
+    result.map(|text| {
+        serde_json::json!(LocalSttResult {
+            text,
+            latency_ms: started.elapsed().as_millis(),
+        })
+    })
+}
+
+fn write_temp_bytes(prefix: &str, ext: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let path = temp_audio_path(prefix, ext)?;
+    fs::write(&path, bytes).map_err(|error| format!("cannot write temporary audio: {error}"))?;
+    Ok(path)
+}
+
+fn run_whisper_cli(path: &Path) -> Result<String, String> {
+    let model = whisper_model_path()?;
+    let library_path = whisper_library_path_env();
+    let mut last_error = String::new();
+
+    for binary in whisper_cli_candidates() {
+        let mut command = Command::new(&binary);
+        command
+            .arg("-m")
+            .arg(&model)
+            .arg("-f")
+            .arg(path)
+            .arg("-nt")
+            .arg("-np")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(library_path) = &library_path {
+            command.env("LD_LIBRARY_PATH", library_path);
+        }
+
+        let output = match command.output() {
+            Ok(output) => output,
+            Err(error) => {
+                last_error = format!("{}: {error}", binary.display());
+                continue;
+            }
+        };
+
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        last_error = if stderr.is_empty() {
+            format!("{} exited with status {}", binary.display(), output.status)
+        } else {
+            format!("{}: {stderr}", binary.display())
+        };
+    }
+
+    Err(format!(
+        "whisper-cli not available ({})",
+        explain_whisper_error(&last_error)
+    ))
+}
+
+fn whisper_model_path() -> Result<PathBuf, String> {
+    let mut candidates = Vec::new();
+    push_env_path(&mut candidates, "CADIS_WHISPER_MODEL");
+    push_env_path(&mut candidates, "WHISPER_MODEL");
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        candidates.push(home.join(".local/share/cadis/whisper-models/ggml-base.en.bin"));
+        candidates.push(home.join(".local/share/ramaclaw/whisper-models/ggml-base.en.bin"));
+    }
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+
+    let searched = candidates
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "whisper model not found; set CADIS_WHISPER_MODEL or install ggml-base.en.bin under ~/.local/share/cadis/whisper-models ({searched})"
+    ))
+}
+
+fn whisper_cli_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    push_env_path(&mut candidates, "CADIS_WHISPER_CLI");
+    push_env_path(&mut candidates, "WHISPER_CLI");
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        candidates.push(home.join(".local/bin/whisper-cli"));
+    }
+    candidates.push(PathBuf::from("whisper-cli"));
+    candidates
+}
+
+fn whisper_library_path_env() -> Option<String> {
+    let mut paths = Vec::new();
+    if let Ok(existing) = env::var("LD_LIBRARY_PATH") {
+        if !existing.trim().is_empty() {
+            paths.push(existing);
+        }
+    }
+    if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
+        for path in [
+            home.join(".local/lib"),
+            home.join(".local/lib64"),
+            home.join(".local/share/cadis/lib"),
+            home.join(".local/share/ramaclaw/lib"),
+            home.join(".local/share/whisper.cpp"),
+        ] {
+            if path.exists() {
+                paths.push(path.display().to_string());
+            }
+        }
+    }
+
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths.join(":"))
+    }
+}
+
+fn explain_whisper_error(error: &str) -> String {
+    if error.contains("libwhisper.so") {
+        format!(
+            "{error}; libwhisper.so.1 is missing from the dynamic linker path. Reinstall whisper.cpp or launch CADIS HUD with LD_LIBRARY_PATH pointing to the directory that contains libwhisper.so.1"
+        )
+    } else {
+        error.to_owned()
+    }
 }
 
 fn synthesize_edge_tts(

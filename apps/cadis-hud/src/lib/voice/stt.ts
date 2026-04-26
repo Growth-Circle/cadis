@@ -63,7 +63,7 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
       const text = result.text.trim();
       if (text) handlers.onFinal(text);
     } catch (err) {
-      handlers.onError?.(err instanceof Error ? err.message : String(err));
+      handlers.onError?.(friendlySttError(err));
     } finally {
       handlers.onEnd?.();
     }
@@ -140,12 +140,32 @@ export function startListening(lang: string, handlers: SttHandlers): SttSession 
     } catch (err) {
       stopped = true;
       cleanup();
-      handlers.onError?.(err instanceof Error ? err.message : String(err));
+      handlers.onError?.(friendlySttError(err));
       handlers.onEnd?.();
     }
   })();
 
   return { stop: stopRecording };
+}
+
+function friendlySttError(err: unknown): string {
+  const name = typeof err === "object" && err !== null && "name" in err
+    ? String((err as { name?: unknown }).name)
+    : "";
+  const message = err instanceof Error ? err.message : String(err);
+  const normalized = `${name} ${message}`.toLowerCase();
+  if (
+    normalized.includes("notallowed") ||
+    normalized.includes("not allowed") ||
+    normalized.includes("permission") ||
+    normalized.includes("denied")
+  ) {
+    return "microphone permission was blocked. Click the mic again and allow microphone access for CADIS in the system prompt/settings.";
+  }
+  if (normalized.includes("notfound") || normalized.includes("requested device not found")) {
+    return "no microphone was found by the system.";
+  }
+  return message;
 }
 
 async function blobToFloat32Mono16k(blob: Blob): Promise<Float32Array> {
