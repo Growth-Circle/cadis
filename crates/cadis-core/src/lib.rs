@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use cadis_models::{
     provider_catalog_for_config, ModelCatalogConfig, ModelInvocation, ModelProvider, ModelRequest,
-    ModelStreamEvent, ProviderCatalogEntry, ProviderReadiness,
+    ModelStreamControl, ModelStreamEvent, ProviderCatalogEntry, ProviderReadiness,
 };
 use cadis_policy::{PolicyDecision, PolicyEngine};
 use cadis_protocol::{
@@ -847,7 +847,7 @@ impl Runtime {
                 if let ModelStreamEvent::Delta(delta) = event {
                     streamed_deltas.push(delta);
                 }
-                Ok(())
+                Ok(ModelStreamControl::Continue)
             },
         );
 

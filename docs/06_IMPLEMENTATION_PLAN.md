@@ -121,6 +121,9 @@ Tasks:
 - Route agent-selected model IDs into provider selection instead of treating
   `agent.model.set` as UI-only state.
 - Add streaming callback support for providers that can stream.
+- Provider-boundary cancellation is defined as callback `Cancel` control,
+  `model.cancelled`, and a non-retryable `model_cancelled` error; native
+  upstream cancellation still needs per-provider integration.
 - Keep echo provider available only as an explicit fallback state.
 
 Exit criteria:

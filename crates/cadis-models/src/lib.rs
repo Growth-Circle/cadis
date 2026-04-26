@@ -52,15 +52,42 @@ pub trait ModelProvider: Send + Sync {
     ) -> Result<ModelResponse, ModelError> {
         match self.chat_with_request(request) {
             Ok(response) => {
-                callback(ModelStreamEvent::Started(response.invocation.clone()))?;
-                for delta in &response.deltas {
-                    callback(ModelStreamEvent::Delta(delta.clone()))?;
+                if emit_stream_event(
+                    callback,
+                    ModelStreamEvent::Started(response.invocation.clone()),
+                    &response.invocation,
+                )? == ModelStreamControl::Cancel
+                {
+                    return cancel_stream(callback, &response.invocation);
                 }
-                callback(ModelStreamEvent::Completed(response.invocation.clone()))?;
+                for delta in &response.deltas {
+                    if emit_stream_event(
+                        callback,
+                        ModelStreamEvent::Delta(delta.clone()),
+                        &response.invocation,
+                    )? == ModelStreamControl::Cancel
+                    {
+                        return cancel_stream(callback, &response.invocation);
+                    }
+                }
+                if emit_stream_event(
+                    callback,
+                    ModelStreamEvent::Completed(response.invocation.clone()),
+                    &response.invocation,
+                )? == ModelStreamControl::Cancel
+                {
+                    return cancel_stream(callback, &response.invocation);
+                }
                 Ok(response)
             }
             Err(error) => {
-                callback(ModelStreamEvent::Failed(ModelFailure {
+                if error.is_cancelled() {
+                    if let Some(invocation) = error.invocation.as_deref() {
+                        let _ = callback(ModelStreamEvent::Cancelled(invocation.clone()))?;
+                    }
+                    return Err(error);
+                }
+                let _ = callback(ModelStreamEvent::Failed(ModelFailure {
                     code: error.code.clone(),
                     message: error.message.clone(),
                     retryable: error.retryable,
@@ -73,7 +100,18 @@ pub trait ModelProvider: Send + Sync {
 }
 
 /// Callback used by providers to stream normalized model events.
-pub type ModelStreamCallback<'a> = dyn FnMut(ModelStreamEvent) -> Result<(), ModelError> + 'a;
+pub type ModelStreamCallback<'a> =
+    dyn FnMut(ModelStreamEvent) -> Result<ModelStreamControl, ModelError> + 'a;
+
+/// Callback control returned to a provider after each streamed event.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ModelStreamControl {
+    /// Continue streaming more provider events.
+    #[default]
+    Continue,
+    /// Stop the provider request and return a normalized cancellation error.
+    Cancel,
+}
 
 /// Model request context supplied by the runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,6 +173,8 @@ pub enum ModelStreamEvent {
     Completed(ModelInvocation),
     /// Provider invocation failed.
     Failed(ModelFailure),
+    /// Provider invocation was cancelled before completion.
+    Cancelled(ModelInvocation),
 }
 
 /// Structured model failure metadata.
@@ -180,6 +220,11 @@ impl ModelError {
         }
     }
 
+    /// Creates a normalized provider cancellation error.
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self::with_code("model_cancelled", message, false)
+    }
+
     /// Attaches provider/model invocation metadata.
     pub fn with_invocation(mut self, invocation: ModelInvocation) -> Self {
         self.invocation = Some(Box::new(invocation));
@@ -204,6 +249,18 @@ impl ModelError {
     /// Returns provider/model invocation metadata when available.
     pub fn invocation(&self) -> Option<&ModelInvocation> {
         self.invocation.as_deref()
+    }
+
+    /// Returns whether this error represents provider-boundary cancellation.
+    pub fn is_cancelled(&self) -> bool {
+        self.code == "model_cancelled"
+    }
+
+    fn with_invocation_if_missing(mut self, invocation: &ModelInvocation) -> Self {
+        if self.invocation.is_none() {
+            self.invocation = Some(Box::new(invocation.clone()));
+        }
+        self
     }
 }
 
@@ -236,6 +293,26 @@ fn provider_http_error(provider: &str, status: StatusCode) -> ModelError {
         format!("{provider} returned HTTP status {status}"),
         retryable,
     )
+}
+
+fn emit_stream_event(
+    callback: &mut ModelStreamCallback<'_>,
+    event: ModelStreamEvent,
+    invocation: &ModelInvocation,
+) -> Result<ModelStreamControl, ModelError> {
+    callback(event).map_err(|error| error.with_invocation_if_missing(invocation))
+}
+
+fn cancel_stream(
+    callback: &mut ModelStreamCallback<'_>,
+    invocation: &ModelInvocation,
+) -> Result<ModelResponse, ModelError> {
+    let _ = emit_stream_event(
+        callback,
+        ModelStreamEvent::Cancelled(invocation.clone()),
+        invocation,
+    )?;
+    Err(ModelError::cancelled("model request was cancelled").with_invocation(invocation.clone()))
 }
 
 /// Conservative provider readiness exposed by the model catalog.
@@ -1333,6 +1410,87 @@ struct OpenAiResponseMessage {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct DeterministicStreamingProvider {
+        deltas: Vec<String>,
+    }
+
+    impl DeterministicStreamingProvider {
+        fn new(deltas: &[&str]) -> Self {
+            Self {
+                deltas: deltas.iter().map(|delta| (*delta).to_owned()).collect(),
+            }
+        }
+
+        fn invocation(request: ModelRequest<'_>) -> ModelInvocation {
+            ModelInvocation {
+                requested_model: request.selected_model.map(ToOwned::to_owned),
+                effective_provider: "deterministic-stream".to_owned(),
+                effective_model: "deterministic-test-model".to_owned(),
+                fallback: false,
+                fallback_reason: None,
+            }
+        }
+    }
+
+    impl ModelProvider for DeterministicStreamingProvider {
+        fn name(&self) -> &str {
+            "deterministic-stream"
+        }
+
+        fn chat(&self, _prompt: &str) -> Result<Vec<String>, ModelError> {
+            panic!("deterministic streaming provider should emit deltas through stream_chat")
+        }
+
+        fn chat_with_request(
+            &self,
+            request: ModelRequest<'_>,
+        ) -> Result<ModelResponse, ModelError> {
+            Ok(ModelResponse {
+                deltas: self.deltas.clone(),
+                invocation: Self::invocation(request),
+            })
+        }
+
+        fn stream_chat(
+            &self,
+            request: ModelRequest<'_>,
+            callback: &mut ModelStreamCallback<'_>,
+        ) -> Result<ModelResponse, ModelError> {
+            let response = self.chat_with_request(request)?;
+            if emit_stream_event(
+                callback,
+                ModelStreamEvent::Started(response.invocation.clone()),
+                &response.invocation,
+            )? == ModelStreamControl::Cancel
+            {
+                return cancel_stream(callback, &response.invocation);
+            }
+
+            for delta in &response.deltas {
+                if emit_stream_event(
+                    callback,
+                    ModelStreamEvent::Delta(delta.clone()),
+                    &response.invocation,
+                )? == ModelStreamControl::Cancel
+                {
+                    return cancel_stream(callback, &response.invocation);
+                }
+            }
+
+            if emit_stream_event(
+                callback,
+                ModelStreamEvent::Completed(response.invocation.clone()),
+                &response.invocation,
+            )? == ModelStreamControl::Cancel
+            {
+                return cancel_stream(callback, &response.invocation);
+            }
+
+            Ok(response)
+        }
+    }
+
     #[test]
     fn echo_provider_returns_deltas() {
         let deltas = EchoProvider.chat("hello").expect("echo should not fail");
@@ -1498,7 +1656,7 @@ mod tests {
         let response = provider
             .stream_chat(ModelRequest::new("stream please"), &mut |event| {
                 events.push(event);
-                Ok(())
+                Ok(ModelStreamControl::Continue)
             })
             .expect("echo stream should succeed");
 
@@ -1515,6 +1673,86 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(streamed, response.deltas.join(""));
+    }
+
+    #[test]
+    fn provider_can_emit_token_deltas_through_callback() {
+        let provider = DeterministicStreamingProvider::new(&["hel", "lo", " stream"]);
+        let mut events = Vec::new();
+
+        let response = provider
+            .stream_chat(
+                ModelRequest::new("ignored by deterministic provider")
+                    .with_selected_model(Some("deterministic-stream/test")),
+                &mut |event| {
+                    events.push(event);
+                    Ok(ModelStreamControl::Continue)
+                },
+            )
+            .expect("streaming provider should succeed");
+
+        assert_eq!(response.deltas, vec!["hel", "lo", " stream"]);
+        assert_eq!(
+            response.invocation.requested_model.as_deref(),
+            Some("deterministic-stream/test")
+        );
+        assert!(matches!(events.first(), Some(ModelStreamEvent::Started(_))));
+        assert!(matches!(
+            events.last(),
+            Some(ModelStreamEvent::Completed(_))
+        ));
+        let streamed = events
+            .into_iter()
+            .filter_map(|event| match event {
+                ModelStreamEvent::Delta(delta) => Some(delta),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(streamed, vec!["hel", "lo", " stream"]);
+    }
+
+    #[test]
+    fn callback_cancellation_emits_cancelled_and_stops_streaming() {
+        let provider = DeterministicStreamingProvider::new(&["first", "second", "third"]);
+        let mut events = Vec::new();
+
+        let error = provider
+            .stream_chat(
+                ModelRequest::new("cancel after first delta"),
+                &mut |event| {
+                    let should_cancel = matches!(event, ModelStreamEvent::Delta(_));
+                    events.push(event);
+                    if should_cancel {
+                        Ok(ModelStreamControl::Cancel)
+                    } else {
+                        Ok(ModelStreamControl::Continue)
+                    }
+                },
+            )
+            .expect_err("callback cancellation should stop the provider");
+
+        assert_eq!(error.code(), "model_cancelled");
+        assert!(!error.retryable());
+        assert_eq!(
+            error
+                .invocation()
+                .map(|invocation| invocation.effective_provider.as_str()),
+            Some("deterministic-stream")
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ModelStreamEvent::Delta(_)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last(),
+            Some(ModelStreamEvent::Cancelled(_))
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ModelStreamEvent::Completed(_))));
     }
 
     #[test]

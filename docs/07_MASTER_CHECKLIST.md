@@ -140,10 +140,11 @@
 - [ ] Add real provider streaming callback support.
 - [x] Add provider readiness and effective model metadata.
 - [x] Apply per-agent model selection to provider routing.
-- [ ] Define cancellation behavior.
+- [x] Define provider-boundary cancellation behavior.
 - [x] Define provider error mapping.
 - [x] Implement first provider.
-- [ ] Add provider conformance tests.
+- [x] Add provider callback/cancellation conformance tests.
+- [ ] Add full live-provider conformance tests.
 - [x] Add provider config docs.
 - [ ] Add second provider.
 
