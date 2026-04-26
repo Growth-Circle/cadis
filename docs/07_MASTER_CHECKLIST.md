@@ -135,11 +135,11 @@
 ## 7. Model Provider Layer
 
 - [x] Define `ModelProvider` trait.
-- [ ] Define provider capabilities.
+- [x] Define provider capabilities.
 - [x] Define streaming event type.
 - [ ] Add real provider streaming callback support.
-- [ ] Add provider readiness and effective model metadata.
-- [ ] Apply per-agent model selection to provider routing.
+- [x] Add provider readiness and effective model metadata.
+- [x] Apply per-agent model selection to provider routing.
 - [ ] Define cancellation behavior.
 - [x] Define provider error mapping.
 - [x] Implement first provider.
@@ -306,7 +306,7 @@
 ## 15.1 Next Multi-Agent Execution Tracks
 
 - [ ] Track A: daemon event bus and live session subscription.
-- [ ] Track B: provider readiness, effective model metadata, and provider streaming.
+- [ ] Track B: provider readiness, effective model metadata, selected-model routing, and provider streaming.
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
 - [ ] Track D: policy-backed tools and approval persistence.
 - [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.

@@ -335,6 +335,16 @@ voice.completed
 {
   "models": [
     {
+      "provider": "auto",
+      "model": "llama3.2",
+      "display_name": "Auto (Ollama llama3.2, then local fallback)",
+      "capabilities": ["streaming", "local_fallback"],
+      "readiness": "fallback",
+      "effective_provider": "ollama",
+      "effective_model": "llama3.2",
+      "fallback": true
+    },
+    {
       "provider": "echo",
       "model": "cadis-local-fallback",
       "display_name": "CADIS local fallback",
@@ -350,9 +360,11 @@ voice.completed
 
 `readiness` is one of `ready`, `fallback`, `requires_configuration`, or
 `unavailable`. `fallback: true` means the entry is not a real model provider.
-For `auto`, CADIS reports the primary effective provider as `ollama` and marks
-the entry as fallback-capable because runtime requests can still fall back to
-`echo` if Ollama is not ready.
+For `auto`, CADIS reports the configured Ollama model as the primary effective
+model and marks the entry as fallback-capable because runtime requests can still
+fall back to `echo` if Ollama is not ready. `models.list` uses daemon config so
+clients can display the configured Ollama/OpenAI model IDs instead of generic
+placeholders.
 
 Model-backed `message.delta` and `message.completed` payloads may include a
 `model` object:

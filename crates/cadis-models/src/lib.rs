@@ -272,27 +272,80 @@ pub struct ProviderCatalogEntry {
     pub fallback: bool,
 }
 
-/// Returns the conservative built-in provider catalog.
+/// Runtime configuration used to build the client-visible provider catalog.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelCatalogConfig {
+    /// Default provider from `[model].provider`.
+    pub default_provider: String,
+    /// Configured Ollama model.
+    pub ollama_model: String,
+    /// Configured OpenAI model.
+    pub openai_model: String,
+    /// Whether an OpenAI API key is present in the daemon environment.
+    pub openai_api_key_configured: bool,
+}
+
+impl ModelCatalogConfig {
+    /// Creates catalog config from daemon model settings.
+    pub fn new(
+        default_provider: impl Into<String>,
+        ollama_model: impl Into<String>,
+        openai_model: impl Into<String>,
+        openai_api_key_configured: bool,
+    ) -> Self {
+        Self {
+            default_provider: normalize_provider_id(&default_provider.into()).to_owned(),
+            ollama_model: catalog_model_or_configured(ollama_model.into()),
+            openai_model: catalog_model_or_configured(openai_model.into()),
+            openai_api_key_configured,
+        }
+    }
+}
+
+impl Default for ModelCatalogConfig {
+    fn default() -> Self {
+        Self::new("auto", "llama3.2", "gpt-5.2", false)
+    }
+}
+
+/// Returns the conservative built-in provider catalog using default settings.
 pub fn provider_catalog() -> Vec<ProviderCatalogEntry> {
+    provider_catalog_for_config(&ModelCatalogConfig::default())
+}
+
+/// Returns the conservative built-in provider catalog for daemon settings.
+pub fn provider_catalog_for_config(config: &ModelCatalogConfig) -> Vec<ProviderCatalogEntry> {
+    let default_provider = normalize_provider_id(&config.default_provider);
+    let auto_readiness = if default_provider == "auto" {
+        ProviderReadiness::Fallback
+    } else {
+        ProviderReadiness::RequiresConfiguration
+    };
+    let openai_readiness = if config.openai_api_key_configured {
+        ProviderReadiness::Ready
+    } else {
+        ProviderReadiness::RequiresConfiguration
+    };
+
     vec![
         ProviderCatalogEntry {
             provider: "auto".to_owned(),
-            model: "ollama-or-echo".to_owned(),
-            display_name: "Auto (Ollama, then local fallback)".to_owned(),
+            model: config.ollama_model.clone(),
+            display_name: format!("Auto (Ollama {}, then local fallback)", config.ollama_model),
             capabilities: vec!["streaming".to_owned(), "local_fallback".to_owned()],
-            readiness: ProviderReadiness::Fallback,
+            readiness: auto_readiness,
             effective_provider: "ollama".to_owned(),
-            effective_model: "configured".to_owned(),
+            effective_model: config.ollama_model.clone(),
             fallback: true,
         },
         ProviderCatalogEntry {
             provider: "ollama".to_owned(),
-            model: "configured".to_owned(),
-            display_name: "Ollama local model".to_owned(),
+            model: config.ollama_model.clone(),
+            display_name: format!("Ollama {}", config.ollama_model),
             capabilities: vec!["streaming".to_owned(), "local_model".to_owned()],
             readiness: ProviderReadiness::RequiresConfiguration,
             effective_provider: "ollama".to_owned(),
-            effective_model: "configured".to_owned(),
+            effective_model: config.ollama_model.clone(),
             fallback: false,
         },
         ProviderCatalogEntry {
@@ -311,12 +364,12 @@ pub fn provider_catalog() -> Vec<ProviderCatalogEntry> {
         },
         ProviderCatalogEntry {
             provider: "openai".to_owned(),
-            model: "configured".to_owned(),
-            display_name: "OpenAI API model".to_owned(),
+            model: config.openai_model.clone(),
+            display_name: format!("OpenAI {}", config.openai_model),
             capabilities: vec!["api_key".to_owned()],
-            readiness: ProviderReadiness::RequiresConfiguration,
+            readiness: openai_readiness,
             effective_provider: "openai".to_owned(),
-            effective_model: "configured".to_owned(),
+            effective_model: config.openai_model.clone(),
             fallback: false,
         },
         ProviderCatalogEntry {
@@ -1192,6 +1245,15 @@ fn is_known_provider(provider: &str) -> bool {
     )
 }
 
+fn catalog_model_or_configured(model: String) -> String {
+    let model = model.trim();
+    if model.is_empty() {
+        CONFIGURED_MODEL.to_owned()
+    } else {
+        model.to_owned()
+    }
+}
+
 fn normalize_optional_model(model: Option<&str>) -> Option<String> {
     model
         .map(str::trim)
@@ -1297,6 +1359,34 @@ mod tests {
             .expect("ollama should be listed");
         assert_eq!(ollama.readiness, ProviderReadiness::RequiresConfiguration);
         assert!(!ollama.fallback);
+    }
+
+    #[test]
+    fn provider_catalog_uses_configured_models_and_openai_key_readiness() {
+        let catalog = provider_catalog_for_config(&ModelCatalogConfig::new(
+            "openai",
+            "qwen2.5-coder",
+            "gpt-5.4",
+            true,
+        ));
+
+        let auto = catalog
+            .iter()
+            .find(|entry| entry.provider == "auto")
+            .expect("auto should be listed");
+        assert_eq!(auto.model, "qwen2.5-coder");
+        assert_eq!(auto.effective_model, "qwen2.5-coder");
+        assert_eq!(auto.readiness, ProviderReadiness::RequiresConfiguration);
+        assert!(auto.fallback);
+
+        let openai = catalog
+            .iter()
+            .find(|entry| entry.provider == "openai")
+            .expect("openai should be listed");
+        assert_eq!(openai.model, "gpt-5.4");
+        assert_eq!(openai.effective_model, "gpt-5.4");
+        assert_eq!(openai.readiness, ProviderReadiness::Ready);
+        assert!(!openai.fallback);
     }
 
     #[test]

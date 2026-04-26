@@ -7,8 +7,8 @@ use std::process::Command;
 use std::time::Instant;
 
 use cadis_models::{
-    provider_catalog, ModelInvocation, ModelProvider, ModelRequest, ModelStreamEvent,
-    ProviderCatalogEntry, ProviderReadiness,
+    provider_catalog_for_config, ModelCatalogConfig, ModelInvocation, ModelProvider, ModelRequest,
+    ModelStreamEvent, ProviderCatalogEntry, ProviderReadiness,
 };
 use cadis_policy::{PolicyDecision, PolicyEngine};
 use cadis_protocol::{
@@ -52,6 +52,12 @@ pub struct RuntimeOptions {
     pub socket_path: Option<PathBuf>,
     /// Configured model provider label.
     pub model_provider: String,
+    /// Configured Ollama model used for catalog visibility.
+    pub ollama_model: String,
+    /// Configured OpenAI model used for catalog visibility.
+    pub openai_model: String,
+    /// Whether an OpenAI API key is present in the daemon environment.
+    pub openai_api_key_configured: bool,
     /// Initial daemon-owned UI preferences.
     pub ui_preferences: serde_json::Value,
 }
@@ -329,7 +335,7 @@ impl Runtime {
             ClientRequest::WorkspaceRevoke(request) => self.workspace_revoke(request_id, request),
             ClientRequest::WorkspaceDoctor(request) => self.workspace_doctor(request_id, request),
             ClientRequest::ModelsList(_) => {
-                let models = provider_catalog()
+                let models = provider_catalog_for_config(&self.model_catalog_config())
                     .into_iter()
                     .map(model_descriptor_from_catalog_entry)
                     .collect();
@@ -381,6 +387,15 @@ impl Runtime {
                 false,
             ),
         }
+    }
+
+    fn model_catalog_config(&self) -> ModelCatalogConfig {
+        ModelCatalogConfig::new(
+            self.options.model_provider.clone(),
+            self.options.ollama_model.clone(),
+            self.options.openai_model.clone(),
+            self.options.openai_api_key_configured,
+        )
     }
 
     fn status(&self, request_id: RequestId) -> RequestOutcome {
@@ -3379,6 +3394,9 @@ mod tests {
                 profile_id: "default".to_owned(),
                 socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
                 model_provider: "echo".to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
                 ui_preferences: serde_json::json!({
                     "hud": {
                         "theme": "arc",
@@ -3411,6 +3429,9 @@ mod tests {
                 profile_id: "default".to_owned(),
                 socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
                 model_provider: model_provider.to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
                 ui_preferences: serde_json::json!({
                     "agent_spawn": {
                         "max_depth": AgentSpawnLimits::default().max_depth,
@@ -4291,6 +4312,62 @@ mod tests {
         );
         assert_eq!(ollama.effective_provider.as_deref(), Some("ollama"));
         assert!(!ollama.fallback);
+    }
+
+    #[test]
+    fn models_list_uses_runtime_model_config() {
+        let mut runtime = Runtime::new(
+            RuntimeOptions {
+                cadis_home: test_workspace("cadis-home-model-config"),
+                profile_id: "default".to_owned(),
+                socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
+                model_provider: "openai".to_owned(),
+                ollama_model: "qwen2.5-coder".to_owned(),
+                openai_model: "gpt-5.4".to_owned(),
+                openai_api_key_configured: true,
+                ui_preferences: serde_json::json!({
+                    "agent_spawn": {
+                        "max_depth": AgentSpawnLimits::default().max_depth,
+                        "max_children_per_parent": AgentSpawnLimits::default().max_children_per_parent,
+                        "max_total_agents": AgentSpawnLimits::default().max_total_agents
+                    },
+                    "orchestrator": {
+                        "worker_delegation_enabled": true,
+                        "default_worker_role": "Worker"
+                    }
+                }),
+            },
+            Box::<EchoProvider>::default(),
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("hud_1"),
+            ClientRequest::ModelsList(EmptyPayload::default()),
+        ));
+        let models = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::ModelsListResponse(payload) => Some(&payload.models),
+                _ => None,
+            })
+            .expect("models.list.response should be emitted");
+
+        let ollama = models
+            .iter()
+            .find(|model| model.provider == "ollama")
+            .expect("ollama should be listed");
+        assert_eq!(ollama.model, "qwen2.5-coder");
+        assert_eq!(ollama.effective_model.as_deref(), Some("qwen2.5-coder"));
+
+        let openai = models
+            .iter()
+            .find(|model| model.provider == "openai")
+            .expect("openai should be listed");
+        assert_eq!(openai.model, "gpt-5.4");
+        assert_eq!(openai.effective_model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(openai.readiness, Some(ModelReadiness::Ready));
     }
 
     #[test]

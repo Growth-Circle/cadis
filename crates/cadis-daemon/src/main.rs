@@ -64,13 +64,14 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn build_runtime(config: &CadisConfig, socket_path: Option<PathBuf>) -> Arc<Mutex<Runtime>> {
+    let openai_api_key = openai_api_key_from_env();
     let provider = provider_from_config(
         &config.model.provider,
         &config.model.ollama_endpoint,
         &config.model.ollama_model,
         &config.model.openai_base_url,
         &config.model.openai_model,
-        openai_api_key_from_env().as_deref(),
+        openai_api_key.as_deref(),
     );
 
     Arc::new(Mutex::new(Runtime::new(
@@ -79,6 +80,9 @@ fn build_runtime(config: &CadisConfig, socket_path: Option<PathBuf>) -> Arc<Mute
             profile_id: config.profile.default_profile.clone(),
             socket_path,
             model_provider: config.model.provider.clone(),
+            ollama_model: config.model.ollama_model.clone(),
+            openai_model: config.model.openai_model.clone(),
+            openai_api_key_configured: openai_api_key.is_some(),
             ui_preferences: config.ui_preferences(),
         },
         provider,
