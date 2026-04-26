@@ -58,6 +58,33 @@ export type WorkerRecord = {
   updatedAt: number;
 };
 
+export type VoiceDiagnosticCheck = {
+  name: string;
+  status: "pass" | "warn" | "fail";
+  detail: string;
+};
+
+export type VoiceDaemonStatus = {
+  enabled: boolean;
+  state: "disabled" | "ready" | "degraded" | "blocked" | "unknown";
+  provider: string;
+  voiceId: string;
+  sttLanguage: string;
+  maxSpokenChars: number;
+  bridge: string;
+  lastPreflight?: {
+    surface: string;
+    status: string;
+    summary: string;
+    checkedAt: string;
+  };
+};
+
+export type VoiceDoctorReport = {
+  summary: string;
+  checks: VoiceDiagnosticCheck[];
+};
+
 export type ChatPreferences = {
   thinking: boolean;
   fast: boolean;
@@ -73,6 +100,8 @@ export type HudStore = {
   avatarStyle: AvatarStyle;
   voiceState: "idle" | "listening" | "thinking" | "speaking";
   voicePrefs: VoicePrefs;
+  voiceStatus: VoiceDaemonStatus | null;
+  voiceDoctor: VoiceDoctorReport | null;
   voiceConfigOpen: boolean;
   modelsConfigOpen: boolean;
   configOpen: boolean;
@@ -92,6 +121,8 @@ export type HudStore = {
   setAgentTask: (id: string, task: Partial<AgentLive["currentTask"]>) => void;
   setVoiceState: (s: HudStore["voiceState"]) => void;
   updateVoicePrefs: (patch: Partial<VoicePrefs>) => void;
+  setVoiceStatus: (status: VoiceDaemonStatus | null) => void;
+  setVoiceDoctor: (report: VoiceDoctorReport | null) => void;
   setVoiceConfigOpen: (open: boolean) => void;
   setModelsConfigOpen: (open: boolean) => void;
   setConfigOpen: (open: boolean, tab?: ConfigTab) => void;
@@ -177,6 +208,8 @@ export const useHud = create<HudStore>((set) => ({
   avatarStyle: "orb",
   voiceState: "idle",
   voicePrefs: DEFAULT_VOICE_PREFS,
+  voiceStatus: null,
+  voiceDoctor: null,
   voiceConfigOpen: false,
   modelsConfigOpen: false,
   configOpen: false,
@@ -214,6 +247,8 @@ export const useHud = create<HudStore>((set) => ({
   setVoiceState: (voiceState) => set({ voiceState }),
   updateVoicePrefs: (patch) =>
     set((s) => ({ voicePrefs: { ...s.voicePrefs, ...patch } })),
+  setVoiceStatus: (voiceStatus) => set({ voiceStatus }),
+  setVoiceDoctor: (voiceDoctor) => set({ voiceDoctor }),
   setVoiceConfigOpen: (voiceConfigOpen) =>
     set({ voiceConfigOpen, configOpen: voiceConfigOpen, configTab: "voice" }),
   setModelsConfigOpen: (modelsConfigOpen) =>

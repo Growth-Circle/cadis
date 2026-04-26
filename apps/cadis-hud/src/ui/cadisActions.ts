@@ -8,6 +8,9 @@ import {
   type AvatarStyle,
   type AgentLive,
   type ThemeKey,
+  type VoiceDaemonStatus,
+  type VoiceDiagnosticCheck,
+  type VoiceDoctorReport,
   type WorkerStatus,
 } from "./hudState.js";
 import { AGENT_ROSTER } from "../lib/agents-roster.js";
@@ -84,6 +87,7 @@ export function connect(): void {
     await Promise.all([
       callCadis("models.list", {}, activeGeneration),
       callCadis("daemon.status", {}, activeGeneration),
+      callCadis("voice.status", {}, activeGeneration),
     ]);
   })();
 }
@@ -189,6 +193,30 @@ export function persistVoicePreferences(prefs: VoicePrefs): void {
 
 export function persistChatPreferences(prefs: { thinking: boolean; fast: boolean }): void {
   sendUiPreferencesPatch({ chat: prefs });
+}
+
+export function requestVoiceDoctor(): boolean {
+  if (!connected) return false;
+  void callCadis("voice.doctor", { include_bridge: true }).then((ok) => {
+    if (!ok) scheduleReconnect();
+  });
+  return true;
+}
+
+export function sendVoicePreflight(report: VoiceDoctorReport, surface = "cadis-hud"): boolean {
+  if (!connected) return false;
+  void callCadis("voice.preflight", {
+    surface,
+    summary: report.summary,
+    checks: report.checks.map((check) => ({
+      name: check.name,
+      status: protocolVoiceCheckStatus(check.status),
+      message: check.detail,
+    })),
+  }).then((ok) => {
+    if (!ok) scheduleReconnect();
+  });
+  return true;
 }
 
 export function _resetCadisActionsForTest(): void {
@@ -354,6 +382,14 @@ function handleMessage(type: string, payload: unknown, sessionId?: string): void
     handlePreferences(payload);
     return;
   }
+  if (type === "voice.status.updated") {
+    handleVoiceStatus(payload);
+    return;
+  }
+  if (type === "voice.doctor.response" || type === "voice.preflight.response") {
+    handleVoiceDoctor(payload);
+    return;
+  }
   if (type === "message.delta") {
     handleMessageDelta(payload, sessionId);
     return;
@@ -460,6 +496,27 @@ function handlePreferences(payload: unknown): void {
   if (typeof chat.thinking === "boolean") chatPatch.thinking = chat.thinking;
   if (typeof chat.fast === "boolean") chatPatch.fast = chat.fast;
   if (Object.keys(chatPatch).length) useHud.getState().setChatPreferences(chatPatch);
+}
+
+function handleVoiceStatus(payload: unknown): void {
+  const status = normalizeVoiceStatus(payload);
+  if (status) useHud.getState().setVoiceStatus(status);
+}
+
+function handleVoiceDoctor(payload: unknown): void {
+  const p = asRecord(payload);
+  const status = normalizeVoiceStatus(p.status);
+  if (status) useHud.getState().setVoiceStatus(status);
+
+  const checks = Array.isArray(p.checks)
+    ? p.checks
+        .map(normalizeVoiceCheck)
+        .filter((check): check is VoiceDiagnosticCheck => Boolean(check))
+    : [];
+  useHud.getState().setVoiceDoctor({
+    summary: voiceDoctorSummary(checks),
+    checks,
+  });
 }
 
 function handleMessageDelta(payload: unknown, sessionId?: string): void {
@@ -771,6 +828,86 @@ function normalizeWorkerStatus(status: string | undefined): WorkerStatus | null 
   if (normalized === "failed" || normalized === "error") return "failed";
   if (normalized === "cancelled" || normalized === "canceled") return "cancelled";
   return null;
+}
+
+function normalizeVoiceStatus(payload: unknown): VoiceDaemonStatus | null {
+  const p = asRecord(payload);
+  const provider = stringFrom(p.provider) ?? "edge";
+  const voiceId = stringFrom(p.voice_id) ?? "id-ID-GadisNeural";
+  const sttLanguage = stringFrom(p.stt_language) ?? "auto";
+  const maxSpokenChars = numberFrom(p.max_spoken_chars) ?? 800;
+  const bridge = stringFrom(p.bridge) ?? "hud-local";
+  const state = normalizeVoiceState(stringFrom(p.state));
+  const lastPreflight = asRecord(p.last_preflight);
+  const surface = stringFrom(lastPreflight.surface);
+  const checkedAt = stringFrom(lastPreflight.checked_at);
+  const summary = stringFrom(lastPreflight.summary);
+  const preflightStatus = stringFrom(lastPreflight.status);
+
+  return {
+    enabled: p.enabled === true,
+    state,
+    provider,
+    voiceId,
+    sttLanguage,
+    maxSpokenChars,
+    bridge,
+    ...(surface && checkedAt && summary && preflightStatus
+      ? {
+          lastPreflight: {
+            surface,
+            checkedAt,
+            summary,
+            status: preflightStatus,
+          },
+        }
+      : {}),
+  };
+}
+
+function normalizeVoiceState(state: string | undefined): VoiceDaemonStatus["state"] {
+  if (
+    state === "disabled" ||
+    state === "ready" ||
+    state === "degraded" ||
+    state === "blocked" ||
+    state === "unknown"
+  ) {
+    return state;
+  }
+  return "unknown";
+}
+
+function normalizeVoiceCheck(value: unknown): VoiceDiagnosticCheck | null {
+  const p = asRecord(value);
+  const name = stringFrom(p.name);
+  if (!name) return null;
+  return {
+    name,
+    status: hudVoiceCheckStatus(stringFrom(p.status)),
+    detail: stringFrom(p.message) ?? stringFrom(p.detail) ?? "",
+  };
+}
+
+function hudVoiceCheckStatus(status: string | undefined): VoiceDiagnosticCheck["status"] {
+  const normalized = status?.toLowerCase();
+  if (normalized === "ok" || normalized === "pass" || normalized === "ready") return "pass";
+  if (normalized === "error" || normalized === "fail" || normalized === "blocked") return "fail";
+  return "warn";
+}
+
+function protocolVoiceCheckStatus(status: VoiceDiagnosticCheck["status"]): string {
+  if (status === "pass") return "ok";
+  if (status === "fail") return "error";
+  return "warn";
+}
+
+function voiceDoctorSummary(checks: VoiceDiagnosticCheck[]): string {
+  const failures = checks.filter((check) => check.status === "fail").length;
+  const warnings = checks.filter((check) => check.status === "warn").length;
+  if (failures) return `${failures} blocking issue${failures === 1 ? "" : "s"}`;
+  if (warnings) return `${warnings} warning${warnings === 1 ? "" : "s"}`;
+  return checks.length ? "ready" : "not run";
 }
 
 function defaultWorkerStatus(type: string): WorkerStatus {

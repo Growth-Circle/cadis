@@ -228,6 +228,37 @@ Sent when user clicks stop during preview or speech.
 }
 ```
 
+### `voice.status`, `voice.doctor`, and `voice.preflight`
+
+Sent by the HUD to read daemon-visible voice state and to publish local bridge
+preflight results. The HUD still owns platform capture/playback mechanics; it
+does not become authoritative for durable voice preferences, speech policy, or
+agent routing.
+
+```json
+{
+  "type": "voice.preflight",
+  "surface": "cadis-hud",
+  "summary": "ready",
+  "checks": [
+    {
+      "name": "microphone",
+      "status": "ok",
+      "message": "1 input visible"
+    },
+    {
+      "name": "MediaRecorder",
+      "status": "warn",
+      "message": "recorder available; WebAudio PCM fallback remains armed"
+    }
+  ]
+}
+```
+
+The local bridge preflight must include microphone permission/API state,
+`MediaRecorder`, analyser, WebAudio PCM fallback, whisper binary/model,
+Node helper, and audio player checks when available.
+
 ## 6. Events
 
 ### `daemon.status`
@@ -460,6 +491,28 @@ Drive voice test UI.
   "voice_id": "id-ID-GadisNeural"
 }
 ```
+
+### `voice.status.updated`, `voice.doctor.response`, `voice.preflight.response`
+
+Drive the voice status and doctor rows in the HUD config dialog.
+
+```json
+{
+  "type": "voice.status.updated",
+  "enabled": false,
+  "state": "disabled",
+  "provider": "edge",
+  "voice_id": "id-ID-GadisNeural",
+  "stt_language": "auto",
+  "max_spoken_chars": 800,
+  "bridge": "hud-local"
+}
+```
+
+`voice.doctor.response` and `voice.preflight.response` wrap the same status with
+`checks[]`, each containing `name`, `status`, and `message`. The HUD maps
+daemon `ok`, `warn`, and `error` statuses to its existing pass/warn/fail doctor
+presentation.
 
 ## 7. RamaClaw Topic Mapping
 

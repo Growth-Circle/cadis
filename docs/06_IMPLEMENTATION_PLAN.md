@@ -178,6 +178,9 @@ Tasks:
   `MediaRecorder` emits zero chunks even though analyser input is live.
 - Promote the current HUD-local voice doctor results into daemon-visible status
   once voice becomes daemon-owned.
+- Green slice: expose `voice.status`, `voice.doctor`, and `voice.preflight`
+  so CLI/HUD can see daemon-owned voice status while HUD/Tauri remains the
+  local capture/playback bridge.
 - Handle daemon voice events in HUD.
 
 Exit criteria:

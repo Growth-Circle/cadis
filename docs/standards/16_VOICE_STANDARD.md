@@ -26,8 +26,8 @@ Provider responsibilities:
 Initial provider options:
 
 - `edge`
-- `os`
-- `piper`
+- `openai`
+- `system`
 - `stub`
 
 The `stub` provider is required for deterministic tests.
@@ -175,6 +175,9 @@ an encoder fallback path, not a failed microphone.
 Voice requests:
 
 ```text
+voice.status
+voice.doctor
+voice.preflight
 voice.preview
 voice.stop
 ui.preferences.set
@@ -183,6 +186,9 @@ ui.preferences.set
 Voice events:
 
 ```text
+voice.status.updated
+voice.doctor.response
+voice.preflight.response
 voice.preview.started
 voice.preview.completed
 voice.preview.failed
@@ -190,6 +196,9 @@ ui.preferences.updated
 ```
 
 Voice preview failure must be visible in the HUD and structured in logs.
+The HUD must report its local bridge doctor/preflight results to `cadisd`
+through `voice.preflight`, while still keeping microphone capture, WebAudio PCM
+fallback, whisper invocation, and native playback local to the HUD/Tauri bridge.
 
 ## 12. Privacy and Logging
 

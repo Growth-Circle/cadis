@@ -105,11 +105,14 @@ always_on_top = false
 
 [voice]
 enabled = false
+provider = "edge"
 voice_id = "id-ID-GadisNeural"
+stt_language = "auto"
 rate = 0
 pitch = 0
 volume = 0
 auto_speak = false
+max_spoken_chars = 800
 
 [agent_spawn]
 # Applies to client-requested agent.spawn and explicit orchestrator /worker actions.
@@ -347,6 +350,12 @@ shared client override, and `XDG_RUNTIME_DIR` for the default daemon socket
 under `$XDG_RUNTIME_DIR/cadis/cadisd.sock`. `VITE_CADIS_SOCKET_PATH` is a
 development-only renderer seed for the browser preview; daemon state remains
 authoritative.
+
+Daemon-owned voice preferences read `[voice].provider`, `[voice].voice_id`,
+`[voice].stt_language`, and `[voice].max_spoken_chars` for status, doctor, and
+preflight reporting. The current green slice supports `edge`, `openai`, and
+`system` provider labels at the protocol/config layer; HUD/Tauri still performs
+local capture and playback.
 
 HUD voice input reads `CADIS_WHISPER_CLI`, `WHISPER_CLI`,
 `CADIS_WHISPER_MODEL`, `WHISPER_MODEL`, `CADIS_WHISPER_LANGUAGE`, and

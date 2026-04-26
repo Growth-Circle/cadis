@@ -302,6 +302,7 @@ pub enum ServerFrame {
 }
 
 /// Immediate response returned for request handling failures or acknowledgements.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum DaemonResponse {
@@ -343,6 +344,9 @@ pub struct DaemonStatusPayload {
     pub model_provider: String,
     /// Daemon uptime in seconds.
     pub uptime_seconds: u64,
+    /// Daemon-visible voice capability status.
+    #[serde(default)]
+    pub voice: VoiceStatusPayload,
 }
 
 /// Machine-readable error payload for responses and error events.
@@ -436,6 +440,15 @@ pub enum ClientRequest {
     /// Patch daemon-owned UI preferences.
     #[serde(rename = "ui.preferences.set")]
     UiPreferencesSet(UiPreferencesSetRequest),
+    /// Request daemon-visible voice capability status.
+    #[serde(rename = "voice.status")]
+    VoiceStatus(EmptyPayload),
+    /// Run daemon-visible voice diagnostics.
+    #[serde(rename = "voice.doctor")]
+    VoiceDoctor(VoiceDoctorRequest),
+    /// Report local HUD bridge preflight checks to the daemon.
+    #[serde(rename = "voice.preflight")]
+    VoicePreflight(VoicePreflightRequest),
     /// Preview voice output.
     #[serde(rename = "voice.preview")]
     VoicePreview(VoicePreviewRequest),
@@ -699,6 +712,36 @@ pub struct VoicePreferences {
     pub volume: i16,
 }
 
+/// Request payload for daemon-visible voice diagnostics.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct VoiceDoctorRequest {
+    /// Include the last local bridge preflight in the result when available.
+    #[serde(default = "default_true")]
+    pub include_bridge: bool,
+}
+
+impl Default for VoiceDoctorRequest {
+    fn default() -> Self {
+        Self {
+            include_bridge: true,
+        }
+    }
+}
+
+/// Request payload used by a local bridge to publish preflight results.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct VoicePreflightRequest {
+    /// Client or bridge that performed the checks, for example `cadis-hud`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+    /// Optional bridge-generated summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Local capture/playback checks performed outside the daemon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<VoiceDoctorCheck>,
+}
+
 /// Daemon events emitted by protocol version 0.1.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", content = "payload")]
@@ -769,6 +812,15 @@ pub enum CadisEvent {
     /// UI preferences changed.
     #[serde(rename = "ui.preferences.updated")]
     UiPreferencesUpdated(UiPreferencesPayload),
+    /// Voice capability status changed or was requested.
+    #[serde(rename = "voice.status.updated")]
+    VoiceStatusUpdated(VoiceStatusPayload),
+    /// Voice diagnostics result.
+    #[serde(rename = "voice.doctor.response")]
+    VoiceDoctorResponse(VoiceDoctorPayload),
+    /// Local bridge voice preflight was recorded by the daemon.
+    #[serde(rename = "voice.preflight.response")]
+    VoicePreflightResponse(VoiceDoctorPayload),
     /// Orchestrator routed a user request to an agent.
     #[serde(rename = "orchestrator.route")]
     OrchestratorRoute(OrchestratorRoutePayload),
@@ -1072,6 +1124,94 @@ pub enum ModelReadiness {
 pub struct UiPreferencesPayload {
     /// Full or partial preference object.
     pub preferences: serde_json::Value,
+}
+
+/// Daemon-visible voice capability state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceRuntimeState {
+    /// Voice is disabled in daemon-owned preferences.
+    Disabled,
+    /// Voice has no known blocking or warning diagnostics.
+    Ready,
+    /// Voice is usable but has warnings.
+    Degraded,
+    /// Voice has a blocking diagnostic.
+    Blocked,
+    /// The daemon has not seen enough information yet.
+    #[default]
+    Unknown,
+}
+
+/// Current daemon-visible voice status.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct VoiceStatusPayload {
+    /// Whether voice output is enabled in daemon-owned preferences.
+    pub enabled: bool,
+    /// Overall voice readiness.
+    pub state: VoiceRuntimeState,
+    /// Configured TTS provider.
+    pub provider: String,
+    /// Configured TTS voice identifier.
+    pub voice_id: String,
+    /// Configured STT language or `auto`.
+    pub stt_language: String,
+    /// Maximum characters eligible for direct speech output.
+    pub max_spoken_chars: usize,
+    /// Required local bridge mode for platform media APIs.
+    pub bridge: String,
+    /// Last local bridge preflight recorded by `voice.preflight`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_preflight: Option<VoicePreflightSummary>,
+}
+
+impl Default for VoiceStatusPayload {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            state: VoiceRuntimeState::Unknown,
+            provider: "edge".to_owned(),
+            voice_id: "id-ID-GadisNeural".to_owned(),
+            stt_language: "auto".to_owned(),
+            max_spoken_chars: 800,
+            bridge: "hud-local".to_owned(),
+            last_preflight: None,
+        }
+    }
+}
+
+/// One daemon or local bridge voice diagnostic check.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct VoiceDoctorCheck {
+    /// Stable check name.
+    pub name: String,
+    /// Result status, normally `ok`, `warn`, or `error`.
+    pub status: String,
+    /// Human-readable result.
+    #[serde(alias = "detail")]
+    pub message: String,
+}
+
+/// Summary of the last local bridge voice preflight.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct VoicePreflightSummary {
+    /// Client or bridge that performed the preflight.
+    pub surface: String,
+    /// Aggregated preflight status.
+    pub status: String,
+    /// Redacted human-readable summary.
+    pub summary: String,
+    /// UTC timestamp when the daemon recorded the preflight.
+    pub checked_at: Timestamp,
+}
+
+/// Voice diagnostics response payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct VoiceDoctorPayload {
+    /// Current daemon-visible voice status.
+    pub status: VoiceStatusPayload,
+    /// Checks performed or remembered by the daemon.
+    pub checks: Vec<VoiceDoctorCheck>,
 }
 
 /// Orchestrator routing decision payload.
@@ -1767,6 +1907,46 @@ mod tests {
     }
 
     #[test]
+    fn voice_preflight_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_voice"),
+            ClientId::from("hud_1"),
+            ClientRequest::VoicePreflight(VoicePreflightRequest {
+                surface: Some("cadis-hud".to_owned()),
+                summary: Some("ready".to_owned()),
+                checks: vec![VoiceDoctorCheck {
+                    name: "microphone".to_owned(),
+                    status: "ok".to_owned(),
+                    message: "1 input visible".to_owned(),
+                }],
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_voice",
+                "client_id": "hud_1",
+                "type": "voice.preflight",
+                "payload": {
+                    "surface": "cadis-hud",
+                    "summary": "ready",
+                    "checks": [
+                        {
+                            "name": "microphone",
+                            "status": "ok",
+                            "message": "1 input visible"
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
     fn server_response_frame_matches_transport_shape() {
         let frame = ServerFrame::Response(ResponseEnvelope::new(
             RequestId::from("req_1"),
@@ -1779,6 +1959,7 @@ mod tests {
                 sessions: 0,
                 model_provider: "echo".to_owned(),
                 uptime_seconds: 3,
+                voice: VoiceStatusPayload::default(),
             }),
         ));
 
@@ -1800,7 +1981,16 @@ mod tests {
                         "socket_path": "/run/user/1000/cadis/cadisd.sock",
                         "sessions": 0,
                         "model_provider": "echo",
-                        "uptime_seconds": 3
+                        "uptime_seconds": 3,
+                        "voice": {
+                            "enabled": false,
+                            "state": "unknown",
+                            "provider": "edge",
+                            "voice_id": "id-ID-GadisNeural",
+                            "stt_language": "auto",
+                            "max_spoken_chars": 800,
+                            "bridge": "hud-local"
+                        }
                     }
                 }
             })

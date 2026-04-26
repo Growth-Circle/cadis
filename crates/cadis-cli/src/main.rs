@@ -11,9 +11,10 @@ use cadis_protocol::{
     ApprovalResponseRequest, ClientId, ClientRequest, ContentKind, DaemonResponse, EmptyPayload,
     ErrorPayload, EventId, EventSubscriptionRequest, EventsSnapshotRequest, MessageSendRequest,
     ModelsListPayload, RequestEnvelope, RequestId, ServerFrame, SessionId, ToolCallRequest,
-    WorkspaceAccess, WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantPayload,
-    WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest,
-    WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
+    VoiceDoctorPayload, VoiceDoctorRequest, VoiceRuntimeState, VoiceStatusPayload, WorkspaceAccess,
+    WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantPayload, WorkspaceGrantRequest,
+    WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest, WorkspaceRecordPayload,
+    WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
 use cadis_store::load_config;
 
@@ -52,6 +53,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             render_agents(&frames, cli.json)
         }
         Command::Workspace(command) => run_workspace(&cli, command),
+        Command::Voice(command) => run_voice(&cli, command),
         Command::Events {
             replay_limit,
             since_event_id,
@@ -177,25 +179,50 @@ fn send_approval(
 
 fn run_doctor(cli: &Cli) -> Result<(), Box<dyn Error>> {
     let config = load_config()?;
+    let status_frames = send_request(cli, ClientRequest::DaemonStatus(EmptyPayload::default()))?;
+    let voice_frames = send_request(
+        cli,
+        ClientRequest::VoiceDoctor(VoiceDoctorRequest::default()),
+    )?;
+
+    if cli.json {
+        print_json_frames(&status_frames)?;
+        return print_json_frames(&voice_frames);
+    }
+
     println!("cadis doctor");
     println!("cadis_home: {}", config.cadis_home.display());
     println!("config: {}", config.config_path().display());
     println!("socket: {}", cli.socket_path()?.display());
 
-    let frames = send_request(cli, ClientRequest::DaemonStatus(EmptyPayload::default()))?;
     print!("daemon: ");
-    match daemon_status(&frames) {
+    match daemon_status(&status_frames) {
         Some(status) => {
             println!("{}", status.status);
             println!("model_provider: {}", status.model_provider);
             println!("sessions: {}", status.sessions);
+            render_voice(&voice_frames, false)?;
             Ok(())
         }
         None => {
             println!("unexpected response");
-            render_rejections_or_json(&frames, cli.json)
+            render_rejections_or_json(&status_frames, cli.json)
         }
     }
+}
+
+fn run_voice(cli: &Cli, command: &VoiceCommand) -> Result<(), Box<dyn Error>> {
+    let frames = match command {
+        VoiceCommand::Status => {
+            send_request(cli, ClientRequest::VoiceStatus(EmptyPayload::default()))?
+        }
+        VoiceCommand::Doctor => send_request(
+            cli,
+            ClientRequest::VoiceDoctor(VoiceDoctorRequest::default()),
+        )?,
+    };
+
+    render_voice(&frames, cli.json)
 }
 
 fn run_workspace(cli: &Cli, command: &WorkspaceCommand) -> Result<(), Box<dyn Error>> {
@@ -359,6 +386,7 @@ fn render_status(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error
     println!("sessions: {}", status.sessions);
     println!("model_provider: {}", status.model_provider);
     println!("uptime_seconds: {}", status.uptime_seconds);
+    print_voice_status(&status.voice);
     Ok(())
 }
 
@@ -468,6 +496,73 @@ fn render_workspace(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Er
         println!("no workspace data returned");
     }
     Ok(())
+}
+
+fn render_voice(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {
+    if json {
+        return print_json_frames(frames);
+    }
+
+    render_rejections(frames)?;
+    let mut rendered = false;
+    for frame in frames {
+        let ServerFrame::Event(event) = frame else {
+            continue;
+        };
+        match &event.event {
+            cadis_protocol::CadisEvent::VoiceStatusUpdated(status) => {
+                print_voice_status(status);
+                rendered = true;
+            }
+            cadis_protocol::CadisEvent::VoiceDoctorResponse(payload)
+            | cadis_protocol::CadisEvent::VoicePreflightResponse(payload) => {
+                print_voice_doctor(payload);
+                rendered = true;
+            }
+            _ => {}
+        }
+    }
+
+    if !rendered {
+        println!("no voice data returned");
+    }
+    Ok(())
+}
+
+fn print_voice_doctor(payload: &VoiceDoctorPayload) {
+    print_voice_status(&payload.status);
+    for check in &payload.checks {
+        println!("{}\t{}\t{}", check.status, check.name, check.message);
+    }
+}
+
+fn print_voice_status(status: &VoiceStatusPayload) {
+    println!(
+        "voice: {}\tenabled={}\tprovider={}\tvoice={}\tstt={}\tbridge={}\tmax_spoken_chars={}",
+        voice_state_name(status.state),
+        status.enabled,
+        status.provider,
+        status.voice_id,
+        status.stt_language,
+        status.bridge,
+        status.max_spoken_chars
+    );
+    if let Some(preflight) = &status.last_preflight {
+        println!(
+            "voice_preflight: {}\t{}\tsurface={}\tchecked_at={}",
+            preflight.status, preflight.summary, preflight.surface, preflight.checked_at
+        );
+    }
+}
+
+fn voice_state_name(state: VoiceRuntimeState) -> &'static str {
+    match state {
+        VoiceRuntimeState::Disabled => "disabled",
+        VoiceRuntimeState::Ready => "ready",
+        VoiceRuntimeState::Degraded => "degraded",
+        VoiceRuntimeState::Blocked => "blocked",
+        VoiceRuntimeState::Unknown => "unknown",
+    }
 }
 
 fn print_workspace(workspace: &WorkspaceRecordPayload) {
@@ -763,6 +858,7 @@ impl Cli {
             Some("models") => Command::Models,
             Some("agents") => Command::Agents,
             Some("workspace") => Command::Workspace(parse_workspace(args.collect())?),
+            Some("voice") => Command::Voice(parse_voice(args.collect())?),
             Some("events") => parse_events(args.collect())?,
             Some("spawn") => parse_spawn(args.collect())?,
             Some("chat") => {
@@ -807,6 +903,7 @@ enum Command {
     Models,
     Agents,
     Workspace(WorkspaceCommand),
+    Voice(VoiceCommand),
     Events {
         replay_limit: Option<u32>,
         since_event_id: Option<String>,
@@ -866,6 +963,21 @@ enum WorkspaceCommand {
         workspace_id: Option<String>,
         root: Option<PathBuf>,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum VoiceCommand {
+    Status,
+    Doctor,
+}
+
+fn parse_voice(args: Vec<String>) -> Result<VoiceCommand, Box<dyn Error>> {
+    let mut args = args.into_iter();
+    match args.next().as_deref() {
+        Some("status") | None => Ok(VoiceCommand::Status),
+        Some("doctor") => Ok(VoiceCommand::Doctor),
+        Some(other) => Err(invalid_input(format!("unknown voice command: {other}")).into()),
+    }
 }
 
 fn parse_workspace(args: Vec<String>) -> Result<WorkspaceCommand, Box<dyn Error>> {
@@ -1330,7 +1442,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn print_help() {
     println!(
-        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  workspace <COMMAND>    Manage registered workspaces and grants\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
+        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  workspace <COMMAND>    Manage registered workspaces and grants\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
         env!("CARGO_PKG_VERSION")
     );
 }

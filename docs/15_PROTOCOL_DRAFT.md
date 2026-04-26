@@ -99,6 +99,9 @@ worker.tail
 models.list
 ui.preferences.get
 ui.preferences.set
+voice.status
+voice.doctor
+voice.preflight
 voice.preview
 voice.stop
 config.reload
@@ -233,7 +236,16 @@ daemon.status.response
   "socket_path": "/run/user/1000/cadis/cadisd.sock",
   "sessions": 0,
   "model_provider": "auto",
-  "uptime_seconds": 3
+  "uptime_seconds": 3,
+  "voice": {
+    "enabled": false,
+    "state": "disabled",
+    "provider": "edge",
+    "voice_id": "id-ID-GadisNeural",
+    "stt_language": "auto",
+    "max_spoken_chars": 800,
+    "bridge": "hud-local"
+  }
 }
 ```
 
@@ -262,6 +274,9 @@ workspace.grant.revoked
 workspace.doctor.response
 models.list.response
 ui.preferences.updated
+voice.status.updated
+voice.doctor.response
+voice.preflight.response
 orchestrator.route
 tool.requested
 tool.started
@@ -563,6 +578,42 @@ Implicit model-driven spawning is reserved for a later runtime track.
   }
 }
 ```
+
+### `voice.status`, `voice.doctor`, and `voice.preflight`
+
+`voice.status` returns the daemon-visible voice state as a
+`voice.status.updated` event. `voice.doctor` returns `voice.doctor.response`
+with daemon checks plus the last local bridge preflight when one has been
+reported.
+
+The daemon remains the owner of voice preferences and policy state. HUD/Tauri
+remains the local capture/playback bridge for microphone permissions,
+`MediaRecorder`, WebAudio PCM fallback, whisper execution, and native audio
+playback.
+
+```json
+{
+  "type": "voice.preflight",
+  "surface": "cadis-hud",
+  "summary": "ready",
+  "checks": [
+    {
+      "name": "microphone",
+      "status": "ok",
+      "message": "1 input visible"
+    },
+    {
+      "name": "webaudio.pcm_fallback",
+      "status": "ok",
+      "message": "PCM fallback available when MediaRecorder emits zero chunks"
+    }
+  ]
+}
+```
+
+`status` values are `ok`, `warn`, or `error`. The daemon also accepts HUD-local
+aliases such as `pass` and `fail` and normalizes them before emitting
+`voice.preflight.response`.
 
 ### `voice.preview`
 

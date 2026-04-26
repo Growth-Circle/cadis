@@ -38,11 +38,16 @@ always_on_top = false
 
 [voice]
 enabled = false
+# Supported daemon-visible providers: "edge", "openai", "system".
+# HUD/Tauri remains the local microphone and playback bridge for this slice.
+provider = "edge"
 voice_id = "id-ID-GadisNeural"
+stt_language = "auto"
 rate = 0
 pitch = 0
 volume = 0
 auto_speak = false
+max_spoken_chars = 800
 
 [agent_spawn]
 # Applies to client-requested agent.spawn and explicit orchestrator /worker actions.
