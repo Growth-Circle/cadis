@@ -43,6 +43,9 @@ Implemented in the first runnable baseline:
 - P8 persistence subset: `~/.cadis` layout, JSONL event logs, redaction before
   persistence, and store-level atomic JSON metadata helpers under
   `~/.cadis/state`.
+- Workspace architecture docs: accepted target design for profile homes, agent
+  homes, project workspaces, worker worktrees, workspace grants, denied paths,
+  and project `.cadis/media/` assets in `docs/27_WORKSPACE_ARCHITECTURE.md`.
 - Orchestrator baseline: daemon-owned `@agent` routing, `orchestrator.route`
   events, route-time `agent.status.changed` events, request-driven
   `agent.spawn`, and spawn limits.
@@ -54,19 +57,24 @@ Implemented in the first runnable baseline:
   `docs/26_WULAN_AVATAR_ENGINE.md` plus `crates/cadis-avatar` for
   renderer-neutral avatar modes, gestures, face-tracking privacy state, renderer
   backend intent, and renderable frame contracts.
+- Workspace architecture baseline: profile layout initialization, persistent
+  workspace registry/grants, workspace protocol/CLI commands, workspace doctor,
+  agent-scoped `tool.call` grants, and safe-read tool execution behind active
+  grants.
+- Voice debug baseline: HUD-local mic doctor, WebAudio analyser telemetry, and
+  WebAudio PCM fallback when WebKit `MediaRecorder` produces zero audio chunks.
 
 Still pending:
 
-- Native file/shell tools.
-- Approval storage and tool gating.
+- Native mutating file/shell tools.
 - Agent runtime beyond the current route-and-answer path; existing
   `agent.spawn` is client-requested, not agent-driven.
-- Event bus fan-out and true live streaming from daemon to HUD; current
-  `session.subscribe` is a protocol/request baseline, not a persistent stream.
 - Daemon startup wiring for durable session, agent, worker, and approval
   recovery. The store-level atomic write and fail-safe recovery helpers exist.
 - Worker lifecycle, isolated worktrees, Telegram/mobile adapters, daemon-owned
   production voice output, and code work window.
+- Agent home manager, denied-path enforcement for all mutating tools,
+  checkpoint/rollback manager, and media asset manifests.
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
   memory records, scoped retrieval, provenance ledger, candidate promotion, and
   memory capsules.
@@ -166,6 +174,8 @@ Tasks:
 - Separate STT language from TTS voice selection.
 - Add a voice doctor covering mic permission, MediaRecorder, whisper binary,
   whisper model, Node helper, and audio player.
+- Keep HUD-local WebAudio PCM capture as a fallback when WebKit
+  `MediaRecorder` emits zero chunks even though analyser input is live.
 - Promote the current HUD-local voice doctor results into daemon-visible status
   once voice becomes daemon-owned.
 - Handle daemon voice events in HUD.
@@ -225,6 +235,34 @@ Exit criteria:
   approvals, model calls, memory retrieval, or policy decisions.
 - Bevy is only reconsidered through a decision record if the focused wgpu path
   cannot meet accepted avatar requirements.
+
+### Track H - Workspace Architecture
+
+Owner: workspace/profile/worker agents.
+
+Tasks:
+
+- Implement `CADIS_HOME` and `CADIS_PROFILE_HOME` resolution against the target
+  layout in `27_WORKSPACE_ARCHITECTURE.md`. Baseline profile home initialization
+  now exists for the default profile.
+- Add agent homes with `AGENT.toml`, persona/instruction/memory files, and
+  machine-enforced `POLICY.toml`.
+- Extend the implemented workspace registry/grants with full alias management,
+  richer expiry UX, and denied-path checks for mutating tools.
+- Add project `.cadis/workspace.toml`, `.cadis/worktrees/`, `.cadis/artifacts/`,
+  and `.cadis/media/` conventions.
+- Route coding workers into git worktrees and persist worker artifacts under the
+  profile home.
+- Add doctor checks for duplicated roots, broad grants, symlink escapes, secret
+  paths, stale worktrees, corrupt JSONL, and oversized memory/persona files.
+
+Exit criteria:
+
+- Tool calls without workspace grants fail closed or request approval.
+- Agent home is never treated as the default project cwd.
+- Coding workers edit only their worker worktree unless explicitly approved.
+- Project `.cadis/media/` manifests record generated media provenance without
+  storing secrets or raw transcripts.
 
 ## 3. P0 - Repository Foundation
 
@@ -505,6 +543,34 @@ Exit criteria:
 - Coding worker edits in separate worktree.
 - Diff can be generated.
 - Patch is not applied without approval.
+
+## 13.1 Workspace Architecture Phases
+
+Goal: implement the accepted profile, agent, workspace, and worktree design in
+`27_WORKSPACE_ARCHITECTURE.md`.
+
+Status: partially implemented. The current implementation initializes the
+default profile home, persists workspace registry/grants, exposes workspace
+protocol/CLI commands, and gates safe-read tools behind active grants. Agent
+homes, worker worktree creation, checkpoint rollback, and full denied-path
+coverage remain future phases.
+
+Tasks:
+
+- W0: add typed terminology for `ProfileHome`, `AgentHome`,
+  `ProjectWorkspace`, `WorkerWorktree`, `SandboxRoot`, and `WorkspaceGrant`.
+- W1: centralize home/profile path resolution and directory initialization.
+  Baseline complete for default profile initialization.
+- W2: add profile create/list/use/import/export flows.
+- W3: add agent home templates and agent capsule loading.
+- W4: add workspace registry, aliases, grants, path guards, and denied paths.
+  Baseline complete for registry/grants, broad-root rejection, and safe-read
+  path guards.
+- W5: add worker worktree creation, artifact storage, and cleanup rules.
+- W6: add checkpoint/rollback before destructive or mutating operations.
+- W7: integrate workspace, grant, worker, checkpoint, and rollback events.
+- W8: add deterministic channel and cwd/project routing.
+- W9: add doctor and migration checks for the full layout.
 
 ## 14. P11 - Telegram Adapter
 

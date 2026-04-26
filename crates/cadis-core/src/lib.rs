@@ -20,9 +20,18 @@ use cadis_protocol::{
     ModelInvocationPayload, ModelReadiness, ModelsListPayload, OrchestratorRoutePayload,
     ProtocolVersion, RequestAcceptedPayload, RequestEnvelope, RequestId, ResponseEnvelope,
     SessionEventPayload, SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload,
-    ToolFailedPayload, UiPreferencesPayload, WorkerEventPayload,
+    ToolFailedPayload, UiPreferencesPayload, WorkerArtifactLocations, WorkerEventPayload,
+    WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent, WorkerWorktreeState, WorkspaceAccess,
+    WorkspaceDoctorCheck, WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantId,
+    WorkspaceGrantPayload, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload,
+    WorkspaceListRequest, WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
-use cadis_store::{redact, ApprovalRecord, ApprovalState, ApprovalStore};
+use cadis_store::{
+    redact, ApprovalRecord, ApprovalState, ApprovalStore, CadisHome, CheckpointPolicy,
+    GrantSource as StoreGrantSource, ProfileHome, WorkspaceAccess as StoreWorkspaceAccess,
+    WorkspaceAlias, WorkspaceGrantRecord as StoreWorkspaceGrantRecord,
+    WorkspaceKind as StoreWorkspaceKind, WorkspaceMetadata, WorkspaceRegistry, WorkspaceVcs,
+};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 
 const FILE_READ_LIMIT_BYTES: usize = 64 * 1024;
@@ -35,6 +44,8 @@ const APPROVAL_TIMEOUT_MINUTES: i64 = 5;
 pub struct RuntimeOptions {
     /// Local CADIS state directory.
     pub cadis_home: PathBuf,
+    /// Active profile ID under `CADIS_HOME/profiles`.
+    pub profile_id: String,
     /// Socket path this daemon listens on.
     pub socket_path: Option<PathBuf>,
     /// Configured model provider label.
@@ -108,9 +119,13 @@ pub struct Runtime {
     spawn_limits: AgentSpawnLimits,
     policy: PolicyEngine,
     approval_store: ApprovalStore,
+    profile_home: ProfileHome,
     pending_approvals: HashMap<ApprovalId, PendingApproval>,
+    workspaces: HashMap<WorkspaceId, WorkspaceRecord>,
+    workspace_grants: HashMap<WorkspaceGrantId, WorkspaceGrantRecord>,
     next_tool: u64,
     next_approval: u64,
+    next_workspace_grant: u64,
 }
 
 impl Runtime {
@@ -123,6 +138,12 @@ impl Runtime {
         let agents = default_agents(&options.model_provider);
 
         let approval_store = ApprovalStore::new(&options.cadis_home);
+        let profile_home = CadisHome::new(&options.cadis_home)
+            .init_profile(&options.profile_id)
+            .unwrap_or_else(|_| CadisHome::new(&options.cadis_home).profile(&options.profile_id));
+        let workspaces = load_workspace_registry(&profile_home);
+        let workspace_grants = load_workspace_grants(&profile_home, &workspaces);
+        let next_workspace_grant = next_workspace_grant_counter(&workspace_grants);
 
         Self {
             options,
@@ -140,9 +161,13 @@ impl Runtime {
             spawn_limits,
             policy: PolicyEngine,
             approval_store,
+            profile_home,
             pending_approvals: HashMap::new(),
+            workspaces,
+            workspace_grants,
             next_tool: 1,
             next_approval: 1,
+            next_workspace_grant,
         }
     }
 
@@ -275,6 +300,13 @@ impl Runtime {
             }
             ClientRequest::AgentSpawn(request) => self.spawn_agent(request_id, request),
             ClientRequest::AgentKill(request) => self.kill_agent(request_id, request.agent_id),
+            ClientRequest::WorkspaceList(request) => self.workspace_list(request_id, request),
+            ClientRequest::WorkspaceRegister(request) => {
+                self.workspace_register(request_id, request)
+            }
+            ClientRequest::WorkspaceGrant(request) => self.workspace_grant(request_id, request),
+            ClientRequest::WorkspaceRevoke(request) => self.workspace_revoke(request_id, request),
+            ClientRequest::WorkspaceDoctor(request) => self.workspace_doctor(request_id, request),
             ClientRequest::ModelsList(_) => {
                 let models = provider_catalog()
                     .into_iter()
@@ -382,6 +414,28 @@ impl Runtime {
             }),
         ));
 
+        let required_access = required_tool_access(&request.tool_name);
+        let workspace = match self.resolved_granted_workspace(
+            &session_id,
+            request.agent_id.as_ref(),
+            &request.input,
+            required_access,
+        ) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                events.push(self.session_event(
+                    session_id,
+                    CadisEvent::ToolFailed(ToolFailedPayload {
+                        tool_call_id,
+                        tool_name: request.tool_name,
+                        error,
+                        risk_class: Some(risk_class),
+                    }),
+                ));
+                return self.accept(request_id, events);
+            }
+        };
+
         match policy.decision {
             PolicyDecision::Allow => {
                 events.push(self.session_event(
@@ -395,7 +449,7 @@ impl Runtime {
                     }),
                 ));
 
-                match self.execute_safe_tool(&session_id, &request) {
+                match self.execute_safe_tool(&workspace.root, &request) {
                     Ok(result) => events.push(self.session_event(
                         session_id,
                         CadisEvent::ToolCompleted(ToolEventPayload {
@@ -423,8 +477,7 @@ impl Runtime {
                 let requested_at = now_timestamp();
                 let expires_at = timestamp_after_minutes(APPROVAL_TIMEOUT_MINUTES);
                 let command = tool_command_summary(&request.tool_name, &request.input);
-                let workspace = tool_workspace_summary(&request.input)
-                    .or_else(|| self.session_workspace(&session_id));
+                let workspace = Some(workspace.root.display().to_string());
                 let record = ApprovalRecord {
                     approval_id: approval_id.clone(),
                     session_id: session_id.clone(),
@@ -682,18 +735,26 @@ impl Runtime {
         ));
         self.next_route += 1;
 
-        let worker = route
-            .worker_summary
-            .as_ref()
-            .map(|summary| WorkerDelegation {
-                worker_id: self.next_worker_id(),
+        let session_workspace = self.session_workspace(&session_id);
+        let artifact_root = self.options.cadis_home.join("artifacts").join("workers");
+        let worker = route.worker_summary.as_ref().map(|summary| {
+            let worker_id = self.next_worker_id();
+            WorkerDelegation {
+                worktree: planned_worker_worktree(
+                    &worker_id,
+                    session_workspace.as_deref(),
+                    &route.content,
+                ),
+                artifacts: worker_artifact_locations(&artifact_root, &worker_id),
+                worker_id,
                 parent_agent_id: self
                     .agents
                     .get(&route.agent_id)
                     .and_then(|agent| agent.parent_agent_id.clone())
                     .or_else(|| (route.agent_id.as_str() != "main").then(|| AgentId::from("main"))),
                 summary: summary.clone(),
-            });
+            }
+        });
 
         if let Some(worker) = &worker {
             events.push(self.session_event(
@@ -706,6 +767,8 @@ impl Runtime {
                     cli: None,
                     cwd: None,
                     summary: Some(worker.summary.clone()),
+                    worktree: Some(worker.worktree.clone()),
+                    artifacts: Some(worker.artifacts.clone()),
                 }),
             ));
         }
@@ -812,6 +875,8 @@ impl Runtime {
                             cli: None,
                             cwd: None,
                             summary: Some(worker.summary.clone()),
+                            worktree: Some(worker.worktree.clone()),
+                            artifacts: Some(worker.artifacts.clone()),
                         }),
                     ));
                 }
@@ -844,6 +909,8 @@ impl Runtime {
                             cli: None,
                             cwd: None,
                             summary: Some(error_message.clone()),
+                            worktree: Some(worker.worktree.clone()),
+                            artifacts: Some(worker.artifacts.clone()),
                         }),
                     ));
                 }
@@ -983,6 +1050,197 @@ impl Runtime {
         self.accept(request_id, vec![event])
     }
 
+    fn workspace_list(
+        &mut self,
+        request_id: RequestId,
+        request: WorkspaceListRequest,
+    ) -> RequestOutcome {
+        let event = self.event(
+            None,
+            CadisEvent::WorkspaceListResponse(WorkspaceListPayload {
+                workspaces: self.workspace_payloads(),
+                grants: if request.include_grants {
+                    self.workspace_grant_payloads()
+                } else {
+                    Vec::new()
+                },
+            }),
+        );
+        self.accept(request_id, vec![event])
+    }
+
+    fn workspace_register(
+        &mut self,
+        request_id: RequestId,
+        request: WorkspaceRegisterRequest,
+    ) -> RequestOutcome {
+        let workspace_id = request.workspace_id;
+        let root = match canonical_workspace_root(&request.root) {
+            Ok(root) => root,
+            Err(error) => {
+                return self.reject(
+                    request_id,
+                    "invalid_workspace_root",
+                    error.to_string(),
+                    false,
+                )
+            }
+        };
+        if let Err(error) = validate_workspace_root(&root, &self.options.cadis_home) {
+            return self.reject(request_id, error.code, error.message, error.retryable);
+        }
+        let record = WorkspaceRecord {
+            id: workspace_id.clone(),
+            kind: request.kind,
+            root,
+            aliases: normalize_aliases(request.aliases),
+            vcs: request.vcs.filter(|value| !value.trim().is_empty()),
+            trusted: request.trusted,
+            worktree_root: request
+                .worktree_root
+                .filter(|value| !value.trim().is_empty()),
+            artifact_root: request
+                .artifact_root
+                .filter(|value| !value.trim().is_empty()),
+        };
+        let mut workspaces = self.workspaces.clone();
+        workspaces.insert(workspace_id, record.clone());
+        if let Err(error) = save_workspace_registry(&self.profile_home, &workspaces) {
+            return self.reject(
+                request_id,
+                "workspace_registry_persist_failed",
+                format!("could not persist workspace registry: {error}"),
+                true,
+            );
+        }
+        self.workspaces = workspaces;
+
+        let event = self.event(
+            None,
+            CadisEvent::WorkspaceRegistered(record.event_payload()),
+        );
+        self.accept(request_id, vec![event])
+    }
+
+    fn workspace_grant(
+        &mut self,
+        request_id: RequestId,
+        request: WorkspaceGrantRequest,
+    ) -> RequestOutcome {
+        let Some(workspace) = self.workspaces.get(&request.workspace_id).cloned() else {
+            return self.reject(
+                request_id,
+                "workspace_not_found",
+                format!("workspace '{}' was not registered", request.workspace_id),
+                false,
+            );
+        };
+
+        let access = normalize_workspace_access(request.access);
+        let grant_id = self.next_workspace_grant_id();
+        let record = WorkspaceGrantRecord {
+            grant_id: grant_id.clone(),
+            agent_id: request.agent_id,
+            workspace_id: workspace.id,
+            root: workspace.root,
+            access,
+            created_at: now_timestamp(),
+            expires_at: request.expires_at,
+            source: request
+                .source
+                .filter(|source| !source.trim().is_empty())
+                .unwrap_or_else(|| "user".to_owned()),
+        };
+        if let Err(error) = self.persist_workspace_grant(&record) {
+            return self.reject(
+                request_id,
+                "workspace_grant_persist_failed",
+                format!("could not persist workspace grant: {error}"),
+                true,
+            );
+        }
+        self.workspace_grants.insert(grant_id, record.clone());
+
+        let event = self.event(
+            None,
+            CadisEvent::WorkspaceGrantCreated(record.event_payload()),
+        );
+        self.accept(request_id, vec![event])
+    }
+
+    fn workspace_revoke(
+        &mut self,
+        request_id: RequestId,
+        request: WorkspaceRevokeRequest,
+    ) -> RequestOutcome {
+        if request.grant_id.is_none() && request.workspace_id.is_none() {
+            return self.reject(
+                request_id,
+                "invalid_workspace_revoke",
+                "workspace.revoke requires grant_id or workspace_id",
+                false,
+            );
+        }
+
+        let revoked_ids = self
+            .workspace_grants
+            .iter()
+            .filter(|(grant_id, grant)| {
+                request.grant_id.as_ref().is_none_or(|id| id == *grant_id)
+                    && request
+                        .workspace_id
+                        .as_ref()
+                        .is_none_or(|id| id == &grant.workspace_id)
+                    && request
+                        .agent_id
+                        .as_ref()
+                        .is_none_or(|id| grant.agent_id.as_ref() == Some(id))
+            })
+            .map(|(grant_id, _)| grant_id.clone())
+            .collect::<Vec<_>>();
+
+        if revoked_ids.is_empty() {
+            return self.reject(
+                request_id,
+                "workspace_grant_not_found",
+                "no matching workspace grant was found",
+                false,
+            );
+        }
+
+        let mut events = Vec::new();
+        for grant_id in revoked_ids {
+            if let Some(record) = self.workspace_grants.remove(&grant_id) {
+                events.push(self.event(
+                    None,
+                    CadisEvent::WorkspaceGrantRevoked(record.event_payload()),
+                ));
+            }
+        }
+        if let Err(error) = self.persist_workspace_grants() {
+            return self.reject(
+                request_id,
+                "workspace_grant_persist_failed",
+                format!("could not persist workspace grant revocation: {error}"),
+                true,
+            );
+        }
+        self.accept(request_id, events)
+    }
+
+    fn workspace_doctor(
+        &mut self,
+        request_id: RequestId,
+        request: WorkspaceDoctorRequest,
+    ) -> RequestOutcome {
+        let checks = self.workspace_doctor_checks(request);
+        let event = self.event(
+            None,
+            CadisEvent::WorkspaceDoctorResponse(WorkspaceDoctorPayload { checks }),
+        );
+        self.accept(request_id, vec![event])
+    }
+
     fn agent_prompt(&self, agent_id: &AgentId, content: &str) -> String {
         let Some(agent) = self.agents.get(agent_id) else {
             return content.to_owned();
@@ -1022,6 +1280,13 @@ impl Runtime {
             self.event(
                 None,
                 CadisEvent::AgentListResponse(AgentListPayload { agents }),
+            ),
+            self.event(
+                None,
+                CadisEvent::WorkspaceListResponse(WorkspaceListPayload {
+                    workspaces: self.workspace_payloads(),
+                    grants: self.workspace_grant_payloads(),
+                }),
             ),
             self.event(
                 None,
@@ -1073,6 +1338,107 @@ impl Runtime {
         approval_id
     }
 
+    fn next_workspace_grant_id(&mut self) -> WorkspaceGrantId {
+        let grant_id = WorkspaceGrantId::from(format!("grant_{:06}", self.next_workspace_grant));
+        self.next_workspace_grant += 1;
+        grant_id
+    }
+
+    fn workspace_payloads(&self) -> Vec<WorkspaceRecordPayload> {
+        let mut records = self.workspaces.values().cloned().collect::<Vec<_>>();
+        records.sort_by(|left, right| left.id.cmp(&right.id));
+        records
+            .into_iter()
+            .map(WorkspaceRecord::event_payload)
+            .collect()
+    }
+
+    fn workspace_grant_payloads(&self) -> Vec<WorkspaceGrantPayload> {
+        let mut records = self.workspace_grants.values().cloned().collect::<Vec<_>>();
+        records.sort_by(|left, right| left.grant_id.cmp(&right.grant_id));
+        records
+            .into_iter()
+            .filter(|grant| !grant.is_expired())
+            .map(WorkspaceGrantRecord::event_payload)
+            .collect()
+    }
+
+    fn persist_workspace_grant(
+        &self,
+        record: &WorkspaceGrantRecord,
+    ) -> Result<(), cadis_store::StoreError> {
+        self.profile_home
+            .workspace_grants()
+            .append(&record.clone().into_store(self.profile_home.profile_id()))
+    }
+
+    fn persist_workspace_grants(&self) -> Result<(), cadis_store::StoreError> {
+        let mut records = self.workspace_grants.values().cloned().collect::<Vec<_>>();
+        records.sort_by(|left, right| left.grant_id.cmp(&right.grant_id));
+        let records = records
+            .into_iter()
+            .map(|record| record.into_store(self.profile_home.profile_id()))
+            .collect::<Vec<_>>();
+        self.profile_home.workspace_grants().replace_all(&records)
+    }
+
+    fn workspace_doctor_checks(
+        &self,
+        request: WorkspaceDoctorRequest,
+    ) -> Vec<WorkspaceDoctorCheck> {
+        let mut checks = Vec::new();
+
+        if self.workspaces.is_empty() {
+            checks.push(WorkspaceDoctorCheck {
+                name: "registry".to_owned(),
+                status: "warn".to_owned(),
+                message: "no workspaces are registered".to_owned(),
+            });
+        } else {
+            checks.push(WorkspaceDoctorCheck {
+                name: "registry".to_owned(),
+                status: "ok".to_owned(),
+                message: format!("{} workspace(s) registered", self.workspaces.len()),
+            });
+        }
+
+        if let Some(workspace_id) = request.workspace_id {
+            match self.workspaces.get(&workspace_id) {
+                Some(workspace) => {
+                    checks.push(root_check("workspace.root", &workspace.root));
+                    let active_grants = self
+                        .workspace_grants
+                        .values()
+                        .filter(|grant| grant.workspace_id == workspace_id && !grant.is_expired())
+                        .count();
+                    checks.push(WorkspaceDoctorCheck {
+                        name: "workspace.grants".to_owned(),
+                        status: if active_grants == 0 { "warn" } else { "ok" }.to_owned(),
+                        message: format!("{active_grants} active grant(s)"),
+                    });
+                }
+                None => checks.push(WorkspaceDoctorCheck {
+                    name: "workspace.lookup".to_owned(),
+                    status: "error".to_owned(),
+                    message: format!("workspace '{workspace_id}' is not registered"),
+                }),
+            }
+        }
+
+        if let Some(root) = request.root {
+            match canonical_workspace_root(&root) {
+                Ok(root) => checks.push(root_check("request.root", &root)),
+                Err(error) => checks.push(WorkspaceDoctorCheck {
+                    name: "request.root".to_owned(),
+                    status: "error".to_owned(),
+                    message: error.to_string(),
+                }),
+            }
+        }
+
+        checks
+    }
+
     fn resolve_tool_session(
         &mut self,
         requested_session_id: Option<SessionId>,
@@ -1080,7 +1446,14 @@ impl Runtime {
     ) -> (SessionId, Vec<EventEnvelope>) {
         let cwd = tool_workspace_summary(input);
         match requested_session_id {
-            Some(session_id) if self.sessions.contains_key(&session_id) => (session_id, Vec::new()),
+            Some(session_id) if self.sessions.contains_key(&session_id) => {
+                if let Some(cwd) = cwd {
+                    if let Some(session) = self.sessions.get_mut(&session_id) {
+                        session._cwd = Some(cwd);
+                    }
+                }
+                (session_id, Vec::new())
+            }
             Some(session_id) => {
                 let title = Some("Tool request".to_owned());
                 self.sessions.insert(
@@ -1125,13 +1498,13 @@ impl Runtime {
 
     fn execute_safe_tool(
         &self,
-        session_id: &SessionId,
+        workspace: &Path,
         request: &ToolCallRequest,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
         match request.tool_name.as_str() {
-            "file.read" => self.execute_file_read(session_id, &request.input),
-            "file.search" => self.execute_file_search(session_id, &request.input),
-            "git.status" => self.execute_git_status(session_id, &request.input),
+            "file.read" => self.execute_file_read(workspace, &request.input),
+            "file.search" => self.execute_file_search(workspace, &request.input),
+            "git.status" => self.execute_git_status(workspace, &request.input),
             _ => Err(tool_error(
                 "tool_not_allowed",
                 format!(
@@ -1145,13 +1518,12 @@ impl Runtime {
 
     fn execute_file_read(
         &self,
-        session_id: &SessionId,
+        workspace: &Path,
         input: &serde_json::Value,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
-        let workspace = self.resolved_workspace(session_id, input)?;
         let path = input_string(input, "path")
             .ok_or_else(|| tool_error("invalid_tool_input", "file.read requires path", false))?;
-        let path = resolve_inside_workspace(&workspace, &path)?;
+        let path = resolve_inside_workspace(workspace, &path)?;
         let bytes = fs::read(&path).map_err(|error| {
             tool_error(
                 "file_read_failed",
@@ -1166,7 +1538,7 @@ impl Runtime {
             &bytes
         };
         let content = redact(&String::from_utf8_lossy(visible));
-        let relative = display_relative_path(&workspace, &path);
+        let relative = display_relative_path(workspace, &path);
 
         Ok(ToolExecutionResult {
             summary: content.clone(),
@@ -1180,10 +1552,9 @@ impl Runtime {
 
     fn execute_file_search(
         &self,
-        session_id: &SessionId,
+        workspace: &Path,
         input: &serde_json::Value,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
-        let workspace = self.resolved_workspace(session_id, input)?;
         let query = input_string(input, "query")
             .ok_or_else(|| tool_error("invalid_tool_input", "file.search requires query", false))?;
         if query.is_empty() {
@@ -1194,10 +1565,10 @@ impl Runtime {
             ));
         }
         let root = input_string(input, "path").unwrap_or_else(|| ".".to_owned());
-        let root = resolve_inside_workspace(&workspace, &root)?;
+        let root = resolve_inside_workspace(workspace, &root)?;
         let max_results = input_usize(input, "max_results").unwrap_or(FILE_SEARCH_DEFAULT_LIMIT);
         let mut matches = Vec::new();
-        search_files(&workspace, &root, &query, max_results, &mut matches);
+        search_files(workspace, &root, &query, max_results, &mut matches);
         let truncated = matches.len() >= max_results;
         let summary = if matches.is_empty() {
             "no matches".to_owned()
@@ -1238,14 +1609,13 @@ impl Runtime {
 
     fn execute_git_status(
         &self,
-        session_id: &SessionId,
+        workspace: &Path,
         input: &serde_json::Value,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
-        let workspace = self.resolved_workspace(session_id, input)?;
         let cwd = input_string(input, "path")
             .or_else(|| input_string(input, "cwd"))
             .unwrap_or_else(|| ".".to_owned());
-        let cwd = resolve_inside_workspace(&workspace, &cwd)?;
+        let cwd = resolve_inside_workspace(workspace, &cwd)?;
         let output = Command::new("git")
             .arg("-C")
             .arg(&cwd)
@@ -1268,30 +1638,94 @@ impl Runtime {
         Ok(ToolExecutionResult {
             summary: stdout.clone(),
             output: serde_json::json!({
-                "cwd": display_relative_path(&workspace, &cwd),
+                "cwd": display_relative_path(workspace, &cwd),
                 "status": stdout
             }),
         })
     }
 
-    fn resolved_workspace(
+    fn resolved_granted_workspace(
         &self,
         session_id: &SessionId,
+        agent_id: Option<&AgentId>,
         input: &serde_json::Value,
-    ) -> Result<PathBuf, ErrorPayload> {
-        let workspace = tool_workspace_summary(input)
+        required_access: WorkspaceAccess,
+    ) -> Result<ResolvedWorkspace, ErrorPayload> {
+        let workspace_ref = tool_workspace_id(input)
+            .or_else(|| tool_workspace_summary(input))
             .or_else(|| self.session_workspace(session_id))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.options.cadis_home.clone());
-        workspace.canonicalize().map_err(|error| {
-            tool_error(
-                "invalid_workspace",
+            .ok_or_else(|| {
+                tool_error(
+                    "workspace_required",
+                    "tool call requires workspace_id, workspace, cwd, or a session workspace",
+                    false,
+                )
+            })?;
+        let workspace = self.resolve_registered_workspace(&workspace_ref)?;
+        if self.has_workspace_grant(&workspace.id, agent_id, required_access) {
+            Ok(ResolvedWorkspace {
+                root: workspace.root.clone(),
+            })
+        } else {
+            Err(tool_error(
+                "workspace_grant_required",
                 format!(
-                    "could not resolve workspace {}: {error}",
-                    workspace.display()
+                    "no active {:?} grant for workspace '{}'",
+                    required_access, workspace.id
                 ),
                 false,
-            )
+            ))
+        }
+    }
+
+    fn resolve_registered_workspace(
+        &self,
+        workspace_ref: &str,
+    ) -> Result<&WorkspaceRecord, ErrorPayload> {
+        let workspace_id = WorkspaceId::from(workspace_ref.to_owned());
+        if let Some(workspace) = self.workspaces.get(&workspace_id) {
+            return Ok(workspace);
+        }
+
+        if let Some(workspace) = self
+            .workspaces
+            .values()
+            .find(|workspace| workspace.aliases.iter().any(|alias| alias == workspace_ref))
+        {
+            return Ok(workspace);
+        }
+
+        let candidate = PathBuf::from(workspace_ref);
+        let Ok(root) = candidate.canonicalize() else {
+            return Err(tool_error(
+                "workspace_not_found",
+                format!("workspace '{workspace_ref}' is not registered"),
+                false,
+            ));
+        };
+        self.workspaces
+            .values()
+            .find(|workspace| workspace.root == root)
+            .ok_or_else(|| {
+                tool_error(
+                    "workspace_not_found",
+                    format!("workspace root {} is not registered", root.display()),
+                    false,
+                )
+            })
+    }
+
+    fn has_workspace_grant(
+        &self,
+        workspace_id: &WorkspaceId,
+        agent_id: Option<&AgentId>,
+        required_access: WorkspaceAccess,
+    ) -> bool {
+        self.workspace_grants.values().any(|grant| {
+            grant.workspace_id == *workspace_id
+                && workspace_grant_matches_agent(grant.agent_id.as_ref(), agent_id)
+                && !grant.is_expired()
+                && workspace_access_allows(&grant.access, required_access)
         })
     }
 
@@ -1601,6 +2035,113 @@ impl AgentRecord {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkspaceRecord {
+    id: WorkspaceId,
+    kind: WorkspaceKind,
+    root: PathBuf,
+    aliases: Vec<String>,
+    vcs: Option<String>,
+    trusted: bool,
+    worktree_root: Option<String>,
+    artifact_root: Option<String>,
+}
+
+impl WorkspaceRecord {
+    fn event_payload(self) -> WorkspaceRecordPayload {
+        WorkspaceRecordPayload {
+            workspace_id: self.id,
+            kind: self.kind,
+            root: self.root.display().to_string(),
+            aliases: self.aliases,
+            vcs: self.vcs,
+            trusted: self.trusted,
+            worktree_root: self.worktree_root,
+            artifact_root: self.artifact_root,
+        }
+    }
+
+    fn into_store(self) -> WorkspaceMetadata {
+        WorkspaceMetadata {
+            id: self.id.to_string(),
+            kind: store_workspace_kind(self.kind),
+            root: self.root,
+            vcs: store_workspace_vcs(self.vcs.as_deref()),
+            owner: None,
+            trusted: self.trusted,
+            worktree_root: self.worktree_root.map(PathBuf::from),
+            artifact_root: self.artifact_root.map(PathBuf::from),
+            checkpoint_policy: CheckpointPolicy::Disabled,
+            aliases: if self.aliases.is_empty() {
+                Vec::new()
+            } else {
+                vec![WorkspaceAlias {
+                    workspace_id: self.id.to_string(),
+                    aliases: self.aliases,
+                }]
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkspaceGrantRecord {
+    grant_id: WorkspaceGrantId,
+    agent_id: Option<AgentId>,
+    workspace_id: WorkspaceId,
+    root: PathBuf,
+    access: Vec<WorkspaceAccess>,
+    created_at: Timestamp,
+    expires_at: Option<Timestamp>,
+    source: String,
+}
+
+impl WorkspaceGrantRecord {
+    fn event_payload(self) -> WorkspaceGrantPayload {
+        WorkspaceGrantPayload {
+            grant_id: self.grant_id,
+            agent_id: self.agent_id,
+            workspace_id: self.workspace_id,
+            root: self.root.display().to_string(),
+            access: self.access,
+            expires_at: self.expires_at,
+            source: self.source,
+        }
+    }
+
+    fn into_store(self, profile_id: &str) -> StoreWorkspaceGrantRecord {
+        StoreWorkspaceGrantRecord {
+            grant_id: self.grant_id.to_string(),
+            profile_id: profile_id.to_owned(),
+            agent_id: self.agent_id,
+            workspace_id: self.workspace_id.to_string(),
+            root: self.root,
+            access: self
+                .access
+                .into_iter()
+                .map(store_workspace_access)
+                .collect(),
+            created_at: self.created_at,
+            expires_at: self.expires_at,
+            source: store_grant_source(&self.source),
+            reason: None,
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.expires_at
+            .as_ref()
+            .and_then(|expires_at| DateTime::parse_from_rfc3339(expires_at.as_str()).ok())
+            .map(|expires_at| expires_at.with_timezone(&Utc) <= Utc::now())
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedWorkspace {
+    root: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct RouteDecision {
     agent_id: AgentId,
     agent_name: String,
@@ -1642,6 +2183,8 @@ struct WorkerDelegation {
     worker_id: String,
     parent_agent_id: Option<AgentId>,
     summary: String,
+    worktree: WorkerWorktreeIntent,
+    artifacts: WorkerArtifactLocations,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1694,6 +2237,112 @@ fn protocol_readiness(readiness: ProviderReadiness) -> ModelReadiness {
         ProviderReadiness::RequiresConfiguration => ModelReadiness::RequiresConfiguration,
         ProviderReadiness::Unavailable => ModelReadiness::Unavailable,
     }
+}
+
+fn load_workspace_registry(profile_home: &ProfileHome) -> HashMap<WorkspaceId, WorkspaceRecord> {
+    profile_home
+        .workspace_registry()
+        .load()
+        .unwrap_or_default()
+        .workspace
+        .into_iter()
+        .filter_map(workspace_record_from_store)
+        .map(|record| (record.id.clone(), record))
+        .collect()
+}
+
+fn save_workspace_registry(
+    profile_home: &ProfileHome,
+    workspaces: &HashMap<WorkspaceId, WorkspaceRecord>,
+) -> Result<(), cadis_store::StoreError> {
+    let mut records = workspaces.values().cloned().collect::<Vec<_>>();
+    records.sort_by(|left, right| left.id.cmp(&right.id));
+    profile_home.workspace_registry().save(&WorkspaceRegistry {
+        workspace: records
+            .into_iter()
+            .map(WorkspaceRecord::into_store)
+            .collect(),
+    })
+}
+
+fn load_workspace_grants(
+    profile_home: &ProfileHome,
+    workspaces: &HashMap<WorkspaceId, WorkspaceRecord>,
+) -> HashMap<WorkspaceGrantId, WorkspaceGrantRecord> {
+    profile_home
+        .workspace_grants()
+        .load()
+        .map(|recovery| recovery.records)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|record| workspace_grant_record_from_store(record, workspaces))
+        .map(|record| (record.grant_id.clone(), record))
+        .collect()
+}
+
+fn workspace_record_from_store(record: WorkspaceMetadata) -> Option<WorkspaceRecord> {
+    let root = record.root.canonicalize().ok()?;
+    let aliases = record
+        .aliases
+        .into_iter()
+        .filter(|alias| alias.workspace_id == record.id)
+        .flat_map(|alias| alias.aliases)
+        .collect::<Vec<_>>();
+    Some(WorkspaceRecord {
+        id: WorkspaceId::from(record.id),
+        kind: protocol_workspace_kind(record.kind),
+        root,
+        aliases: normalize_aliases(aliases),
+        vcs: match record.vcs {
+            WorkspaceVcs::Git => Some("git".to_owned()),
+            WorkspaceVcs::None => None,
+        },
+        trusted: record.trusted,
+        worktree_root: record
+            .worktree_root
+            .map(|path| path.display().to_string())
+            .filter(|value| !value.trim().is_empty()),
+        artifact_root: record
+            .artifact_root
+            .map(|path| path.display().to_string())
+            .filter(|value| !value.trim().is_empty()),
+    })
+}
+
+fn workspace_grant_record_from_store(
+    record: StoreWorkspaceGrantRecord,
+    workspaces: &HashMap<WorkspaceId, WorkspaceRecord>,
+) -> Option<WorkspaceGrantRecord> {
+    let workspace_id = WorkspaceId::from(record.workspace_id);
+    if !workspaces.contains_key(&workspace_id) {
+        return None;
+    }
+    Some(WorkspaceGrantRecord {
+        grant_id: WorkspaceGrantId::from(record.grant_id),
+        agent_id: record.agent_id,
+        workspace_id,
+        root: record.root.canonicalize().unwrap_or(record.root),
+        access: normalize_workspace_access(
+            record
+                .access
+                .into_iter()
+                .map(protocol_workspace_access)
+                .collect(),
+        ),
+        created_at: record.created_at,
+        expires_at: record.expires_at,
+        source: protocol_grant_source(record.source).to_owned(),
+    })
+}
+
+fn next_workspace_grant_counter(grants: &HashMap<WorkspaceGrantId, WorkspaceGrantRecord>) -> u64 {
+    grants
+        .keys()
+        .filter_map(|grant_id| grant_id.as_str().strip_prefix("grant_"))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
 }
 
 fn model_invocation_payload(invocation: &ModelInvocation) -> ModelInvocationPayload {
@@ -1774,7 +2423,213 @@ fn input_usize(input: &serde_json::Value, key: &str) -> Option<usize> {
 }
 
 fn tool_workspace_summary(input: &serde_json::Value) -> Option<String> {
-    input_string(input, "workspace").or_else(|| input_string(input, "cwd"))
+    tool_workspace_id(input)
+        .or_else(|| input_string(input, "workspace"))
+        .or_else(|| input_string(input, "cwd"))
+}
+
+fn tool_workspace_id(input: &serde_json::Value) -> Option<String> {
+    input_string(input, "workspace_id")
+}
+
+fn required_tool_access(tool_name: &str) -> WorkspaceAccess {
+    match tool_name {
+        "shell.run" => WorkspaceAccess::Exec,
+        "file.write" | "file.patch" => WorkspaceAccess::Write,
+        _ => WorkspaceAccess::Read,
+    }
+}
+
+fn normalize_workspace_access(access: Vec<WorkspaceAccess>) -> Vec<WorkspaceAccess> {
+    let mut normalized = if access.is_empty() {
+        vec![WorkspaceAccess::Read]
+    } else {
+        access
+    };
+    normalized.sort_by_key(|access| match access {
+        WorkspaceAccess::Read => 0,
+        WorkspaceAccess::Write => 1,
+        WorkspaceAccess::Exec => 2,
+        WorkspaceAccess::Admin => 3,
+    });
+    normalized.dedup();
+    normalized
+}
+
+fn workspace_access_allows(granted: &[WorkspaceAccess], required: WorkspaceAccess) -> bool {
+    granted.contains(&WorkspaceAccess::Admin)
+        || granted.contains(&required)
+        || (required == WorkspaceAccess::Read && granted.contains(&WorkspaceAccess::Write))
+}
+
+fn workspace_grant_matches_agent(
+    grant_agent_id: Option<&AgentId>,
+    request_agent_id: Option<&AgentId>,
+) -> bool {
+    grant_agent_id.is_none() || grant_agent_id == request_agent_id
+}
+
+fn store_workspace_kind(kind: WorkspaceKind) -> StoreWorkspaceKind {
+    match kind {
+        WorkspaceKind::Project => StoreWorkspaceKind::Project,
+        WorkspaceKind::Documents => StoreWorkspaceKind::Documents,
+        WorkspaceKind::Sandbox => StoreWorkspaceKind::Sandbox,
+        WorkspaceKind::Worktree => StoreWorkspaceKind::Worktree,
+    }
+}
+
+fn protocol_workspace_kind(kind: StoreWorkspaceKind) -> WorkspaceKind {
+    match kind {
+        StoreWorkspaceKind::Project => WorkspaceKind::Project,
+        StoreWorkspaceKind::Documents => WorkspaceKind::Documents,
+        StoreWorkspaceKind::Sandbox => WorkspaceKind::Sandbox,
+        StoreWorkspaceKind::Worktree => WorkspaceKind::Worktree,
+    }
+}
+
+fn store_workspace_access(access: WorkspaceAccess) -> StoreWorkspaceAccess {
+    match access {
+        WorkspaceAccess::Read => StoreWorkspaceAccess::Read,
+        WorkspaceAccess::Write => StoreWorkspaceAccess::Write,
+        WorkspaceAccess::Exec => StoreWorkspaceAccess::Exec,
+        WorkspaceAccess::Admin => StoreWorkspaceAccess::Admin,
+    }
+}
+
+fn protocol_workspace_access(access: StoreWorkspaceAccess) -> WorkspaceAccess {
+    match access {
+        StoreWorkspaceAccess::Read => WorkspaceAccess::Read,
+        StoreWorkspaceAccess::Write => WorkspaceAccess::Write,
+        StoreWorkspaceAccess::Exec => WorkspaceAccess::Exec,
+        StoreWorkspaceAccess::Admin => WorkspaceAccess::Admin,
+    }
+}
+
+fn store_workspace_vcs(vcs: Option<&str>) -> WorkspaceVcs {
+    match vcs.unwrap_or_default().trim().to_lowercase().as_str() {
+        "git" => WorkspaceVcs::Git,
+        _ => WorkspaceVcs::None,
+    }
+}
+
+fn store_grant_source(source: &str) -> StoreGrantSource {
+    match source.trim().to_lowercase().as_str() {
+        "route" => StoreGrantSource::Route,
+        "policy" => StoreGrantSource::Policy,
+        "worker_spawn" | "worker-spawn" => StoreGrantSource::WorkerSpawn,
+        _ => StoreGrantSource::User,
+    }
+}
+
+fn protocol_grant_source(source: StoreGrantSource) -> &'static str {
+    match source {
+        StoreGrantSource::Route => "route",
+        StoreGrantSource::User => "user",
+        StoreGrantSource::Policy => "policy",
+        StoreGrantSource::WorkerSpawn => "worker_spawn",
+    }
+}
+
+fn normalize_aliases(aliases: Vec<String>) -> Vec<String> {
+    let mut aliases = aliases
+        .into_iter()
+        .map(|alias| alias.trim().to_owned())
+        .filter(|alias| !alias.is_empty())
+        .collect::<Vec<_>>();
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn canonical_workspace_root(root: &str) -> Result<PathBuf, std::io::Error> {
+    let path = if let Some(rest) = root.strip_prefix("~/") {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("~"))
+            .join(rest)
+    } else {
+        PathBuf::from(root)
+    };
+    path.canonicalize()
+}
+
+fn validate_workspace_root(root: &Path, cadis_home: &Path) -> Result<(), ErrorPayload> {
+    if root.parent().is_none() {
+        return Err(tool_error(
+            "workspace_root_too_broad",
+            "workspace root cannot be the filesystem root",
+            false,
+        ));
+    }
+
+    if ["/etc", "/dev", "/proc", "/sys", "/run"]
+        .iter()
+        .any(|path| root == Path::new(path))
+    {
+        return Err(tool_error(
+            "workspace_root_denied",
+            format!(
+                "workspace root {} is a protected system path",
+                root.display()
+            ),
+            false,
+        ));
+    }
+
+    if let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|path| path.canonicalize().ok())
+    {
+        if root == home || home.starts_with(root) {
+            return Err(tool_error(
+                "workspace_root_too_broad",
+                "workspace root cannot be the home directory or an ancestor of it",
+                false,
+            ));
+        }
+
+        for denied in [".ssh", ".aws", ".gnupg", ".config/gh", ".cadis"] {
+            let denied = home.join(denied);
+            if root.starts_with(&denied) {
+                return Err(tool_error(
+                    "workspace_root_denied",
+                    format!(
+                        "workspace root {} is a protected secret path",
+                        root.display()
+                    ),
+                    false,
+                ));
+            }
+        }
+    }
+
+    if let Ok(cadis_home) = cadis_home.canonicalize() {
+        if root == cadis_home || root.starts_with(&cadis_home) || cadis_home.starts_with(root) {
+            return Err(tool_error(
+                "workspace_root_denied",
+                "workspace root cannot be CADIS_HOME or an ancestor/child of it",
+                false,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn root_check(name: &str, root: &Path) -> WorkspaceDoctorCheck {
+    if root.is_dir() {
+        WorkspaceDoctorCheck {
+            name: name.to_owned(),
+            status: "ok".to_owned(),
+            message: format!("{} exists", root.display()),
+        }
+    } else {
+        WorkspaceDoctorCheck {
+            name: name.to_owned(),
+            status: "error".to_owned(),
+            message: format!("{} is not a directory", root.display()),
+        }
+    }
 }
 
 fn tool_command_summary(tool_name: &str, input: &serde_json::Value) -> Option<String> {
@@ -2075,6 +2930,51 @@ fn summarize_task(content: &str) -> String {
     }
 }
 
+fn planned_worker_worktree(
+    worker_id: &str,
+    workspace: Option<&str>,
+    task: &str,
+) -> WorkerWorktreeIntent {
+    let worktree_root = workspace
+        .map(|workspace| {
+            Path::new(workspace)
+                .join(".cadis")
+                .join("worktrees")
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|| ".cadis/worktrees".to_owned());
+    let worktree_path = Path::new(&worktree_root)
+        .join(worker_id)
+        .display()
+        .to_string();
+
+    WorkerWorktreeIntent {
+        workspace_id: None,
+        project_root: workspace.map(ToOwned::to_owned),
+        worktree_root,
+        worktree_path,
+        branch_name: format!("cadis/{worker_id}/{}", branch_slug(task)),
+        base_ref: Some("HEAD".to_owned()),
+        state: WorkerWorktreeState::Planned,
+        cleanup_policy: WorkerWorktreeCleanupPolicy::Explicit,
+    }
+}
+
+fn worker_artifact_locations(root: &Path, worker_id: &str) -> WorkerArtifactLocations {
+    let root = root.join(worker_id);
+    let root_display = root.display().to_string();
+
+    WorkerArtifactLocations {
+        root: root_display,
+        patch: root.join("patch.diff").display().to_string(),
+        test_report: root.join("test-report.json").display().to_string(),
+        summary: root.join("summary.md").display().to_string(),
+        changed_files: root.join("changed-files.json").display().to_string(),
+        memory_candidates: root.join("memory-candidates.jsonl").display().to_string(),
+    }
+}
+
 fn normalize_lookup(value: &str) -> String {
     value
         .chars()
@@ -2102,6 +3002,15 @@ fn slugify(value: &str) -> String {
         "agent".to_owned()
     } else {
         slug
+    }
+}
+
+fn branch_slug(value: &str) -> String {
+    let slug = slugify(value).replace('_', "-");
+    if slug.is_empty() {
+        "task".to_owned()
+    } else {
+        slug.chars().take(32).collect()
     }
 }
 
@@ -2133,6 +3042,8 @@ mod tests {
         AgentModelSetRequest, AgentRenameRequest, AgentSpawnRequest, ApprovalResponseRequest,
         ClientId, ContentKind, EmptyPayload, EventSubscriptionRequest, EventsSnapshotRequest,
         MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest, ToolCallRequest,
+        WorkspaceAccess, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
+        WorkspaceRegisterRequest,
     };
 
     fn runtime() -> Runtime {
@@ -2147,9 +3058,30 @@ mod tests {
         spawn_limits: AgentSpawnLimits,
         orchestrator_config: OrchestratorConfig,
     ) -> Runtime {
+        runtime_with_home_and_options(
+            test_workspace("cadis-home"),
+            spawn_limits,
+            orchestrator_config,
+        )
+    }
+
+    fn runtime_with_home(cadis_home: PathBuf) -> Runtime {
+        runtime_with_home_and_options(
+            cadis_home,
+            AgentSpawnLimits::default(),
+            OrchestratorConfig::default(),
+        )
+    }
+
+    fn runtime_with_home_and_options(
+        cadis_home: PathBuf,
+        spawn_limits: AgentSpawnLimits,
+        orchestrator_config: OrchestratorConfig,
+    ) -> Runtime {
         Runtime::new(
             RuntimeOptions {
-                cadis_home: PathBuf::from("/tmp/cadis-test"),
+                cadis_home,
+                profile_id: "default".to_owned(),
                 socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
                 model_provider: "echo".to_owned(),
                 ui_preferences: serde_json::json!({
@@ -2180,7 +3112,8 @@ mod tests {
     fn runtime_with_provider(provider: Box<dyn ModelProvider>, model_provider: &str) -> Runtime {
         Runtime::new(
             RuntimeOptions {
-                cadis_home: PathBuf::from("/tmp/cadis-test"),
+                cadis_home: test_workspace("cadis-home"),
+                profile_id: "default".to_owned(),
                 socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
                 model_provider: model_provider.to_owned(),
                 ui_preferences: serde_json::json!({
@@ -2209,6 +3142,54 @@ mod tests {
         path
     }
 
+    fn register_workspace(runtime: &mut Runtime, workspace_id: &str, root: &Path) {
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from(format!("req_register_{workspace_id}")),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceRegister(WorkspaceRegisterRequest {
+                workspace_id: WorkspaceId::from(workspace_id),
+                kind: WorkspaceKind::Project,
+                root: root.display().to_string(),
+                aliases: Vec::new(),
+                vcs: Some("git".to_owned()),
+                trusted: true,
+                worktree_root: Some(".cadis/worktrees".to_owned()),
+                artifact_root: Some(".cadis/artifacts".to_owned()),
+            }),
+        ));
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+    }
+
+    fn grant_workspace(runtime: &mut Runtime, workspace_id: &str, access: Vec<WorkspaceAccess>) {
+        grant_workspace_for_agent(runtime, workspace_id, access, None)
+    }
+
+    fn grant_workspace_for_agent(
+        runtime: &mut Runtime,
+        workspace_id: &str,
+        access: Vec<WorkspaceAccess>,
+        agent_id: Option<AgentId>,
+    ) {
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from(format!("req_grant_{workspace_id}")),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceGrant(WorkspaceGrantRequest {
+                agent_id,
+                workspace_id: WorkspaceId::from(workspace_id),
+                access,
+                expires_at: None,
+                source: Some("test".to_owned()),
+            }),
+        ));
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+    }
+
     #[test]
     fn status_returns_typed_response() {
         let mut runtime = runtime();
@@ -2234,15 +3215,18 @@ mod tests {
         fs::write(workspace.join("README.md"), "hello from tool\n")
             .expect("test file should write");
         let mut runtime = runtime();
+        register_workspace(&mut runtime, "file-read", &workspace);
+        grant_workspace(&mut runtime, "file-read", vec![WorkspaceAccess::Read]);
 
         let outcome = runtime.handle_request(RequestEnvelope::new(
             RequestId::from("req_tool"),
             ClientId::from("cli_1"),
             ClientRequest::ToolCall(ToolCallRequest {
                 session_id: None,
+                agent_id: None,
                 tool_name: "file.read".to_owned(),
                 input: serde_json::json!({
-                    "workspace": workspace,
+                    "workspace_id": "file-read",
                     "path": "README.md"
                 }),
             }),
@@ -2276,15 +3260,22 @@ mod tests {
         let outside = test_workspace("outside-file");
         fs::write(outside.join("secret.txt"), "secret").expect("outside file should write");
         let mut runtime = runtime();
+        register_workspace(&mut runtime, "outside-workspace", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "outside-workspace",
+            vec![WorkspaceAccess::Read],
+        );
 
         let outcome = runtime.handle_request(RequestEnvelope::new(
             RequestId::from("req_tool"),
             ClientId::from("cli_1"),
             ClientRequest::ToolCall(ToolCallRequest {
                 session_id: None,
+                agent_id: None,
                 tool_name: "file.read".to_owned(),
                 input: serde_json::json!({
-                    "workspace": workspace,
+                    "workspace_id": "outside-workspace",
                     "path": outside.join("secret.txt")
                 }),
             }),
@@ -2300,18 +3291,231 @@ mod tests {
     }
 
     #[test]
-    fn risky_shell_tool_requests_approval_and_denial_fails_tool() {
-        let workspace = test_workspace("shell-approval");
+    fn file_read_requires_registered_workspace_grant() {
+        let workspace = test_workspace("grant-required");
+        fs::write(workspace.join("README.md"), "hello").expect("test file should write");
         let mut runtime = runtime();
+        register_workspace(&mut runtime, "grant-required", &workspace);
 
         let outcome = runtime.handle_request(RequestEnvelope::new(
             RequestId::from("req_tool"),
             ClientId::from("cli_1"),
             ClientRequest::ToolCall(ToolCallRequest {
                 session_id: None,
+                agent_id: None,
+                tool_name: "file.read".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "grant-required",
+                    "path": "README.md"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.error.code == "workspace_grant_required"
+            )
+        }));
+    }
+
+    #[test]
+    fn workspace_register_rejects_broad_roots() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_broad_workspace"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceRegister(WorkspaceRegisterRequest {
+                workspace_id: WorkspaceId::from("root"),
+                kind: WorkspaceKind::Project,
+                root: "/".to_owned(),
+                aliases: Vec::new(),
+                vcs: None,
+                trusted: false,
+                worktree_root: None,
+                artifact_root: None,
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestRejected(error)
+                if error.code == "workspace_root_too_broad"
+        ));
+    }
+
+    #[test]
+    fn workspace_registry_and_grants_survive_runtime_restart() {
+        let cadis_home = test_workspace("persistent-cadis-home");
+        let workspace = test_workspace("persistent-workspace");
+        fs::write(workspace.join("README.md"), "persisted").expect("test file should write");
+
+        {
+            let mut runtime = runtime_with_home(cadis_home.clone());
+            register_workspace(&mut runtime, "persistent-workspace", &workspace);
+            grant_workspace(
+                &mut runtime,
+                "persistent-workspace",
+                vec![WorkspaceAccess::Read],
+            );
+        }
+
+        let mut runtime = runtime_with_home(cadis_home);
+        assert!(runtime
+            .workspaces
+            .contains_key(&WorkspaceId::from("persistent-workspace")));
+        assert_eq!(runtime.workspace_grants.len(), 1);
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_persisted_tool"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.read".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "persistent-workspace",
+                    "path": "README.md"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolCompleted(payload)
+                    if payload.summary.as_deref() == Some("persisted")
+            )
+        }));
+    }
+
+    #[test]
+    fn agent_scoped_workspace_grant_requires_matching_tool_agent() {
+        let workspace = test_workspace("agent-grant");
+        fs::write(workspace.join("README.md"), "agent scoped").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "agent-grant", &workspace);
+        grant_workspace_for_agent(
+            &mut runtime,
+            "agent-grant",
+            vec![WorkspaceAccess::Read],
+            Some(AgentId::from("codex")),
+        );
+
+        let without_agent = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_without_agent"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.read".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "agent-grant",
+                    "path": "README.md"
+                }),
+            }),
+        ));
+        assert!(without_agent.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.error.code == "workspace_grant_required"
+            )
+        }));
+
+        let matching_agent = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_matching_agent"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: Some(AgentId::from("codex")),
+                tool_name: "file.read".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "agent-grant",
+                    "path": "README.md"
+                }),
+            }),
+        ));
+        assert!(matching_agent.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolCompleted(payload)
+                    if payload.summary.as_deref() == Some("agent scoped")
+            )
+        }));
+    }
+
+    #[test]
+    fn tool_workspace_id_persists_on_session() {
+        let workspace = test_workspace("session-workspace");
+        fs::write(workspace.join("README.md"), "session workspace")
+            .expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "session-workspace", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "session-workspace",
+            vec![WorkspaceAccess::Read],
+        );
+        let session_id = SessionId::from("ses_tool");
+
+        let first = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_first_session_tool"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: Some(session_id.clone()),
+                agent_id: None,
+                tool_name: "file.read".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "session-workspace",
+                    "path": "README.md"
+                }),
+            }),
+        ));
+        assert!(first
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolCompleted(_))));
+
+        let second = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_second_session_tool"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: Some(session_id),
+                agent_id: None,
+                tool_name: "file.read".to_owned(),
+                input: serde_json::json!({
+                    "path": "README.md"
+                }),
+            }),
+        ));
+
+        assert!(second.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolCompleted(payload)
+                    if payload.summary.as_deref() == Some("session workspace")
+            )
+        }));
+    }
+
+    #[test]
+    fn risky_shell_tool_requests_approval_and_denial_fails_tool() {
+        let workspace = test_workspace("shell-approval");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "shell-approval", &workspace);
+        grant_workspace(&mut runtime, "shell-approval", vec![WorkspaceAccess::Exec]);
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_tool"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
                 tool_name: "shell.run".to_owned(),
                 input: serde_json::json!({
-                    "workspace": workspace,
+                    "workspace_id": "shell-approval",
                     "command": "rm -rf target"
                 }),
             }),
@@ -2849,6 +4053,36 @@ mod tests {
                         && payload.status.as_deref() == Some("completed")
             )
         }));
+
+        let started = outcome.events.iter().find_map(|event| match &event.event {
+            CadisEvent::WorkerStarted(payload) => Some(payload),
+            _ => None,
+        });
+        let started = started.expect("worker.started should be emitted");
+        let worktree = started
+            .worktree
+            .as_ref()
+            .expect("worker event should include worktree intent");
+        assert_eq!(worktree.state, WorkerWorktreeState::Planned);
+        assert_eq!(worktree.worktree_root, ".cadis/worktrees");
+        assert_eq!(worktree.worktree_path, ".cadis/worktrees/worker_000001");
+        assert_eq!(
+            worktree.branch_name,
+            "cadis/worker_000001/run-focused-tests"
+        );
+        let expected_patch = runtime
+            .options
+            .cadis_home
+            .join("artifacts/workers/worker_000001/patch.diff")
+            .display()
+            .to_string();
+        assert_eq!(
+            started
+                .artifacts
+                .as_ref()
+                .map(|artifacts| artifacts.patch.as_str()),
+            Some(expected_patch.as_str())
+        );
     }
 
     #[test]

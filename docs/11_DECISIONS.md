@@ -243,6 +243,42 @@ Consequence:
 - Avatar state and preferences remain daemon-owned protocol state; renderer
   animation state remains disposable HUD state.
 
+### ADR-015: Separate profile homes, agent homes, project workspaces, and worker worktrees
+
+Status: Accepted.
+
+Decision: CADIS will use separate filesystem concepts for durable profile
+state, persistent agent identity, project execution roots, and isolated coding
+worker checkouts. The canonical design is `docs/27_WORKSPACE_ARCHITECTURE.md`.
+
+Reason:
+
+- Agent persona, memory, policy, sessions, and secrets must not be confused with
+  the project cwd.
+- Profiles isolate CADIS state, but they are not filesystem sandboxes.
+- Tools need explicit workspace grants so file, shell, git, and worker actions
+  have enforceable roots and denied paths.
+- Parallel coding workers need git worktrees to avoid colliding in the user's
+  main checkout.
+- Project-local `.cadis/` metadata is useful for worktrees, artifacts, skills,
+  and media assets, but it must not grant access or store secrets by itself.
+
+Consequence:
+
+- Future workspace code must qualify vague `workspace` references as profile
+  home, agent home, project workspace, worker worktree, sandbox root, or
+  workspace grant.
+- `~/.cadis/profiles/<profile>/` becomes the target profile home layout.
+- `~/.cadis/profiles/<profile>/agents/<agent>/` becomes the target agent home
+  layout.
+- Coding worker worktrees default to `<project>/.cadis/worktrees/<worker-id>/`.
+- Generated or curated project media defaults to `<project>/.cadis/media/` with
+  manifests and without secrets or raw transcripts.
+- Current code implements the first baseline for default profile initialization,
+  persistent workspace registry/grants, broad-root rejection, and safe-read grant
+  enforcement. Agent homes, worker worktree creation, checkpoint rollback, and
+  mutating-tool enforcement remain future work.
+
 ## Pending Decisions
 
 ### ADR-P001: First model provider

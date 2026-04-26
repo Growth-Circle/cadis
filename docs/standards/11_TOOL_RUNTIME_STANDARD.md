@@ -40,6 +40,9 @@ Current implementation baseline:
 - Unknown tool names are denied before execution.
 - Approval-gated placeholders fail closed after approval resolution until their
   execution backends are implemented.
+- Worker orchestration may emit planned worktree and artifact metadata without
+  invoking `git.worktree.create`; that event metadata is intent, not filesystem
+  mutation.
 
 ## 3. Naming
 
@@ -92,6 +95,9 @@ Rules:
 - Resolve and normalize paths before access.
 - Reject path traversal outside allowed roots unless policy explicitly allows it.
 - Symlinks must not bypass workspace boundaries.
+- Resolve registered workspace IDs and active workspace grants before execution.
+- Agent-scoped grants require matching `tool.call.agent_id`; global grants omit
+  `agent_id`.
 - Outside-workspace writes require approval.
 - Reads that may expose secrets require policy review even if inside workspace.
 - Temporary test directories must be isolated from user state.
@@ -170,6 +176,11 @@ Rules:
   normalization.
 - Worktree creation must validate repository state.
 - Worktree cleanup must avoid deleting paths not created by CADIS.
+- `git.worktree.create` must consume daemon worktree intent, not ad hoc client
+  paths, and must emit a later event that moves the worktree state from
+  `planned` to `active` only after successful creation.
+- `git.worktree.remove` must require a CADIS-owned worker/worktree record and
+  preserve artifacts unless an explicit cleanup policy says otherwise.
 - Push, force-push, rebase, reset, and branch deletion are not initial native tool actions unless policy and approval coverage exist.
 
 ## 11. Cancellation and Timeouts

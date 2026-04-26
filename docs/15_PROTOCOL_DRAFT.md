@@ -90,6 +90,11 @@ agent.rename
 agent.model.set
 agent.spawn
 agent.kill
+workspace.list
+workspace.register
+workspace.grant
+workspace.revoke
+workspace.doctor
 worker.tail
 models.list
 ui.preferences.get
@@ -127,11 +132,15 @@ snapshot is represented as normal event frames, currently including
 `agent.list.response`, `ui.preferences.updated`, and `session.updated` for known
 sessions.
 
-`tool.call` requests daemon-owned native tool execution. The initial baseline
-supports safe read-only execution for `file.read`, `file.search`, and
-`git.status`; risky placeholders such as `shell.run`, `file.write`, and
-`file.patch` create an approval request and do not execute until a later runtime
-implements the gated action.
+`tool.call` requests daemon-owned native tool execution. Tool calls must resolve
+a registered workspace and an active workspace grant before execution or
+approval flow proceeds. `agent_id` is optional; when present, it lets daemon tool
+execution satisfy agent-scoped workspace grants. The initial baseline supports
+safe read-only execution
+for `file.read`, `file.search`, and `git.status`; risky placeholders such as
+`shell.run`, `file.write`, and `file.patch` create an approval request after the
+workspace grant check and do not execute until a later runtime implements the
+gated action.
 
 Example:
 
@@ -143,14 +152,65 @@ Example:
   "type": "tool.call",
   "payload": {
     "session_id": "ses_...",
+    "agent_id": "codex",
     "tool_name": "file.read",
     "input": {
-      "workspace": "/home/user/project",
+      "workspace_id": "example-project",
       "path": "README.md"
     }
   }
 }
 ```
+
+`workspace.register` adds or replaces a profile-local project workspace registry
+entry. CADIS persists the registry under
+`~/.cadis/profiles/<profile>/workspaces/registry.toml` and rejects overly broad
+or protected roots such as `/`, the user home directory, `CADIS_HOME`, and known
+secret/system directories.
+
+```json
+{
+  "protocol_version": "0.1",
+  "request_id": "req_...",
+  "client_id": "cli_...",
+  "type": "workspace.register",
+  "payload": {
+    "workspace_id": "example-project",
+    "kind": "project",
+    "root": "/home/user/project",
+    "aliases": ["example"],
+    "vcs": "git",
+    "trusted": true,
+    "worktree_root": ".cadis/worktrees",
+    "artifact_root": ".cadis/artifacts"
+  }
+}
+```
+
+`workspace.grant` creates an active grant for a registered workspace and persists
+it under `~/.cadis/profiles/<profile>/workspaces/grants.jsonl`. Empty `access`
+defaults to `read`. Grants without `agent_id` apply to the default local runtime
+context; grants with `agent_id` require matching `tool.call.agent_id`.
+
+```json
+{
+  "protocol_version": "0.1",
+  "request_id": "req_...",
+  "client_id": "cli_...",
+  "type": "workspace.grant",
+  "payload": {
+    "workspace_id": "example-project",
+    "agent_id": "codex",
+    "access": ["read", "exec"],
+    "source": "user"
+  }
+}
+```
+
+`workspace.list` returns known workspaces and, when `include_grants` is true,
+active grants. `workspace.revoke` removes a specific grant by `grant_id` or
+matching grants by `workspace_id` and optional `agent_id`. `workspace.doctor`
+checks registry presence, root existence, and active grants for a workspace.
 
 ## 3.1 Response Types
 
@@ -195,6 +255,11 @@ agent.renamed
 agent.model.changed
 agent.status.changed
 agent.completed
+workspace.list.response
+workspace.registered
+workspace.grant.created
+workspace.grant.revoked
+workspace.doctor.response
 models.list.response
 ui.preferences.updated
 orchestrator.route
@@ -217,6 +282,54 @@ voice.completed
 ```
 
 `models.list.response` payloads include conservative provider readiness metadata:
+
+`workspace.list.response` payload:
+
+```json
+{
+  "workspaces": [
+    {
+      "workspace_id": "example-project",
+      "kind": "project",
+      "root": "/home/user/project",
+      "aliases": ["example"],
+      "vcs": "git",
+      "trusted": true,
+      "worktree_root": ".cadis/worktrees",
+      "artifact_root": ".cadis/artifacts"
+    }
+  ],
+  "grants": [
+    {
+      "grant_id": "grant_000001",
+      "agent_id": "codex",
+      "workspace_id": "example-project",
+      "root": "/home/user/project",
+      "access": ["read", "exec"],
+      "source": "user"
+    }
+  ]
+}
+```
+
+`workspace.doctor.response` payload:
+
+```json
+{
+  "checks": [
+    {
+      "name": "registry",
+      "status": "ok",
+      "message": "1 workspace(s) registered"
+    },
+    {
+      "name": "workspace.grants",
+      "status": "ok",
+      "message": "1 active grant(s)"
+    }
+  ]
+}
+```
 
 ```json
 {

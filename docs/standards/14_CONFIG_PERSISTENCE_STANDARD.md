@@ -19,12 +19,12 @@ Default layout:
 ```text
 ~/.cadis/
 |-- config.toml
-|-- sessions/
-|-- workers/
+|-- profiles/
+|-- global-cache/
+|-- plugins/
 |-- logs/
-|-- worktrees/
-|-- approvals.json
-`-- tokens/
+|-- run/
+`-- VERSION
 ```
 
 Rules:
@@ -32,7 +32,61 @@ Rules:
 - `CADIS_HOME` may override the default home.
 - Paths in config may use `~`, but internal code should normalize before use.
 - Runtime-created files should use restrictive permissions where possible.
-- Worktrees live under CADIS home unless explicitly configured otherwise.
+- Current code has a partial `~/.cadis` baseline, store-level `~/.cadis/state`
+  helpers, default profile-home initialization, and persistent workspace
+  registry/grant files. Full profile management remains future work.
+- Coding worktrees live under the project `.cadis/worktrees/` directory by
+  default, not under profile state. Worker records and artifacts live under the
+  profile home.
+
+## 2.1 Profile, Agent, Workspace, and Worker State
+
+Target profile home:
+
+```text
+~/.cadis/profiles/<profile>/
+|-- profile.toml
+|-- .env
+|-- secrets/
+|-- channels/
+|-- agents/
+|-- memory/
+|-- skills/
+|-- workspaces/
+|-- workers/
+|-- sessions/
+|-- artifacts/
+|-- checkpoints/
+|-- eventlog/
+|-- logs/
+`-- locks/
+```
+
+Rules:
+
+- `.env`, `secrets/`, channel tokens, and auth material must not be committed,
+  logged, or copied into project `.cadis/`.
+- Agent homes under `agents/<agent>/` store persona, instructions, memory,
+  skills, and policy, but not canonical session transcripts.
+- Workspace registries under `workspaces/` record project roots, aliases, and
+  grants. The project root itself remains outside profile state.
+- Worker state records live under `workers/`; coding source files live in
+  project worktrees.
+- Generated worker artifacts live under `artifacts/workers/<worker-id>/`.
+
+Project-local CADIS metadata:
+
+```text
+<project>/.cadis/
+|-- workspace.toml
+|-- skills/
+|-- artifacts/
+|-- worktrees/
+`-- media/
+```
+
+Project `.cadis/` metadata is untrusted until validated by the daemon and does
+not grant access by itself.
 
 ## 3. Config Format
 
@@ -54,6 +108,8 @@ Required config areas:
 - voice
 - agent display names
 - agent model selections
+- profile and workspace defaults once profile/workspace management is
+  implemented
 
 ## 4. Secret Configuration
 
@@ -111,6 +167,64 @@ Rules:
 - Approval logs include approval IDs and final resolution.
 - Logs must be redacted before write.
 - Debug mode may increase detail but must still redact secrets.
+- Profile-scoped workspace metadata lives under
+  `~/.cadis/profiles/<profile>/workspaces/` now. Event logs and richer
+  session/worker recovery will move deeper into the profile home as those
+  managers mature.
+
+## 7.1 Workspace Grants and Denied Paths
+
+File, shell, git, and worker tools must resolve a workspace grant before
+execution. Grants bind profile, agent, workspace, canonical root, access level,
+expiry, and source.
+
+Minimum denied paths:
+
+```text
+~/.ssh
+~/.aws
+~/.gnupg
+~/.config/gcloud
+~/.cadis/profiles/*/.env
+~/.cadis/profiles/*/secrets
+~/.cadis/profiles/*/channels/*/tokens
+/etc
+/dev
+/proc
+/sys
+```
+
+Rules:
+
+- Missing, expired, corrupt, or mismatched grants fail closed or request
+  approval.
+- Path checks must canonicalize, reject symlink escape, verify grant root, check
+  denied paths, and then execute.
+- Grants for `/`, `$HOME`, system roots, or credential directories are invalid
+  unless a future admin mode defines a reviewed exception.
+- Agent-scoped grants require matching `tool.call.agent_id`; grants without
+  `agent_id` apply only to the default local runtime context.
+
+## 7.2 Media Assets
+
+Project-scoped CADIS media lives under `<project>/.cadis/media/`:
+
+```text
+input/
+generated/
+thumbnails/
+manifests/
+exports/
+```
+
+Rules:
+
+- Manifests record task/session IDs, producing agent or worker, provider/model
+  when known, license/source notes, and intended target use.
+- Secrets, provider tokens, raw channel tokens, and raw session transcripts must
+  not be stored in project media directories.
+- Large generated media should be ignored by default unless the project opts
+  into tracking it.
 
 ## 8. Atomic Writes
 
@@ -165,3 +279,6 @@ Config and persistence changes require tests for:
 - JSONL append behavior
 - approval persistence
 - UI preference persistence when applicable
+- workspace grant path enforcement
+- denied-path checks
+- profile/agent/workspace doctor checks as managers mature

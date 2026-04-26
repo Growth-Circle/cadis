@@ -14,6 +14,28 @@ first run:
 ```text
 ~/.cadis/
 |-- config.toml
+|-- profiles/
+|   `-- default/
+|       |-- profile.toml
+|       |-- .gitignore
+|       |-- agents/
+|       |-- memory/
+|       |-- skills/
+|       |-- workspaces/
+|       |   |-- registry.toml
+|       |   |-- aliases.toml
+|       |   `-- grants.jsonl
+|       |-- workers/
+|       |-- sessions/
+|       |-- artifacts/
+|       |-- checkpoints/
+|       |-- sandboxes/
+|       |-- eventlog/
+|       |-- channels/
+|       |-- secrets/
+|       |-- logs/
+|       |-- locks/
+|       `-- run/
 |-- logs/
 |   |-- <session-id>.jsonl
 |   `-- daemon.jsonl
@@ -39,6 +61,13 @@ baseline for runtime recovery. The top-level `sessions/`, `workers/`, and
 `approvals/` directories are reserved compatibility directories; new JSON
 metadata belongs under `state/`.
 
+Profile-aware helpers now also initialize `~/.cadis/profiles/default/`. The
+profile tree is the CADIS-standard home for profile-local agents, memory,
+workspace registry metadata, worker records, session records, artifacts,
+checkpoints, event logs, channels, and secrets. The store crate keeps creating
+the existing top-level paths so current daemon/core/CLI code continues to work
+while profile-aware runtime pieces are added.
+
 ## 2. Desktop MVP Config
 
 The current implementation supports these keys:
@@ -50,6 +79,10 @@ log_level = "info"
 # Optional. If unset, CADIS uses $XDG_RUNTIME_DIR/cadis/cadisd.sock when
 # available, otherwise ~/.cadis/run/cadisd.sock.
 # socket_path = "~/.cadis/run/cadisd.sock"
+
+[profile]
+# Default profile initialized under ~/.cadis/profiles/<profile>/.
+default_profile = "default"
 
 [model]
 # auto tries Ollama first and falls back to the local credential-free provider.
@@ -92,7 +125,96 @@ default_worker_role = "Worker"
 
 An example file is available at `config/cadis.example.toml`.
 
-## 3. Native Avatar Config Contract
+## 3. Profile Home Layout
+
+The store crate provides `CadisHome` and `ProfileHome` helpers for daemon-first
+profile state:
+
+```text
+~/.cadis/profiles/<profile>/
+|-- profile.toml
+|-- .gitignore
+|-- agents/
+|-- memory/
+|-- skills/
+|-- workspaces/
+|   |-- registry.toml
+|   |-- aliases.toml
+|   `-- grants.jsonl
+|-- workers/
+|-- sessions/
+|-- artifacts/
+|-- checkpoints/
+|-- sandboxes/
+|-- eventlog/
+|-- channels/
+|-- secrets/
+|-- logs/
+|-- locks/
+`-- run/
+```
+
+`profile.toml` is initialized from a safe template. `.gitignore` excludes
+secrets, channel state, sessions, workers, checkpoints, sandboxes, logs, locks,
+runtime files, private keys, tokens, and SQLite sidecar files. Template
+initialization is non-destructive: existing profile files are not overwritten.
+
+The profile home is not an execution workspace and is not a sandbox. Project
+roots must be registered separately in the workspace registry before
+profile-aware tool/runtime code grants file, shell, git, or worker access.
+
+## 4. Workspace Registry
+
+Profile workspace metadata lives at:
+
+```text
+~/.cadis/profiles/<profile>/workspaces/registry.toml
+```
+
+The store crate loads and writes this TOML shape:
+
+```toml
+[[workspace]]
+id = "example-project"
+kind = "project"
+root = "~/Project/example-project"
+vcs = "git"
+owner = "rama"
+trusted = true
+worktree_root = ".cadis/worktrees"
+artifact_root = ".cadis/artifacts"
+checkpoint_policy = "enabled"
+
+[[workspace.alias]]
+workspace_id = "example-project"
+aliases = ["example", "demo"]
+```
+
+Supported `kind` values are `project`, `documents`, `sandbox`, and `worktree`.
+Supported `vcs` values are `git` and `none`. Supported `checkpoint_policy`
+values are `enabled` and `disabled`. Helper APIs expand `~` in workspace roots
+after loading and write registry updates atomically with redaction applied to
+serialized TOML.
+
+Workspace grants are persisted as redacted JSONL. Grant creation appends one
+record; revocation rewrites the active grant set so stale grants do not revive
+after daemon restart:
+
+```text
+~/.cadis/profiles/<profile>/workspaces/grants.jsonl
+```
+
+Each grant records `grant_id`, `profile_id`, optional `agent_id`,
+`workspace_id`, `root`, `access`, `created_at`, optional `expires_at`, `source`,
+and optional redacted `reason`. Supported access values are `read`, `write`,
+`exec`, and `admin`. Supported source values are `route`, `user`, `policy`, and
+`worker_spawn`.
+
+These store helpers only persist metadata. Enforcement remains daemon/runtime
+owned: file, shell, git, and worker tools must resolve an active grant before
+using a project root.
+
+## 5. Native Avatar Config Contract
 
 `crates/cadis-avatar` defines the Rust config contract for the future native
 Wulan renderer. These keys are documented now for privacy review and are not yet
@@ -128,7 +250,7 @@ Rules:
 - Identity recognition, matching, embeddings, or biometric templates require a
   separate security and privacy decision before any config key can enable them.
 
-## 4. Agent Spawn Limits
+## 6. Agent Spawn Limits
 
 `[agent_spawn]` configures the daemon baseline for request-driven
 `agent.spawn` and explicit orchestrator worker-spawn actions:
@@ -141,7 +263,7 @@ The desktop MVP defaults are conservative: depth 2, 4 children per parent, and
 32 total agents. Implicit model-driven recursive spawning remains reserved for a
 later runtime track.
 
-## 5. Orchestrator Routing
+## 7. Orchestrator Routing
 
 `[orchestrator]` configures daemon-owned message routing behavior. This is not a
 HUD setting.
@@ -153,7 +275,7 @@ Direct `@agent` mention targeting remains enabled independently of this flag.
 Explicit worker spawn actions still use the `[agent_spawn]` depth, child, and
 total-agent limits.
 
-## 6. Model Provider Behavior
+## 8. Model Provider Behavior
 
 - `auto`: tries Ollama at `ollama_endpoint`, then falls back to the local echo provider.
 - `codex-cli`: delegates to the installed official Codex CLI with `codex exec`.
@@ -190,7 +312,7 @@ provider probing.
 The OpenAI API key is not a config key. Do not put API keys, bearer tokens, or
 auth headers in `~/.cadis/config.toml`, examples, or logs.
 
-## 7. Environment Variables
+## 9. Environment Variables
 
 ```text
 CADIS_HOME
@@ -236,17 +358,19 @@ configured for API-key auth; CADIS does not read it directly. `TELEGRAM_BOT_TOKE
 is reserved for the planned Telegram adapter and must stay empty in examples
 until that adapter exists.
 
-## 8. Secret Rules
+## 10. Secret Rules
 
 - Do not store raw API keys in committed files.
 - Do not commit `~/.codex/auth.json`; treat it as a password-equivalent file.
 - Prefer `~/.cadis/config.toml` for local runtime config and keep provider keys in environment variables or a future OS keychain integration.
 - Do not write resolved secrets to logs.
 - Event logs pass through CADIS redaction before JSONL persistence.
+- Workspace registry writes and grant JSONL appends also pass through CADIS
+  redaction before persistence.
 - Redact values from keys containing `api_key`, `token`, `secret`, or `authorization`.
 - Do not commit `.env`, generated auth JSON, HAR traces, crash dumps, logs, local sockets, or Tauri bundle output.
 
-## 9. Durable State Files
+## 11. Durable State Files
 
 The store crate provides atomic JSON helpers for these exact durable files:
 

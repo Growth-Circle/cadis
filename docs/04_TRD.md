@@ -237,6 +237,12 @@ task -> create worker -> create git worktree -> edit -> test -> diff -> review -
 Requirements:
 
 - Worktree path must live under CADIS-controlled directory unless configured otherwise.
+- Worker lifecycle events must include non-destructive worktree intent metadata
+  before any `git.worktree.create` backend exists or runs.
+- Worktree intent must identify the planned worktree root, worker-specific path,
+  branch name, base ref when known, lifecycle state, and cleanup policy.
+- Worker lifecycle events must include artifact locations for patch, test report,
+  summary, changed-files manifest, and memory-candidate outputs.
 - Patch application requires approval when it changes tracked files.
 - Worktree cleanup must be explicit or policy-controlled.
 - Worker output must stream without blocking the main session.

@@ -99,11 +99,37 @@ task -> worker -> CADIS-controlled git worktree -> edit/test/diff -> review -> u
 
 Rules:
 
-- Worktrees live under CADIS-controlled storage unless explicitly configured.
+- Worktrees default to project-local CADIS metadata,
+  `<project>/.cadis/worktrees/<worker-id>`, unless policy explicitly configures
+  another CADIS-controlled root.
 - Worker output streams through daemon events.
 - Patch application to a target workspace is policy-gated.
 - Cleanup is explicit or governed by policy.
 - The main session event loop must remain responsive while workers run.
+
+## 6.1 Workspace Architecture
+
+CADIS uses distinct filesystem concepts:
+
+- Profile home: profile-scoped CADIS state such as config, channels, agents,
+  memory, sessions, workers, artifacts, logs, and locks.
+- Agent home: one persistent agent's identity, instructions, memory, skills,
+  and policy.
+- Project workspace: a registered user project root available to tools only
+  through a workspace grant.
+- Worker worktree: an isolated git checkout for one coding worker/task.
+
+Rules:
+
+- Agent home must not be treated as project cwd.
+- Profile home must not be treated as a sandbox.
+- Project `.cadis/` metadata must not contain secrets and must not grant access
+  without daemon-owned workspace grants.
+- File, shell, git, and worker tools must resolve grants before execution.
+- Coding workers default to `<project>/.cadis/worktrees/<worker-id>/`.
+- Project media assets generated or curated by CADIS default to
+  `<project>/.cadis/media/` with manifests and without secrets or raw
+  transcripts.
 
 ## 7. UI Architecture
 
@@ -139,12 +165,12 @@ Default CADIS home:
 ```text
 ~/.cadis/
 |-- config.toml
-|-- sessions/
-|-- workers/
+|-- profiles/
+|-- global-cache/
+|-- plugins/
 |-- logs/
-|-- worktrees/
-|-- approvals.json
-`-- tokens/
+|-- run/
+`-- VERSION
 ```
 
 Rules:
@@ -153,6 +179,9 @@ Rules:
 - Event logs are JSONL.
 - Session and worker logs are separate.
 - Secrets are redacted before persistence.
+- Target profile-scoped state lives under `~/.cadis/profiles/<profile>/`.
+- Current implementation may still use transitional `~/.cadis/state` helpers
+  until profile homes are implemented.
 - Crash recovery uses persisted metadata where possible.
 
 ## 10. Architecture Changes

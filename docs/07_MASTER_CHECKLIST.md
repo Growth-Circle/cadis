@@ -20,8 +20,8 @@
 - [x] Add project-local skills.
 - [x] Initialize git repository.
 - [x] Create initial commit.
-- [ ] Create remote repository.
-- [ ] Push initial baseline.
+- [x] Create remote repository.
+- [x] Push initial baseline.
 
 ## 2. Product Documentation
 
@@ -48,6 +48,7 @@
 - [x] UI design system.
 - [x] Contributor skills guide.
 - [x] Wulan avatar engine plan.
+- [x] Workspace architecture plan.
 - [x] Large open-source project standards index.
 - [x] Contribution standard.
 - [x] Code standard.
@@ -151,15 +152,15 @@
 - [ ] Define tool registry.
 - [ ] Define tool schema strategy.
 - [ ] Define tool lifecycle events.
-- [ ] Implement `file.read`.
-- [ ] Implement `file.search`.
+- [x] Implement `file.read`.
+- [x] Implement `file.search`.
 - [ ] Implement `file.patch`.
 - [ ] Implement `shell.run`.
-- [ ] Implement `git.status`.
+- [x] Implement `git.status`.
 - [ ] Implement `git.diff`.
 - [ ] Add timeouts.
 - [ ] Add cancellation.
-- [ ] Add tests for success and failure.
+- [x] Add tests for success and failure.
 
 ## 9. Policy and Approval
 
@@ -249,6 +250,7 @@
 - [ ] Add explicit TTS provider config (`edge`, `openai`, `system`).
 - [x] Separate HUD STT language from TTS voice.
 - [x] Add HUD-local voice doctor/preflight.
+- [x] Add WebAudio PCM fallback for WebKit MediaRecorder zero-chunk mic capture.
 - [ ] Promote voice doctor/preflight into daemon-visible status.
 - [ ] Handle daemon voice events in HUD.
 - [ ] Add provider stub.
@@ -310,6 +312,29 @@
 - [ ] Track F: durable metadata and restart recovery for sessions, agents, workers, and approvals.
 - [x] Track F store baseline: atomic JSON helpers and fail-safe metadata recovery.
 - [ ] Track G: CADIS-native Wulan avatar engine.
+- [ ] Track H: profile homes, agent homes, workspace registry, grants, and worker worktrees.
+- [x] Track H baseline: default profile layout plus persistent workspace registry/grants.
+
+## 15.2 Workspace Architecture
+
+- [x] Document profile home, agent home, project workspace, and worker worktree terms.
+- [x] Document implemented-now vs future workspace architecture status.
+- [x] Document workspace grants and fail-closed tool behavior.
+- [x] Document denied paths for path resolution.
+- [x] Document project `.cadis/media/` asset convention.
+- [x] Define workspace protocol/types.
+- [x] Implement `CADIS_HOME` and default `CADIS_PROFILE_HOME` resolver.
+- [ ] Implement profile home manager.
+- [ ] Implement agent home manager and templates.
+- [x] Implement workspace registry and aliases baseline.
+- [x] Implement workspace grants with expiry baseline.
+- [ ] Enforce denied paths across file, shell, git, and worker tools.
+- [x] Reject broad workspace roots and enforce safe-read workspace path guards.
+- [ ] Implement project `.cadis/workspace.toml` support.
+- [ ] Implement worker worktree creation under project `.cadis/worktrees/`.
+- [ ] Persist worker artifacts under profile `artifacts/workers/`.
+- [ ] Add project `.cadis/media/` manifests for generated media.
+- [ ] Add workspace/profile/agent doctor checks.
 
 ## 16. Code Work Window
 

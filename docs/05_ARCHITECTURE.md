@@ -148,6 +148,7 @@ user task
   -> task classified as code-heavy
   -> code work context created
   -> worker created
+  -> worker event emits planned worktree and artifact locations
   -> git worktree created
   -> coding agent edits in worktree
   -> tester runs tests
@@ -171,6 +172,9 @@ message.completed
 agent.spawned
 agent.status.changed
 agent.completed
+worker.started
+worker.log.delta
+worker.completed
 tool.requested
 tool.started
 tool.completed
@@ -186,6 +190,12 @@ error
 ```
 
 All events must be serializable and durable enough for logs.
+
+Worker lifecycle events carry intent before side effects. The baseline daemon may
+emit `worktree.state = planned` with branch and path metadata without creating a
+git worktree. A later worker runtime is responsible for turning that intent into
+`git.worktree.create` tool execution after workspace grants, policy, and
+approval checks have passed.
 
 ## 8. Content Routing
 
@@ -282,19 +292,32 @@ MCP can be added later as an extension bridge, not as the default mechanism for 
 ```text
 ~/.cadis/
 |-- config.toml
-|-- sessions/
-|   `-- <session-id>.json
+|-- profiles/
+|   `-- default/
+|       |-- profile.toml
+|       |-- agents/
+|       |-- workspaces/
+|       |   |-- registry.toml
+|       |   `-- grants.jsonl
+|       |-- sessions/
+|       |-- workers/
+|       |-- artifacts/
+|       |-- checkpoints/
+|       `-- logs/
 |-- logs/
-|   `-- <session-id>.jsonl
-|-- workers/
-|   `-- <worker-id>.json
-|-- worktrees/
-|   `-- <worker-id>/
-|-- approvals.json
-`-- tokens/
+|-- run/
+`-- state/
+    |-- approvals/
+    |-- sessions/
+    |-- agents/
+    `-- workers/
 ```
 
-The store must protect against partial writes and log secret leakage.
+The store must protect against partial writes and log secret leakage. Current
+runtime state still uses the legacy `state/*` helpers for early session, worker,
+and approval recovery, while workspace registry/grants live in the default
+profile. Project-local worktrees default to `<project>/.cadis/worktrees/` once
+worker checkout creation is implemented.
 
 Future memory architecture is tracked in `25_MEMORY_CONCEPT.md`. That concept
 extends persistence with daemon-owned memory capsules, scoped Markdown memory,

@@ -45,7 +45,7 @@ ChatGPT-plan auth is handled by the official Codex CLI, not by CADIS.
 ## 3. Clone
 
 ```bash
-git clone https://github.com/cadis-ai/cadis.git
+git clone https://github.com/Growth-Circle/cadis.git
 cd cadis
 ```
 
@@ -137,9 +137,9 @@ cannot invoke Tauri commands, so it is only useful for renderer work.
 ## 8. Voice Doctor
 
 The HUD Settings -> Voice tab has a local doctor for desktop voice dependencies.
-It reports renderer mic status, MediaRecorder availability, `whisper-cli`, the
-configured Whisper model, Node helper execution for Edge TTS, and audio player
-availability.
+It reports renderer mic status, MediaRecorder availability, WebAudio analyser
+and PCM fallback telemetry, `whisper-cli`, the configured Whisper model, Node
+helper execution for Edge TTS, and audio player availability.
 
 Useful local environment overrides:
 

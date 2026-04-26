@@ -76,6 +76,7 @@ fn build_runtime(config: &CadisConfig, socket_path: Option<PathBuf>) -> Arc<Mute
     Arc::new(Mutex::new(Runtime::new(
         RuntimeOptions {
             cadis_home: config.cadis_home.clone(),
+            profile_id: config.profile.default_profile.clone(),
             socket_path,
             model_provider: config.model.provider.clone(),
             ui_preferences: config.ui_preferences(),

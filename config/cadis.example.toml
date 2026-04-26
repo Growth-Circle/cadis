@@ -12,6 +12,12 @@ log_level = "info"
 # - ~/.cadis/run/cadisd.sock otherwise
 # socket_path = "~/.cadis/run/cadisd.sock"
 
+[profile]
+# cadisd initializes this profile under ~/.cadis/profiles/<profile>/ and keeps
+# profile-local sessions, agents, workers, workspaces, event logs, and secrets
+# separated from global daemon state.
+default_profile = "default"
+
 [model]
 # auto tries Ollama first and falls back to the local credential-free provider.
 # Use "openai" with OPENAI_API_KEY or CADIS_OPENAI_API_KEY for OpenAI.

@@ -549,6 +549,8 @@ function MicDebugPanel({
         <DebugCell label="silent" value={formatMs(debug.silentMs)} />
         <DebugCell label="chunks" value={`${debug.chunks}`} />
         <DebugCell label="bytes" value={formatBytes(debug.bytes)} />
+        <DebugCell label="capture" value={debug.captureSource || "-"} />
+        <DebugCell label="pcm" value={debug.pcmFrames ? `${debug.pcmFrames} frames / ${formatBytes(debug.pcmBytes)}` : "-"} />
         <DebugCell label="stop" value={debug.stopReason || "-"} />
         <DebugCell label="selected" value={selectedDevice} wide />
         <DebugCell label="devices" value={debug.deviceLabels || "-"} wide />
@@ -629,6 +631,9 @@ function emptyMicDebug(language = "auto"): SttDebugSnapshot {
     silentMs: 0,
     chunks: 0,
     bytes: 0,
+    pcmFrames: 0,
+    pcmBytes: 0,
+    captureSource: "",
     permissionState: "",
     deviceCount: 0,
     deviceLabels: "",

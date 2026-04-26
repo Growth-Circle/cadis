@@ -3,8 +3,8 @@ name = "cadis-hud"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/cadis-ai/cadis"
-homepage = "https://github.com/cadis-ai/cadis"
+repository = "https://github.com/Growth-Circle/cadis"
+homepage = "https://github.com/Growth-Circle/cadis"
 
 [workspace]
 

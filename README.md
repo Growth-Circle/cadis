@@ -60,17 +60,20 @@ CADIS is an early desktop MVP. The repository includes:
 - `cadis`: CLI client for status, models, agents, spawn, chat, and doctor checks
 - `apps/cadis-hud`: Tauri + React RamaClaw-style HUD
 - `crates/cadis-avatar`: renderer-neutral Wulan avatar state engine contract
-- typed protocol events for messages, models, agents, approvals, orchestrator
-  routing, and workers
+- typed protocol events for messages, models, agents, approvals, workspaces,
+  orchestrator routing, and workers
 - JSONL event persistence with redaction boundaries
+- profile-local workspace registry/grants for safe-read tools
 - optional Ollama, OpenAI API, and Codex CLI model adapters
 - official Codex CLI adapter for ChatGPT Plus/Pro login flows
 - HUD-local Edge TTS playback, `whisper-cli` voice input, and voice doctor
   preflight
 
-Planned work still includes production-grade tool execution, full policy
-coverage, event fan-out/live streaming, richer worker isolation,
-Telegram/mobile clients, daemon-owned production voice, and code work windows.
+Planned work still includes production-grade mutating tool execution, full
+policy coverage, richer worker isolation, Telegram/mobile clients,
+daemon-owned production voice, and code work windows. The target workspace
+architecture is partially implemented; persistent agent homes, real worker
+worktree creation, checkpoint rollback, and project media manifests remain next.
 
 ## Quick Start
 
@@ -136,7 +139,9 @@ CADIS does not store ChatGPT credentials; the official Codex CLI owns that auth.
 ## Voice
 
 The HUD can speak final CADIS replies through Edge TTS. For mic input, the HUD
-records locally and asks Tauri to transcribe via `whisper-cli`.
+records locally and asks Tauri to transcribe via `whisper-cli`. On WebKitGTK,
+CADIS also records WebAudio PCM in parallel, so voice can still transcribe when
+`MediaRecorder` sees the mic but produces zero chunks.
 
 ```bash
 export CADIS_WHISPER_CLI="$HOME/.local/bin/whisper-cli"
@@ -148,8 +153,8 @@ your desktop portal blocks the mic, allow microphone access for CADIS in system
 settings and click the mic again.
 
 The HUD Settings -> Voice tab includes a local voice doctor that checks renderer
-mic status, `whisper-cli`, the configured Whisper model, Node helper execution,
-and available audio players.
+mic status, WebAudio analyser/PCM fallback telemetry, `whisper-cli`, the
+configured Whisper model, Node helper execution, and available audio players.
 
 ## Repository Layout
 
@@ -159,6 +164,7 @@ cadis/
 |-- config/                # Example agents, tools, and policy config
 |-- crates/                # Rust daemon, CLI, protocol, model, store crates
 |-- docs/                  # Product, architecture, protocol, and standards docs
+|   `-- assets/            # Documentation images and README media
 |-- examples/              # Example configs and usage flows
 |-- skills/                # Project-local contributor skills
 |-- AGENT.md               # Canonical guide for coding agents
@@ -182,6 +188,7 @@ cadis/
 - [UI Design System](docs/23_UI_DESIGN_SYSTEM.md)
 - [Memory Concept](docs/25_MEMORY_CONCEPT.md)
 - [Wulan Avatar Engine](docs/26_WULAN_AVATAR_ENGINE.md)
+- [Workspace Architecture](docs/27_WORKSPACE_ARCHITECTURE.md)
 - [Open Source Standard](docs/09_OPEN_SOURCE_STANDARD.md)
 
 ## Security

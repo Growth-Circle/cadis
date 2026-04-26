@@ -91,6 +91,11 @@ Baseline orchestrator behavior:
 - Explicit `/route @agent ...` and `/delegate @agent ...` actions route to an existing agent and emit worker lifecycle events for the delegated unit.
 - Explicit `/worker ...` and `/spawn ...` actions create a child agent under `main`, then route the task to that child.
 - Explicit worker-spawn actions must pass the same maximum depth, maximum children, and maximum total-agent checks as `agent.spawn`.
+- Worker lifecycle events must include enough metadata for future worktree
+  execution: planned worktree root, worker path, branch name, base ref when
+  known, cleanup policy, and artifact locations.
+- A worker event with `worktree.state = planned` is intent only. It must not be
+  treated as proof that a git worktree or branch already exists.
 - Implicit model-driven recursive spawning is not enabled until a later runtime track defines policy, budget, and recovery behavior.
 
 ## 7. Model Selection
@@ -139,6 +144,7 @@ Persist:
 - agent creation and lifecycle events
 - approvals requested and resolved
 - tool lifecycle events
+- worker worktree intent and artifact-location metadata
 - final status
 
 Do not persist:

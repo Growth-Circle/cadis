@@ -46,6 +46,9 @@ export type SttDebugSnapshot = {
   silentMs: number;
   chunks: number;
   bytes: number;
+  pcmFrames: number;
+  pcmBytes: number;
+  captureSource: string;
   permissionState: string;
   deviceCount: number;
   deviceLabels: string;
@@ -84,6 +87,8 @@ type AudioInputDevice = {
   deviceId: string;
 };
 
+export type SttCaptureKind = "mediarecorder" | "webaudio-pcm";
+
 const SAMPLE_RATE = 16_000;
 const VOICE_RMS = 0.006;
 const VOICE_PEAK = 0.035;
@@ -110,11 +115,15 @@ export function startListening(lang: string, handlers: SttHandlers, options: Stt
   let mediaStream: MediaStream | null = null;
   let recorder: MediaRecorder | null = null;
   let analyserCtx: AudioContext | null = null;
+  let pcmProcessor: ReturnType<AudioContext["createScriptProcessor"]> | null = null;
   let heardVoice = false;
   let noSignalTimedOut = false;
   let stopReason = "";
   let chunkBytes = 0;
+  let pcmSampleRate = 0;
+  let pcmSampleCount = 0;
   const chunks: Blob[] = [];
+  const pcmBlocks: Float32Array[] = [];
   let debug: SttDebugSnapshot = {
     stage: "idle",
     message: "idle",
@@ -128,6 +137,9 @@ export function startListening(lang: string, handlers: SttHandlers, options: Stt
     silentMs: 0,
     chunks: 0,
     bytes: 0,
+    pcmFrames: 0,
+    pcmBytes: 0,
+    captureSource: "",
     permissionState: "",
     deviceCount: 0,
     deviceLabels: "",
@@ -156,11 +168,15 @@ export function startListening(lang: string, handlers: SttHandlers, options: Stt
   };
 
   const emitDebug = (patch: Partial<SttDebugSnapshot>) => {
+    const pcmBytes = pcmSampleCount * 2;
     debug = {
       ...debug,
       elapsedMs: Date.now() - sessionStartedAt,
       chunks: chunks.length,
-      bytes: chunkBytes,
+      bytes: chunkBytes || pcmBytes,
+      pcmFrames: pcmSampleCount,
+      pcmBytes,
+      captureSource: describeSttCaptureSource(chunks.length, pcmSampleCount),
       recorderState: recorder?.state ?? debug.recorderState,
       audioContextState: analyserCtx?.state ?? debug.audioContextState,
       ...patch,
@@ -169,6 +185,8 @@ export function startListening(lang: string, handlers: SttHandlers, options: Stt
   };
 
   const cleanup = () => {
+    pcmProcessor?.disconnect();
+    pcmProcessor = null;
     mediaStream?.getTracks().forEach((track) => track.stop());
     mediaStream = null;
     if (analyserCtx && analyserCtx.state !== "closed") {
@@ -184,7 +202,9 @@ export function startListening(lang: string, handlers: SttHandlers, options: Stt
     finalizing = true;
     cleanup();
 
-    if (chunks.length === 0) {
+    const captureKind = selectSttCaptureKind(chunks.length, pcmSampleCount);
+    const hasPcmAudio = pcmSampleCount > 0 && pcmSampleRate > 0;
+    if (!captureKind || (captureKind === "webaudio-pcm" && !hasPcmAudio)) {
       if (debugOnly) {
         const message = heardVoice
           ? "mic debug complete: input signal detected"
@@ -201,8 +221,8 @@ export function startListening(lang: string, handlers: SttHandlers, options: Stt
       }
       emitDebug({
         stage: "error",
-        message: "recording stopped without audio chunks",
-        error: "MediaRecorder produced no audio chunks",
+        message: "recording stopped without audio samples",
+        error: "CADIS did not receive encoded or PCM audio samples from the webview",
         stopReason,
       });
       handlers.onEnd?.();
@@ -234,11 +254,18 @@ export function startListening(lang: string, handlers: SttHandlers, options: Stt
       return;
     }
 
-    emitDebug({ stage: "transcribing", message: "sending audio to whisper.cpp", stopReason });
+    emitDebug({
+      stage: "transcribing",
+      message: captureKind === "webaudio-pcm"
+        ? "sending WebAudio PCM to whisper.cpp"
+        : "sending MediaRecorder audio to whisper.cpp",
+      stopReason,
+    });
     handlers.onLoading?.({ stage: "transcribing" });
     try {
-      const blob = new Blob(chunks, { type: chunks[0]?.type || "audio/webm" });
-      const samples = await blobToFloat32Mono16k(blob);
+      const samples = captureKind === "webaudio-pcm"
+        ? pcmBlocksToFloat32Mono16k(pcmBlocks, pcmSampleCount, pcmSampleRate)
+        : await recorderChunksToFloat32Mono16k(chunks);
       const wav = encodeWavPcm16(samples, SAMPLE_RATE);
       const audioBase64 = uint8ToBase64(wav);
       const language = whisperLanguageFromLocale(lang);
@@ -359,18 +386,38 @@ export function startListening(lang: string, handlers: SttHandlers, options: Stt
         message: "audio analyser connected",
       });
 
+      const createProcessor = analyserCtx.createScriptProcessor?.bind(analyserCtx);
+      if (createProcessor) {
+        pcmSampleRate = analyserCtx.sampleRate;
+        pcmProcessor = createProcessor(4096, 1, 1);
+        pcmProcessor.onaudioprocess = (event) => {
+          if (stopped || finalizing) return;
+          const input = event.inputBuffer.getChannelData(0);
+          const copy = new Float32Array(input.length);
+          copy.set(input);
+          pcmBlocks.push(copy);
+          pcmSampleCount += copy.length;
+        };
+        src.connect(pcmProcessor);
+        pcmProcessor.connect(zeroGain);
+        emitDebug({
+          message: "WebAudio PCM capture connected",
+          captureSource: describeSttCaptureSource(chunks.length, pcmSampleCount),
+        });
+      } else {
+        emitDebug({
+          message: "WebAudio PCM capture unavailable",
+          silenceReason: "ScriptProcessorNode unavailable in this webview",
+        });
+      }
+
       const ctor = (window as unknown as { MediaRecorder?: typeof MediaRecorder }).MediaRecorder;
       if (!ctor && !debugOnly) {
         emitDebug({
-          stage: "error",
-          message: "MediaRecorder unavailable in this webview",
-          error: "MediaRecorder unavailable in this webview",
-          silenceReason: "capture opened, but this WebKit build cannot encode audio for STT",
+          message: "MediaRecorder unavailable; using WebAudio PCM fallback",
+          recorderState: "pcm-fallback",
+          silenceReason: "MediaRecorder unavailable; PCM fallback active",
         });
-        handlers.onError?.("MediaRecorder unavailable in this webview");
-        cleanup();
-        handlers.onEnd?.();
-        return;
       }
 
       if (ctor && !debugOnly) {
@@ -395,7 +442,7 @@ export function startListening(lang: string, handlers: SttHandlers, options: Stt
       emitDebug({
         stage: "recording",
         message: debugOnly ? "mic debug recording" : "recording",
-        recorderState: recorder?.state ?? (debugOnly ? "debug-only" : ""),
+        recorderState: recorder?.state ?? (debugOnly ? "debug-only" : "pcm-fallback"),
         mimeType: recorder?.mimeType ?? "",
       });
 
@@ -621,6 +668,11 @@ function preferredMediaRecorderOptions(ctor: typeof MediaRecorder): { mimeType: 
   return mimeType ? { mimeType } : undefined;
 }
 
+async function recorderChunksToFloat32Mono16k(chunks: Blob[]): Promise<Float32Array> {
+  const blob = new Blob(chunks, { type: chunks[0]?.type || "audio/webm" });
+  return blobToFloat32Mono16k(blob);
+}
+
 async function blobToFloat32Mono16k(blob: Blob): Promise<Float32Array> {
   const arrayBuf = await blob.arrayBuffer();
   const ctx = new AudioContext();
@@ -637,22 +689,48 @@ async function blobToFloat32Mono16k(blob: Blob): Promise<Float32Array> {
       }
     }
 
-    const ratio = decoded.sampleRate / SAMPLE_RATE;
-    if (ratio === 1) return mono;
-
-    const outLen = Math.floor(len / ratio);
-    const out = new Float32Array(outLen);
-    for (let i = 0; i < outLen; i += 1) {
-      const src = i * ratio;
-      const lo = Math.floor(src);
-      const hi = Math.min(lo + 1, len - 1);
-      const frac = src - lo;
-      out[i] = mono[lo]! * (1 - frac) + mono[hi]! * frac;
-    }
-    return out;
+    return resampleFloat32(mono, decoded.sampleRate, SAMPLE_RATE);
   } finally {
     await ctx.close().catch(() => {});
   }
+}
+
+function pcmBlocksToFloat32Mono16k(blocks: Float32Array[], sampleCount: number, sampleRate: number): Float32Array {
+  if (sampleCount <= 0 || sampleRate <= 0) return new Float32Array();
+  const mono = new Float32Array(sampleCount);
+  let offset = 0;
+  for (const block of blocks) {
+    mono.set(block, offset);
+    offset += block.length;
+  }
+  return resampleFloat32(mono, sampleRate, SAMPLE_RATE);
+}
+
+function resampleFloat32(samples: Float32Array, fromRate: number, toRate: number): Float32Array {
+  if (fromRate === toRate) return samples;
+  const ratio = fromRate / toRate;
+  const outLen = Math.floor(samples.length / ratio);
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i += 1) {
+    const src = i * ratio;
+    const lo = Math.floor(src);
+    const hi = Math.min(lo + 1, samples.length - 1);
+    const frac = src - lo;
+    out[i] = samples[lo]! * (1 - frac) + samples[hi]! * frac;
+  }
+  return out;
+}
+
+export function selectSttCaptureKind(chunks: number, pcmSampleCount: number): SttCaptureKind | null {
+  if (chunks > 0) return "mediarecorder";
+  if (pcmSampleCount > 0) return "webaudio-pcm";
+  return null;
+}
+
+export function describeSttCaptureSource(chunks: number, pcmSampleCount: number): string {
+  if (pcmSampleCount > 0) return chunks > 0 ? "webaudio-pcm+mediarecorder" : "webaudio-pcm";
+  if (chunks > 0) return "mediarecorder";
+  return "";
 }
 
 function encodeWavPcm16(samples: Float32Array, sampleRate: number): Uint8Array {

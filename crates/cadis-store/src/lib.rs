@@ -146,6 +146,22 @@ impl Default for OrchestratorConfig {
     }
 }
 
+/// Profile selection for daemon-owned profile state.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProfileConfig {
+    /// Default profile ID under `~/.cadis/profiles/<profile>`.
+    pub default_profile: String,
+}
+
+impl Default for ProfileConfig {
+    fn default() -> Self {
+        Self {
+            default_profile: "default".to_owned(),
+        }
+    }
+}
+
 /// CADIS daemon configuration loaded from env and `config.toml`.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -166,6 +182,8 @@ pub struct CadisConfig {
     pub agent_spawn: AgentSpawnConfig,
     /// Daemon-owned orchestrator settings.
     pub orchestrator: OrchestratorConfig,
+    /// Profile-home selection and profile layout settings.
+    pub profile: ProfileConfig,
 }
 
 impl Default for CadisConfig {
@@ -179,6 +197,7 @@ impl Default for CadisConfig {
             voice: VoiceConfig::default(),
             agent_spawn: AgentSpawnConfig::default(),
             orchestrator: OrchestratorConfig::default(),
+            profile: ProfileConfig::default(),
         }
     }
 }
@@ -237,6 +256,8 @@ pub enum StoreError {
     Toml(toml::de::Error),
     /// JSON failed to serialize or parse.
     Json(serde_json::Error),
+    /// TOML serialization failed.
+    TomlSerialize(toml::ser::Error),
     /// Home directory could not be discovered.
     MissingHome,
 }
@@ -247,6 +268,7 @@ impl fmt::Display for StoreError {
             Self::Io(error) => write!(formatter, "store I/O failed: {error}"),
             Self::Toml(error) => write!(formatter, "config TOML is invalid: {error}"),
             Self::Json(error) => write!(formatter, "store JSON failed: {error}"),
+            Self::TomlSerialize(error) => write!(formatter, "store TOML failed: {error}"),
             Self::MissingHome => formatter.write_str("HOME is not set"),
         }
     }
@@ -270,6 +292,490 @@ impl From<serde_json::Error> for StoreError {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error)
     }
+}
+
+impl From<toml::ser::Error> for StoreError {
+    fn from(error: toml::ser::Error) -> Self {
+        Self::TomlSerialize(error)
+    }
+}
+
+/// CADIS home resolver rooted at `~/.cadis` by default.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CadisHome {
+    root: PathBuf,
+}
+
+impl CadisHome {
+    /// Creates a resolver for an explicit CADIS home path.
+    pub fn new(root: impl AsRef<Path>) -> Self {
+        Self {
+            root: expand_home(root.as_ref()),
+        }
+    }
+
+    /// Creates a resolver for the environment/default CADIS home path.
+    pub fn default_home() -> Self {
+        Self::new(default_cadis_home())
+    }
+
+    /// Returns the CADIS home root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Returns the global config path.
+    pub fn config_path(&self) -> PathBuf {
+        self.root.join("config.toml")
+    }
+
+    /// Returns a profile-home resolver for `profile_id`.
+    pub fn profile(&self, profile_id: impl AsRef<str>) -> ProfileHome {
+        ProfileHome::new(self.root.clone(), profile_id)
+    }
+
+    /// Initializes the top-level CADIS home and one profile home.
+    pub fn init_profile(&self, profile_id: impl AsRef<str>) -> Result<ProfileHome, StoreError> {
+        create_private_dir(&self.root)?;
+        for path in ["profiles", "global-cache", "plugins", "bin", "logs", "run"] {
+            create_private_dir(&self.root.join(path))?;
+        }
+
+        let profile = self.profile(profile_id);
+        profile.init_template()?;
+        Ok(profile)
+    }
+}
+
+impl Default for CadisHome {
+    fn default() -> Self {
+        Self::default_home()
+    }
+}
+
+/// Profile home resolver rooted under `~/.cadis/profiles/<profile>`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileHome {
+    profile_id: String,
+    root: PathBuf,
+}
+
+impl ProfileHome {
+    /// Creates a profile resolver under an explicit CADIS home root.
+    pub fn new(cadis_home: impl AsRef<Path>, profile_id: impl AsRef<str>) -> Self {
+        let profile_id = safe_file_stem(profile_id.as_ref());
+        Self {
+            root: cadis_home.as_ref().join("profiles").join(&profile_id),
+            profile_id,
+        }
+    }
+
+    /// Returns the profile ID.
+    pub fn profile_id(&self) -> &str {
+        &self.profile_id
+    }
+
+    /// Returns the profile home root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Returns the profile config path.
+    pub fn profile_config_path(&self) -> PathBuf {
+        self.root.join("profile.toml")
+    }
+
+    /// Returns the profile `.gitignore` path.
+    pub fn gitignore_path(&self) -> PathBuf {
+        self.root.join(".gitignore")
+    }
+
+    /// Returns a persistent agent home path.
+    pub fn agent_home(&self, agent_id: impl AsRef<str>) -> PathBuf {
+        self.root
+            .join("agents")
+            .join(safe_file_stem(agent_id.as_ref()))
+    }
+
+    /// Returns the profile workspace metadata directory.
+    pub fn workspaces_dir(&self) -> PathBuf {
+        self.root.join("workspaces")
+    }
+
+    /// Returns the profile workspace registry TOML path.
+    pub fn workspace_registry_path(&self) -> PathBuf {
+        self.workspaces_dir().join("registry.toml")
+    }
+
+    /// Returns the profile workspace aliases TOML path.
+    pub fn workspace_aliases_path(&self) -> PathBuf {
+        self.workspaces_dir().join("aliases.toml")
+    }
+
+    /// Returns the profile workspace grant JSONL path.
+    pub fn workspace_grants_path(&self) -> PathBuf {
+        self.workspaces_dir().join("grants.jsonl")
+    }
+
+    /// Ensures the profile directory skeleton exists with private permissions.
+    pub fn ensure_layout(&self) -> Result<(), StoreError> {
+        create_private_dir(&self.root)?;
+        for path in [
+            "secrets",
+            "channels",
+            "agents",
+            "memory/global",
+            "memory/daily",
+            "memory/projects",
+            "memory/delegation",
+            "memory/vector",
+            "memory/candidates",
+            "skills/candidates",
+            "skills/approved",
+            "skills/archived",
+            "workspaces",
+            "workers",
+            "sessions/agent",
+            "sessions/worker",
+            "sessions/channel",
+            "artifacts/workers",
+            "checkpoints",
+            "sandboxes",
+            "eventlog",
+            "cron",
+            "logs",
+            "locks",
+            "run",
+        ] {
+            create_private_dir(&self.root.join(path))?;
+        }
+
+        Ok(())
+    }
+
+    /// Initializes profile template files without overwriting user edits.
+    pub fn init_template(&self) -> Result<(), StoreError> {
+        self.ensure_layout()?;
+        write_template_file_if_missing(&self.gitignore_path(), profile_gitignore_template())?;
+        write_template_file_if_missing(
+            &self.profile_config_path(),
+            &profile_toml_template(&self.profile_id),
+        )?;
+        write_template_file_if_missing(&self.workspace_registry_path(), "workspace = []\n")?;
+        write_template_file_if_missing(&self.workspace_aliases_path(), "alias = []\n")?;
+        Ok(())
+    }
+
+    /// Creates a workspace registry helper for this profile.
+    pub fn workspace_registry(&self) -> WorkspaceRegistryStore {
+        WorkspaceRegistryStore::new(self.clone())
+    }
+
+    /// Creates a workspace grant helper for this profile.
+    pub fn workspace_grants(&self) -> WorkspaceGrantStore {
+        WorkspaceGrantStore::new(self.clone())
+    }
+}
+
+/// Profile-local workspace registry stored as TOML.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceRegistry {
+    /// Registered project/document/sandbox workspaces.
+    #[serde(default)]
+    pub workspace: Vec<WorkspaceMetadata>,
+}
+
+/// Metadata for one registered execution workspace.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct WorkspaceMetadata {
+    /// Stable workspace ID.
+    pub id: String,
+    /// Workspace category.
+    pub kind: WorkspaceKind,
+    /// Workspace root path. `~` is expanded by helper APIs after loading.
+    pub root: PathBuf,
+    /// Version-control backend.
+    pub vcs: WorkspaceVcs,
+    /// Human or profile owner label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Whether CADIS can treat this root as a trusted project root.
+    pub trusted: bool,
+    /// Relative directory for worker worktrees inside a project root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_root: Option<PathBuf>,
+    /// Relative directory for workspace-local artifacts inside a project root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_root: Option<PathBuf>,
+    /// Checkpoint behavior for this workspace.
+    pub checkpoint_policy: CheckpointPolicy,
+    /// Inline aliases for detection and routing.
+    #[serde(default, rename = "alias", skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<WorkspaceAlias>,
+}
+
+impl Default for WorkspaceMetadata {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            kind: WorkspaceKind::Project,
+            root: PathBuf::new(),
+            vcs: WorkspaceVcs::None,
+            owner: None,
+            trusted: false,
+            worktree_root: Some(PathBuf::from(".cadis/worktrees")),
+            artifact_root: Some(PathBuf::from(".cadis/artifacts")),
+            checkpoint_policy: CheckpointPolicy::Disabled,
+            aliases: Vec::new(),
+        }
+    }
+}
+
+impl WorkspaceMetadata {
+    /// Returns this workspace with `~` expanded in path fields.
+    pub fn expanded_paths(mut self) -> Self {
+        self.root = expand_home(&self.root);
+        self
+    }
+}
+
+/// Workspace category persisted in the profile registry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceKind {
+    /// Source project workspace.
+    #[default]
+    Project,
+    /// User document collection.
+    Documents,
+    /// Sandbox or temporary workspace root.
+    Sandbox,
+    /// Git worktree workspace.
+    Worktree,
+}
+
+/// Workspace VCS backend.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceVcs {
+    /// No VCS backend.
+    #[default]
+    None,
+    /// Git repository or worktree.
+    Git,
+}
+
+/// Workspace checkpoint policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointPolicy {
+    /// Checkpoints enabled before mutating operations.
+    Enabled,
+    /// Checkpoints disabled for this root.
+    #[default]
+    Disabled,
+}
+
+/// Alias metadata for one registered workspace.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct WorkspaceAlias {
+    /// Workspace ID this alias group targets.
+    pub workspace_id: String,
+    /// Alias strings.
+    pub aliases: Vec<String>,
+}
+
+/// Profile-local workspace registry TOML helper.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceRegistryStore {
+    profile_home: ProfileHome,
+}
+
+impl WorkspaceRegistryStore {
+    /// Creates a registry helper for a profile home.
+    pub fn new(profile_home: ProfileHome) -> Self {
+        Self { profile_home }
+    }
+
+    /// Returns the registry file path.
+    pub fn path(&self) -> PathBuf {
+        self.profile_home.workspace_registry_path()
+    }
+
+    /// Loads the workspace registry, returning an empty registry when missing.
+    pub fn load(&self) -> Result<WorkspaceRegistry, StoreError> {
+        self.profile_home.ensure_layout()?;
+        let path = self.path();
+        if !path.exists() {
+            return Ok(WorkspaceRegistry::default());
+        }
+
+        let content = fs::read_to_string(path)?;
+        let mut registry = toml::from_str::<WorkspaceRegistry>(&content)?;
+        for workspace in &mut registry.workspace {
+            workspace.root = expand_home(&workspace.root);
+        }
+        Ok(registry)
+    }
+
+    /// Atomically writes the registry as redacted TOML.
+    pub fn save(&self, registry: &WorkspaceRegistry) -> Result<(), StoreError> {
+        self.profile_home.ensure_layout()?;
+        let mut toml = redact(&toml::to_string_pretty(registry)?);
+        if !toml.ends_with('\n') {
+            toml.push('\n');
+        }
+        atomic_write_private_file(&self.path(), toml.as_bytes())
+    }
+}
+
+/// Workspace access level granted to an agent or worker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAccess {
+    /// Read-only access.
+    Read,
+    /// File mutation access.
+    Write,
+    /// Shell/process execution access.
+    Exec,
+    /// Administrative workspace operations.
+    Admin,
+}
+
+/// Source that created a workspace grant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantSource {
+    /// Channel or routing rule.
+    Route,
+    /// Explicit user approval.
+    User,
+    /// Policy engine decision.
+    Policy,
+    /// Worker spawn flow.
+    WorkerSpawn,
+}
+
+/// Append-only workspace grant record persisted under profile `workspaces/grants.jsonl`.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceGrantRecord {
+    /// Stable grant ID.
+    pub grant_id: String,
+    /// Profile ID.
+    pub profile_id: String,
+    /// Agent receiving the grant. Missing means the default local runtime context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    /// Workspace ID from the profile registry.
+    pub workspace_id: String,
+    /// Granted root path.
+    pub root: PathBuf,
+    /// Granted access levels.
+    pub access: Vec<WorkspaceAccess>,
+    /// Grant creation time.
+    pub created_at: Timestamp,
+    /// Optional expiration time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+    /// Grant source.
+    pub source: GrantSource,
+    /// Redacted human-readable reason or route note.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Profile-local workspace grant JSONL helper.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceGrantStore {
+    profile_home: ProfileHome,
+}
+
+impl WorkspaceGrantStore {
+    /// Creates a grant helper for a profile home.
+    pub fn new(profile_home: ProfileHome) -> Self {
+        Self { profile_home }
+    }
+
+    /// Returns the JSONL grant path.
+    pub fn path(&self) -> PathBuf {
+        self.profile_home.workspace_grants_path()
+    }
+
+    /// Appends one redacted grant record.
+    pub fn append(&self, record: &WorkspaceGrantRecord) -> Result<(), StoreError> {
+        self.profile_home.ensure_layout()?;
+        let mut line = redact(&serde_json::to_string(record)?);
+        line.push('\n');
+        let path = self.path();
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+        set_private_file_permissions(&path)?;
+        file.write_all(line.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// Rewrites the active grant set as redacted JSONL.
+    pub fn replace_all(&self, records: &[WorkspaceGrantRecord]) -> Result<(), StoreError> {
+        self.profile_home.ensure_layout()?;
+        let mut content = String::new();
+        for record in records {
+            content.push_str(&redact(&serde_json::to_string(record)?));
+            content.push('\n');
+        }
+        atomic_write_private_file(&self.path(), content.as_bytes())
+    }
+
+    /// Loads valid grant records and reports invalid JSONL lines as diagnostics.
+    pub fn load(&self) -> Result<WorkspaceGrantRecovery, StoreError> {
+        self.profile_home.ensure_layout()?;
+        let path = self.path();
+        if !path.exists() {
+            return Ok(WorkspaceGrantRecovery::default());
+        }
+
+        let content = fs::read_to_string(&path)?;
+        let mut records = Vec::new();
+        let mut diagnostics = Vec::new();
+        for (index, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<WorkspaceGrantRecord>(line) {
+                Ok(record) => records.push(record),
+                Err(error) => diagnostics.push(WorkspaceGrantDiagnostic {
+                    line: index + 1,
+                    reason: format!("invalid workspace grant JSON: {error}"),
+                }),
+            }
+        }
+
+        Ok(WorkspaceGrantRecovery {
+            records,
+            diagnostics,
+        })
+    }
+}
+
+/// Recovered workspace grant records and load diagnostics.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WorkspaceGrantRecovery {
+    /// Valid grant records.
+    pub records: Vec<WorkspaceGrantRecord>,
+    /// Invalid JSONL lines skipped during recovery.
+    pub diagnostics: Vec<WorkspaceGrantDiagnostic>,
+}
+
+/// Diagnostic for one invalid grant JSONL line.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceGrantDiagnostic {
+    /// One-based line number.
+    pub line: usize,
+    /// Parse failure reason.
+    pub reason: String,
 }
 
 /// Persisted approval lifecycle state.
@@ -454,6 +960,8 @@ pub fn ensure_layout(config: &CadisConfig) -> Result<(), StoreError> {
     ] {
         create_private_dir(&config.cadis_home.join(path))?;
     }
+
+    CadisHome::new(&config.cadis_home).init_profile(&config.profile.default_profile)?;
 
     Ok(())
 }
@@ -800,6 +1308,81 @@ impl EventLog {
             .unwrap_or_else(|| "daemon".to_owned());
         self.logs_dir.join(format!("{name}.jsonl"))
     }
+}
+
+fn write_template_file_if_missing(path: &Path, content: &str) -> Result<(), StoreError> {
+    if path.exists() {
+        return Ok(());
+    }
+
+    atomic_write_private_file(path, content.as_bytes())
+}
+
+fn atomic_write_private_file(path: &Path, content: &[u8]) -> Result<(), StoreError> {
+    if let Some(parent) = path.parent() {
+        create_private_dir(parent)?;
+    }
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("state");
+    let tmp_path = temporary_path_for(dir, file_name);
+
+    let write_result = (|| -> Result<(), StoreError> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        set_private_file_permissions(&tmp_path)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        fs::rename(&tmp_path, path)?;
+        sync_parent_dir(dir)?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+
+    write_result
+}
+
+fn temporary_path_for(dir: &Path, file_name: &str) -> PathBuf {
+    let process = std::process::id();
+    let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    dir.join(format!(
+        ".{}.tmp.{process}.{counter}.{nanos}",
+        safe_file_stem(file_name)
+    ))
+}
+
+fn profile_toml_template(profile_id: &str) -> String {
+    format!(
+        r#"[profile]
+id = "{profile_id}"
+name = "{profile_id}"
+
+[model]
+default_provider = "auto"
+default_model = "auto"
+
+[security]
+redact_logs = true
+atomic_writes = true
+deny_secret_paths = true
+"#
+    )
+}
+
+fn profile_gitignore_template() -> &'static str {
+    ".env\nsecrets/\nchannels/\nsessions/\nworkers/\ncheckpoints/\nsandboxes/\nlogs/\nlocks/\nrun/\n*.key\n*.pem\n*.token\n*.sqlite-wal\n*.sqlite-shm\n"
 }
 
 fn expand_home(path: &Path) -> PathBuf {
@@ -1209,5 +1792,137 @@ mod tests {
         assert_eq!(workers.records[0].metadata.status, "running");
         assert_eq!(approvals.records[0].id, "approval_1");
         assert_eq!(approvals.records[0].metadata.status, "pending");
+    }
+
+    #[test]
+    fn profile_layout_initializes_templates_and_preserves_legacy_paths() {
+        let config = test_config("profile-layout");
+        ensure_layout(&config).expect("layout should initialize");
+
+        let cadis_home = CadisHome::new(&config.cadis_home);
+        let profile = cadis_home.profile("default");
+
+        assert!(config.cadis_home.join("state/sessions").is_dir());
+        assert!(config.cadis_home.join("sessions").is_dir());
+        assert!(profile.root().is_dir());
+        assert!(profile
+            .agent_home("agent/../main")
+            .ends_with("agents/agent____main"));
+        assert!(profile.workspaces_dir().is_dir());
+        assert!(profile.root().join("eventlog").is_dir());
+
+        let profile_toml = fs::read_to_string(profile.profile_config_path())
+            .expect("profile template should be readable");
+        assert!(profile_toml.contains("id = \"default\""));
+
+        let gitignore =
+            fs::read_to_string(profile.gitignore_path()).expect(".gitignore should be readable");
+        assert!(gitignore.contains(".env"));
+        assert!(gitignore.contains("secrets/"));
+
+        let registry =
+            fs::read_to_string(profile.workspace_registry_path()).expect("registry should exist");
+        assert_eq!(registry, "workspace = []\n");
+    }
+
+    #[test]
+    fn workspace_registry_round_trips_toml_and_expands_home() {
+        let config = test_config("workspace-registry");
+        let profile = CadisHome::new(&config.cadis_home)
+            .init_profile("default")
+            .expect("profile should initialize");
+        let store = profile.workspace_registry();
+        let registry = WorkspaceRegistry {
+            workspace: vec![WorkspaceMetadata {
+                id: "example-project".to_owned(),
+                kind: WorkspaceKind::Project,
+                root: PathBuf::from("~/Project/example"),
+                vcs: WorkspaceVcs::Git,
+                owner: Some("rama".to_owned()),
+                trusted: true,
+                worktree_root: Some(PathBuf::from(".cadis/worktrees")),
+                artifact_root: Some(PathBuf::from(".cadis/artifacts")),
+                checkpoint_policy: CheckpointPolicy::Enabled,
+                aliases: vec![WorkspaceAlias {
+                    workspace_id: "example-project".to_owned(),
+                    aliases: vec!["example".to_owned(), "demo".to_owned()],
+                }],
+            }],
+        };
+
+        store.save(&registry).expect("registry should save");
+        let raw = fs::read_to_string(store.path()).expect("registry should be readable");
+        assert!(raw.contains("[[workspace]]"));
+        assert!(raw.contains("[[workspace.alias]]"));
+
+        let loaded = store.load().expect("registry should load");
+        assert_eq!(loaded.workspace.len(), 1);
+        assert_eq!(loaded.workspace[0].id, "example-project");
+        assert_eq!(loaded.workspace[0].kind, WorkspaceKind::Project);
+        assert_eq!(
+            loaded.workspace[0].root,
+            expand_home(Path::new("~/Project/example"))
+        );
+        assert_eq!(
+            loaded.workspace[0].aliases[0].aliases,
+            vec!["example", "demo"]
+        );
+    }
+
+    #[test]
+    fn workspace_grants_are_append_only_recoverable_and_redacted() {
+        let config = test_config("workspace-grants");
+        let profile = CadisHome::new(&config.cadis_home)
+            .init_profile("default")
+            .expect("profile should initialize");
+        let store = profile.workspace_grants();
+        let record = WorkspaceGrantRecord {
+            grant_id: "grant/1".to_owned(),
+            profile_id: "default".to_owned(),
+            agent_id: Some(AgentId::from("main")),
+            workspace_id: "example-project".to_owned(),
+            root: PathBuf::from("/tmp/example-project"),
+            access: vec![WorkspaceAccess::Read, WorkspaceAccess::Write],
+            created_at: Timestamp::new_utc("2026-04-26T00:00:00Z").expect("timestamp should parse"),
+            expires_at: Some(
+                Timestamp::new_utc("2026-04-26T01:00:00Z").expect("timestamp should parse"),
+            ),
+            source: GrantSource::User,
+            reason: Some("OPENAI_API_KEY=sk-testsecretvalue123456".to_owned()),
+        };
+
+        store.append(&record).expect("grant should append");
+
+        let raw = fs::read_to_string(store.path()).expect("grant log should be readable");
+        assert!(raw.contains("OPENAI_API_KEY=[REDACTED]"));
+        assert!(!raw.contains("sk-testsecretvalue123456"));
+
+        let recovered = store.load().expect("grant log should load");
+        assert_eq!(recovered.diagnostics, Vec::new());
+        assert_eq!(recovered.records.len(), 1);
+        assert_eq!(recovered.records[0].grant_id, "grant/1");
+        assert_eq!(
+            recovered.records[0].reason.as_deref(),
+            Some("OPENAI_API_KEY=[REDACTED]")
+        );
+    }
+
+    #[test]
+    fn workspace_grant_recovery_reports_invalid_jsonl_lines() {
+        let config = test_config("workspace-grant-recovery");
+        let profile = CadisHome::new(&config.cadis_home)
+            .init_profile("default")
+            .expect("profile should initialize");
+        let store = profile.workspace_grants();
+
+        fs::write(store.path(), "{\n").expect("invalid grant line should write");
+
+        let recovered = store.load().expect("grant recovery should fail safe");
+        assert_eq!(recovered.records, Vec::new());
+        assert_eq!(recovered.diagnostics.len(), 1);
+        assert_eq!(recovered.diagnostics[0].line, 1);
+        assert!(recovered.diagnostics[0]
+            .reason
+            .contains("invalid workspace grant JSON"));
     }
 }

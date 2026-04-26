@@ -76,6 +76,14 @@ string_id!(
     AgentId
 );
 string_id!(
+    /// CADIS registered workspace identifier.
+    WorkspaceId
+);
+string_id!(
+    /// CADIS workspace grant identifier.
+    WorkspaceGrantId
+);
+string_id!(
     /// CADIS tool call identifier.
     ToolCallId
 );
@@ -283,6 +291,7 @@ impl ResponseEnvelope {
 }
 
 /// Newline-delimited JSON frame sent by `cadisd`.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "frame", content = "payload", rename_all = "snake_case")]
 pub enum ServerFrame {
@@ -400,6 +409,21 @@ pub enum ClientRequest {
     /// Kill an agent.
     #[serde(rename = "agent.kill")]
     AgentKill(AgentTargetRequest),
+    /// List registered project workspaces and active grants.
+    #[serde(rename = "workspace.list")]
+    WorkspaceList(WorkspaceListRequest),
+    /// Register or replace a project workspace.
+    #[serde(rename = "workspace.register")]
+    WorkspaceRegister(WorkspaceRegisterRequest),
+    /// Grant an agent access to a registered workspace.
+    #[serde(rename = "workspace.grant")]
+    WorkspaceGrant(WorkspaceGrantRequest),
+    /// Revoke one or more workspace grants.
+    #[serde(rename = "workspace.revoke")]
+    WorkspaceRevoke(WorkspaceRevokeRequest),
+    /// Check workspace registry, root, and grant health.
+    #[serde(rename = "workspace.doctor")]
+    WorkspaceDoctor(WorkspaceDoctorRequest),
     /// Tail a worker log stream.
     #[serde(rename = "worker.tail")]
     WorkerTail(WorkerTailRequest),
@@ -506,6 +530,9 @@ pub struct ToolCallRequest {
     /// Optional session this tool call belongs to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<SessionId>,
+    /// Optional agent context for agent-scoped workspace grants.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
     /// Stable tool name, for example `file.read`.
     pub tool_name: String,
     /// Structured tool input.
@@ -562,6 +589,84 @@ pub struct WorkerTailRequest {
     /// Optional number of recent lines.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<u32>,
+}
+
+/// Payload for listing registered workspaces.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceListRequest {
+    /// Include active grants in the response.
+    #[serde(default)]
+    pub include_grants: bool,
+}
+
+/// Payload for registering a project workspace root.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceRegisterRequest {
+    /// Stable workspace identifier.
+    pub workspace_id: WorkspaceId,
+    /// Workspace category.
+    pub kind: WorkspaceKind,
+    /// Filesystem root supplied by the client.
+    pub root: String,
+    /// Human or routing aliases for this workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// Version control system label, for example `git` or `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vcs: Option<String>,
+    /// Whether the user considers this workspace trusted.
+    #[serde(default)]
+    pub trusted: bool,
+    /// Relative worktree root under the project workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_root: Option<String>,
+    /// Relative artifact root under the project workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_root: Option<String>,
+}
+
+/// Payload for granting workspace access.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceGrantRequest {
+    /// Agent receiving access. Missing means the default local runtime context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    /// Registered workspace being granted.
+    pub workspace_id: WorkspaceId,
+    /// Access modes granted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub access: Vec<WorkspaceAccess>,
+    /// Optional UTC expiration timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+    /// Source of the grant, for example `user`, `policy`, or `worker_spawn`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+/// Payload for revoking workspace grants.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceRevokeRequest {
+    /// Revoke a specific grant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<WorkspaceGrantId>,
+    /// Revoke grants for a workspace when grant_id is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<WorkspaceId>,
+    /// Optionally narrow workspace revocation to one agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+}
+
+/// Payload for workspace registry health checks.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceDoctorRequest {
+    /// Check a registered workspace by ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<WorkspaceId>,
+    /// Check an explicit root supplied by the client.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
 }
 
 /// Payload for patching UI preferences.
@@ -643,6 +748,21 @@ pub enum CadisEvent {
     /// Agent completed a task.
     #[serde(rename = "agent.completed")]
     AgentCompleted(AgentEventPayload),
+    /// Workspace registry snapshot.
+    #[serde(rename = "workspace.list.response")]
+    WorkspaceListResponse(WorkspaceListPayload),
+    /// Workspace was registered.
+    #[serde(rename = "workspace.registered")]
+    WorkspaceRegistered(WorkspaceRecordPayload),
+    /// Workspace grant was created.
+    #[serde(rename = "workspace.grant.created")]
+    WorkspaceGrantCreated(WorkspaceGrantPayload),
+    /// Workspace grant was revoked.
+    #[serde(rename = "workspace.grant.revoked")]
+    WorkspaceGrantRevoked(WorkspaceGrantPayload),
+    /// Workspace doctor result.
+    #[serde(rename = "workspace.doctor.response")]
+    WorkspaceDoctorResponse(WorkspaceDoctorPayload),
     /// Model list response.
     #[serde(rename = "models.list.response")]
     ModelsListResponse(ModelsListPayload),
@@ -826,6 +946,81 @@ pub struct AgentStatusChangedPayload {
     pub task: Option<String>,
 }
 
+/// Workspace registry snapshot payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceListPayload {
+    /// Registered workspaces.
+    pub workspaces: Vec<WorkspaceRecordPayload>,
+    /// Active grants when requested.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<WorkspaceGrantPayload>,
+}
+
+/// Registered workspace payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceRecordPayload {
+    /// Stable workspace ID.
+    pub workspace_id: WorkspaceId,
+    /// Workspace category.
+    pub kind: WorkspaceKind,
+    /// Canonical root path.
+    pub root: String,
+    /// Human or routing aliases.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// Version control system label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vcs: Option<String>,
+    /// Whether this workspace is trusted by the user.
+    #[serde(default)]
+    pub trusted: bool,
+    /// Relative worktree root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_root: Option<String>,
+    /// Relative artifact root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_root: Option<String>,
+}
+
+/// Active workspace grant payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceGrantPayload {
+    /// Grant ID.
+    pub grant_id: WorkspaceGrantId,
+    /// Agent receiving access. Missing means the default local runtime context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    /// Workspace being granted.
+    pub workspace_id: WorkspaceId,
+    /// Canonical root path covered by the grant.
+    pub root: String,
+    /// Granted access modes.
+    pub access: Vec<WorkspaceAccess>,
+    /// Optional UTC expiration timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<Timestamp>,
+    /// Source of the grant.
+    pub source: String,
+}
+
+/// Workspace doctor response payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceDoctorPayload {
+    /// Checks performed by the daemon.
+    pub checks: Vec<WorkspaceDoctorCheck>,
+}
+
+/// One workspace doctor check.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WorkspaceDoctorCheck {
+    /// Stable check name.
+    pub name: String,
+    /// Result status, for example `ok`, `warn`, or `error`.
+    pub status: String,
+    /// Human-readable result.
+    pub message: String,
+}
+
 /// Model list payload.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct ModelsListPayload {
@@ -983,6 +1178,81 @@ pub struct WorkerEventPayload {
     /// Redacted worker summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Non-destructive worktree intent and path planning metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<WorkerWorktreeIntent>,
+    /// Artifact paths where worker outputs are expected to be written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifacts: Option<WorkerArtifactLocations>,
+}
+
+/// Planned or actual worker worktree metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WorkerWorktreeIntent {
+    /// Workspace registry ID, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Canonical project root, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
+    /// Root directory where CADIS worktrees for this workspace live.
+    pub worktree_root: String,
+    /// Intended or actual worktree path for this worker.
+    pub worktree_path: String,
+    /// Intended or actual branch name for this worker.
+    pub branch_name: String,
+    /// Base ref for worktree branch creation, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    /// Current lifecycle state of the worktree metadata.
+    pub state: WorkerWorktreeState,
+    /// Policy for retaining or removing the worktree.
+    pub cleanup_policy: WorkerWorktreeCleanupPolicy,
+}
+
+/// Worker worktree lifecycle state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerWorktreeState {
+    /// Worktree is planned but has not been created by the daemon.
+    Planned,
+    /// Worktree exists and is assigned to the worker.
+    Active,
+    /// Worktree should remain available for user review.
+    ReviewPending,
+    /// Worktree cleanup has been requested.
+    CleanupPending,
+    /// Worktree was removed by CADIS.
+    Removed,
+}
+
+/// Worker worktree retention policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerWorktreeCleanupPolicy {
+    /// Keep until an explicit user or policy action removes it.
+    Explicit,
+    /// Remove automatically after successful apply.
+    AfterApply,
+    /// Remove automatically when the worker reaches a terminal state.
+    OnCompletion,
+}
+
+/// Expected artifact locations for worker outputs.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WorkerArtifactLocations {
+    /// Worker artifact root.
+    pub root: String,
+    /// Patch/diff artifact path.
+    pub patch: String,
+    /// Test report artifact path.
+    pub test_report: String,
+    /// Worker summary artifact path.
+    pub summary: String,
+    /// Changed-files manifest path.
+    pub changed_files: String,
+    /// Candidate memory updates path.
+    pub memory_candidates: String,
 }
 
 /// Worker log delta payload.
@@ -1073,6 +1343,34 @@ pub enum RiskClass {
     /// Sudo/system operation.
     #[serde(rename = "sudo-system")]
     SudoSystem,
+}
+
+/// Workspace category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceKind {
+    /// User project checkout or project root.
+    Project,
+    /// Documents or notes tree.
+    Documents,
+    /// Ephemeral sandbox root.
+    Sandbox,
+    /// Worker git worktree.
+    Worktree,
+}
+
+/// Workspace grant access mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAccess {
+    /// Read files and inspect status.
+    Read,
+    /// Write files under the workspace root.
+    Write,
+    /// Execute commands under the workspace root.
+    Exec,
+    /// Administrative workspace operations.
+    Admin,
 }
 
 /// Approval decision.
@@ -1183,6 +1481,7 @@ mod tests {
             ClientId::from("cli_1"),
             ClientRequest::ToolCall(ToolCallRequest {
                 session_id: Some(SessionId::from("ses_1")),
+                agent_id: Some(AgentId::from("codex")),
                 tool_name: "file.read".to_owned(),
                 input: json!({
                     "workspace": "/home/user/project",
@@ -1202,11 +1501,92 @@ mod tests {
                 "type": "tool.call",
                 "payload": {
                     "session_id": "ses_1",
+                    "agent_id": "codex",
                     "tool_name": "file.read",
                     "input": {
                         "workspace": "/home/user/project",
                         "path": "README.md"
                     }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_register_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceRegister(WorkspaceRegisterRequest {
+                workspace_id: WorkspaceId::from("example-project"),
+                kind: WorkspaceKind::Project,
+                root: "/home/user/project".to_owned(),
+                aliases: vec!["example".to_owned()],
+                vcs: Some("git".to_owned()),
+                trusted: true,
+                worktree_root: Some(".cadis/worktrees".to_owned()),
+                artifact_root: Some(".cadis/artifacts".to_owned()),
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_1",
+                "client_id": "cli_1",
+                "type": "workspace.register",
+                "payload": {
+                    "workspace_id": "example-project",
+                    "kind": "project",
+                    "root": "/home/user/project",
+                    "aliases": ["example"],
+                    "vcs": "git",
+                    "trusted": true,
+                    "worktree_root": ".cadis/worktrees",
+                    "artifact_root": ".cadis/artifacts"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_grant_event_matches_documented_shape() {
+        let envelope = EventEnvelope::new(
+            EventId::from("evt_1"),
+            Timestamp::new_utc("2026-04-26T00:00:00Z").expect("timestamp should be UTC"),
+            "cadisd",
+            None,
+            CadisEvent::WorkspaceGrantCreated(WorkspaceGrantPayload {
+                grant_id: WorkspaceGrantId::from("grant_000001"),
+                agent_id: Some(AgentId::from("codex")),
+                workspace_id: WorkspaceId::from("example-project"),
+                root: "/home/user/project".to_owned(),
+                access: vec![WorkspaceAccess::Read, WorkspaceAccess::Exec],
+                expires_at: None,
+                source: "user".to_owned(),
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("event should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "event_id": "evt_1",
+                "timestamp": "2026-04-26T00:00:00Z",
+                "source": "cadisd",
+                "type": "workspace.grant.created",
+                "payload": {
+                    "grant_id": "grant_000001",
+                    "agent_id": "codex",
+                    "workspace_id": "example-project",
+                    "root": "/home/user/project",
+                    "access": ["read", "exec"],
+                    "source": "user"
                 }
             })
         );
@@ -1268,6 +1648,122 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn worker_event_serializes_worktree_and_artifact_planning_metadata() {
+        let envelope = EventEnvelope::new(
+            EventId::from("evt_2"),
+            Timestamp::new_utc("2026-04-26T00:00:00Z").expect("timestamp should be UTC"),
+            "cadisd",
+            Some(SessionId::from("ses_1")),
+            CadisEvent::WorkerStarted(WorkerEventPayload {
+                worker_id: "worker_000001".to_owned(),
+                agent_id: Some(AgentId::from("coder")),
+                parent_agent_id: Some(AgentId::from("main")),
+                status: Some("running".to_owned()),
+                cli: None,
+                cwd: None,
+                summary: Some("implement worktree baseline".to_owned()),
+                worktree: Some(WorkerWorktreeIntent {
+                    workspace_id: Some("cadis".to_owned()),
+                    project_root: Some("/home/user/Project/cadis".to_owned()),
+                    worktree_root: "/home/user/Project/cadis/.cadis/worktrees".to_owned(),
+                    worktree_path: "/home/user/Project/cadis/.cadis/worktrees/worker_000001"
+                        .to_owned(),
+                    branch_name: "cadis/worker_000001/worktree-baseline".to_owned(),
+                    base_ref: Some("HEAD".to_owned()),
+                    state: WorkerWorktreeState::Planned,
+                    cleanup_policy: WorkerWorktreeCleanupPolicy::Explicit,
+                }),
+                artifacts: Some(WorkerArtifactLocations {
+                    root: "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001"
+                        .to_owned(),
+                    patch: "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001/patch.diff"
+                        .to_owned(),
+                    test_report:
+                        "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001/test-report.json"
+                            .to_owned(),
+                    summary:
+                        "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001/summary.md"
+                            .to_owned(),
+                    changed_files:
+                        "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001/changed-files.json"
+                            .to_owned(),
+                    memory_candidates:
+                        "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001/memory-candidates.jsonl"
+                            .to_owned(),
+                }),
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("event should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "event_id": "evt_2",
+                "timestamp": "2026-04-26T00:00:00Z",
+                "source": "cadisd",
+                "session_id": "ses_1",
+                "type": "worker.started",
+                "payload": {
+                    "worker_id": "worker_000001",
+                    "agent_id": "coder",
+                    "parent_agent_id": "main",
+                    "status": "running",
+                    "summary": "implement worktree baseline",
+                    "worktree": {
+                        "workspace_id": "cadis",
+                        "project_root": "/home/user/Project/cadis",
+                        "worktree_root": "/home/user/Project/cadis/.cadis/worktrees",
+                        "worktree_path": "/home/user/Project/cadis/.cadis/worktrees/worker_000001",
+                        "branch_name": "cadis/worker_000001/worktree-baseline",
+                        "base_ref": "HEAD",
+                        "state": "planned",
+                        "cleanup_policy": "explicit"
+                    },
+                    "artifacts": {
+                        "root": "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001",
+                        "patch": "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001/patch.diff",
+                        "test_report": "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001/test-report.json",
+                        "summary": "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001/summary.md",
+                        "changed_files": "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001/changed-files.json",
+                        "memory_candidates": "/home/user/.cadis/profiles/default/artifacts/workers/worker_000001/memory-candidates.jsonl"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn worker_event_deserializes_legacy_shape_without_worktree_metadata() {
+        let value = json!({
+            "protocol_version": CURRENT_PROTOCOL_VERSION,
+            "event_id": "evt_3",
+            "timestamp": "2026-04-26T00:00:00Z",
+            "source": "cadisd",
+            "session_id": "ses_1",
+            "type": "worker.completed",
+            "payload": {
+                "worker_id": "worker_000001",
+                "agent_id": "coder",
+                "status": "completed",
+                "summary": "done"
+            }
+        });
+
+        let envelope =
+            serde_json::from_value::<EventEnvelope>(value).expect("legacy event should parse");
+
+        match envelope.event {
+            CadisEvent::WorkerCompleted(payload) => {
+                assert_eq!(payload.worktree, None);
+                assert_eq!(payload.artifacts, None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

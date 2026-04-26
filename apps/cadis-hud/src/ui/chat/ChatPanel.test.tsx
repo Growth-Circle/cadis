@@ -86,6 +86,9 @@ describe("ChatPanel voice UX", () => {
         silentMs: 1800,
         chunks: 4,
         bytes: 2048,
+        pcmFrames: 8,
+        pcmBytes: 4096,
+        captureSource: "webaudio-pcm+mediarecorder",
         permissionState: "granted",
         deviceCount: 1,
         deviceLabels: "Test mic",
@@ -119,6 +122,7 @@ describe("ChatPanel voice UX", () => {
     expect(screen.getByText("mic debug")).toBeInTheDocument();
     expect(screen.getByText("whisper returned empty text")).toBeInTheDocument();
     expect(screen.getAllByText("Test mic").length).toBeGreaterThan(0);
+    expect(screen.getByText("webaudio-pcm+mediarecorder")).toBeInTheDocument();
     expect(screen.getByText("voice ended after trailing silence")).toBeInTheDocument();
   });
 
@@ -158,6 +162,9 @@ describe("ChatPanel voice UX", () => {
         rms: 0.009,
         peak: 0.06,
         voiceDetected: true,
+        pcmFrames: 5,
+        pcmBytes: 4096,
+        captureSource: "webaudio-pcm",
         permissionState: "granted",
         deviceCount: 2,
         deviceLabels: "Built-in Audio, USB Mic",
@@ -173,6 +180,7 @@ describe("ChatPanel voice UX", () => {
 
     expect(screen.getByText("mic debug capture")).toBeInTheDocument();
     expect(screen.getByText("USB Mic")).toBeInTheDocument();
+    expect(screen.getByText("webaudio-pcm")).toBeInTheDocument();
     expect(screen.getByText("Built-in Audio, USB Mic")).toBeInTheDocument();
     expect(screen.getByText("trailing silence after voice")).toBeInTheDocument();
   });
@@ -224,6 +232,9 @@ function debugSnapshot(overrides: Partial<SttDebugSnapshot>): SttDebugSnapshot {
     silentMs: 0,
     chunks: 0,
     bytes: 0,
+    pcmFrames: 0,
+    pcmBytes: 0,
+    captureSource: "",
     permissionState: "",
     deviceCount: 0,
     deviceLabels: "",

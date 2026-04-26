@@ -8,7 +8,7 @@ source on Linux.
 ## From Source
 
 ```bash
-git clone https://github.com/cadis-ai/cadis.git
+git clone https://github.com/Growth-Circle/cadis.git
 cd cadis
 cargo build --release
 ```

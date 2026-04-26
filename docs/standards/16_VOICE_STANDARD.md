@@ -158,10 +158,17 @@ The renderer STT path must expose deterministic microphone diagnosis:
 - media stream active/inactive state
 - track enabled, muted, ready state, channel count, and sample rate when provided by WebKit
 - `MediaRecorder` state and MIME type for transcription capture
+- WebAudio PCM capture source, frame count, and byte count for WebKit builds
+  where `MediaRecorder` opens a track but produces zero chunks
 - analyser state, sample rate, RMS, peak, and frame count
 - silence reason, including no signal, muted track, suspended audio context, below voice threshold, trailing silence, or max duration
 
 The HUD visualizer must be driven from actual analyser time-domain samples. It must not show synthetic movement that can hide a silent or disconnected input.
+
+If `MediaRecorder` produces no encoded chunks but the analyser and WebAudio PCM
+path receive samples, the HUD must send the PCM fallback to STT instead of
+dropping the utterance. A moving visualizer with `chunks=0` therefore indicates
+an encoder fallback path, not a failed microphone.
 
 ## 11. Protocol
 
