@@ -397,6 +397,11 @@ impl ProfileHome {
             .join(safe_file_stem(agent_id.as_ref()))
     }
 
+    /// Returns a persistent agent-home resolver.
+    pub fn agent(&self, agent_id: impl AsRef<str>) -> AgentHome {
+        AgentHome::new(self.clone(), agent_id)
+    }
+
     /// Returns the profile workspace metadata directory.
     pub fn workspaces_dir(&self) -> PathBuf {
         self.root.join("workspaces")
@@ -466,6 +471,47 @@ impl ProfileHome {
         Ok(())
     }
 
+    /// Initializes one persistent agent home without overwriting user edits.
+    pub fn init_agent(&self, template: &AgentHomeTemplate) -> Result<AgentHome, StoreError> {
+        let agent = self.agent(template.agent_id.as_str());
+        agent.init_template(template)?;
+        Ok(agent)
+    }
+
+    /// Runs lightweight profile and agent-home diagnostics.
+    pub fn agent_doctor_diagnostics(
+        &self,
+        options: AgentHomeDoctorOptions,
+    ) -> Result<Vec<AgentHomeDiagnostic>, StoreError> {
+        self.ensure_layout()?;
+
+        let agents_dir = self.root.join("agents");
+        let mut diagnostics = Vec::new();
+        let mut count = 0usize;
+        for entry in fs::read_dir(&agents_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            count += 1;
+            let agent_id = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("unknown");
+            diagnostics.extend(AgentHome::from_root(agent_id.to_owned(), path).doctor(&options));
+        }
+
+        diagnostics.push(AgentHomeDiagnostic {
+            name: "profile.agents".to_owned(),
+            status: if count == 0 { "warn" } else { "ok" }.to_owned(),
+            message: format!("{count} agent home(s) found"),
+        });
+
+        Ok(diagnostics)
+    }
+
     /// Creates a workspace registry helper for this profile.
     pub fn workspace_registry(&self) -> WorkspaceRegistryStore {
         WorkspaceRegistryStore::new(self.clone())
@@ -475,6 +521,505 @@ impl ProfileHome {
     pub fn workspace_grants(&self) -> WorkspaceGrantStore {
         WorkspaceGrantStore::new(self.clone())
     }
+}
+
+/// Persistent agent-home resolver rooted under a profile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentHome {
+    agent_id: String,
+    root: PathBuf,
+}
+
+impl AgentHome {
+    /// Creates an agent-home resolver for a profile.
+    pub fn new(profile_home: ProfileHome, agent_id: impl AsRef<str>) -> Self {
+        let agent_id = safe_file_stem(agent_id.as_ref());
+        Self {
+            root: profile_home.agent_home(&agent_id),
+            agent_id,
+        }
+    }
+
+    fn from_root(agent_id: String, root: PathBuf) -> Self {
+        Self { agent_id, root }
+    }
+
+    /// Returns the safe profile-local agent ID component.
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
+    /// Returns the agent-home root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Returns the path to `AGENT.toml`.
+    pub fn agent_toml_path(&self) -> PathBuf {
+        self.root.join("AGENT.toml")
+    }
+
+    /// Returns the path to `POLICY.toml`.
+    pub fn policy_toml_path(&self) -> PathBuf {
+        self.root.join("POLICY.toml")
+    }
+
+    /// Ensures the agent-home directory skeleton exists with private permissions.
+    pub fn ensure_layout(&self) -> Result<(), StoreError> {
+        create_private_dir(&self.root)?;
+        for path in ["skills", "memory", "memory/daily", "prompts", "sessions"] {
+            create_private_dir(&self.root.join(path))?;
+        }
+        Ok(())
+    }
+
+    /// Initializes agent templates without overwriting user edits.
+    pub fn init_template(&self, template: &AgentHomeTemplate) -> Result<(), StoreError> {
+        self.ensure_layout()?;
+        write_template_file_if_missing(&self.agent_toml_path(), &agent_toml_template(template)?)?;
+        write_template_file_if_missing(&self.root.join("PERSONA.md"), &persona_template(template))?;
+        write_template_file_if_missing(
+            &self.root.join("INSTRUCTIONS.md"),
+            &instructions_template(template),
+        )?;
+        write_template_file_if_missing(&self.root.join("USER.md"), user_template())?;
+        write_template_file_if_missing(&self.root.join("MEMORY.md"), memory_template())?;
+        write_template_file_if_missing(&self.root.join("TOOLS.md"), tools_template())?;
+        write_template_file_if_missing(&self.policy_toml_path(), &agent_policy_toml_template()?)?;
+        write_template_file_if_missing(
+            &self.root.join("SKILL_POLICY.toml"),
+            &skill_policy_toml_template()?,
+        )?;
+        write_template_file_if_missing(&self.root.join("README.md"), agent_readme_template())?;
+        write_template_file_if_missing(&self.root.join("memory/decisions.md"), "# Decisions\n")?;
+        write_template_file_if_missing(&self.root.join("memory/delegation.md"), "# Delegation\n")?;
+        Ok(())
+    }
+
+    /// Loads typed `AGENT.toml` metadata.
+    pub fn load_metadata(&self) -> Result<AgentMetadataToml, StoreError> {
+        let content = fs::read_to_string(self.agent_toml_path())?;
+        Ok(toml::from_str::<AgentMetadataToml>(&content)?)
+    }
+
+    /// Loads typed `POLICY.toml` metadata.
+    pub fn load_policy(&self) -> Result<AgentPolicyToml, StoreError> {
+        let content = fs::read_to_string(self.policy_toml_path())?;
+        Ok(toml::from_str::<AgentPolicyToml>(&content)?)
+    }
+
+    /// Runs missing/corrupt/oversized checks for this agent home.
+    pub fn doctor(&self, options: &AgentHomeDoctorOptions) -> Vec<AgentHomeDiagnostic> {
+        let mut diagnostics = Vec::new();
+        diagnostics.extend(self.toml_check(
+            "agent.AGENT.toml",
+            &self.agent_toml_path(),
+            options.max_agent_toml_bytes,
+            |content| toml::from_str::<AgentMetadataToml>(content).map(|_| ()),
+        ));
+        diagnostics.extend(self.toml_check(
+            "agent.POLICY.toml",
+            &self.policy_toml_path(),
+            options.max_policy_toml_bytes,
+            |content| toml::from_str::<AgentPolicyToml>(content).map(|_| ()),
+        ));
+        diagnostics.extend(self.toml_check(
+            "agent.SKILL_POLICY.toml",
+            &self.root.join("SKILL_POLICY.toml"),
+            options.max_policy_toml_bytes,
+            |content| toml::from_str::<SkillPolicyToml>(content).map(|_| ()),
+        ));
+
+        for file_name in ["PERSONA.md", "INSTRUCTIONS.md", "USER.md", "TOOLS.md"] {
+            diagnostics.push(self.text_file_check(
+                &format!("agent.{file_name}"),
+                &self.root.join(file_name),
+                options.max_text_file_bytes,
+            ));
+        }
+        diagnostics.push(self.text_file_check(
+            "agent.MEMORY.md",
+            &self.root.join("MEMORY.md"),
+            options.max_memory_file_bytes,
+        ));
+        diagnostics.push(self.text_file_check(
+            "agent.memory.decisions",
+            &self.root.join("memory/decisions.md"),
+            options.max_memory_file_bytes,
+        ));
+        diagnostics.push(self.text_file_check(
+            "agent.memory.delegation",
+            &self.root.join("memory/delegation.md"),
+            options.max_memory_file_bytes,
+        ));
+
+        diagnostics
+    }
+
+    fn toml_check(
+        &self,
+        name: &str,
+        path: &Path,
+        max_bytes: u64,
+        parse: impl FnOnce(&str) -> Result<(), toml::de::Error>,
+    ) -> Vec<AgentHomeDiagnostic> {
+        let mut diagnostics = Vec::new();
+        match fs::metadata(path) {
+            Ok(metadata) if !metadata.is_file() => {
+                diagnostics.push(self.diagnostic(
+                    name,
+                    "error",
+                    format!("{} is not a file", path.display()),
+                ));
+                return diagnostics;
+            }
+            Ok(metadata) => {
+                if metadata.len() > max_bytes {
+                    diagnostics.push(self.diagnostic(
+                        name,
+                        "warn",
+                        format!(
+                            "{} is {} bytes; limit is {max_bytes}",
+                            path.display(),
+                            metadata.len()
+                        ),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                diagnostics.push(self.diagnostic(
+                    name,
+                    "error",
+                    format!("{} is missing", path.display()),
+                ));
+                return diagnostics;
+            }
+            Err(error) => {
+                diagnostics.push(self.diagnostic(
+                    name,
+                    "error",
+                    format!("could not stat {}: {error}", path.display()),
+                ));
+                return diagnostics;
+            }
+        }
+
+        match fs::read_to_string(path) {
+            Ok(content) => match parse(&content) {
+                Ok(()) => diagnostics.push(self.diagnostic(
+                    name,
+                    "ok",
+                    format!("{} is valid", path.display()),
+                )),
+                Err(error) => diagnostics.push(self.diagnostic(
+                    name,
+                    "error",
+                    format!("{} is invalid TOML: {error}", path.display()),
+                )),
+            },
+            Err(error) => diagnostics.push(self.diagnostic(
+                name,
+                "error",
+                format!("could not read {}: {error}", path.display()),
+            )),
+        }
+        diagnostics
+    }
+
+    fn text_file_check(&self, name: &str, path: &Path, max_bytes: u64) -> AgentHomeDiagnostic {
+        match fs::metadata(path) {
+            Ok(metadata) if !metadata.is_file() => {
+                self.diagnostic(name, "error", format!("{} is not a file", path.display()))
+            }
+            Ok(metadata) if metadata.len() > max_bytes => self.diagnostic(
+                name,
+                "warn",
+                format!(
+                    "{} is {} bytes; limit is {max_bytes}",
+                    path.display(),
+                    metadata.len()
+                ),
+            ),
+            Ok(_) => self.diagnostic(name, "ok", format!("{} exists", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.diagnostic(name, "warn", format!("{} is missing", path.display()))
+            }
+            Err(error) => self.diagnostic(
+                name,
+                "error",
+                format!("could not stat {}: {error}", path.display()),
+            ),
+        }
+    }
+
+    fn diagnostic(
+        &self,
+        name: &str,
+        status: impl Into<String>,
+        message: impl Into<String>,
+    ) -> AgentHomeDiagnostic {
+        AgentHomeDiagnostic {
+            name: format!("{}/{}", self.agent_id, name),
+            status: status.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Template metadata used to initialize an agent home.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentHomeTemplate {
+    /// Stable agent ID.
+    pub agent_id: AgentId,
+    /// User-visible agent name.
+    pub display_name: String,
+    /// Agent role.
+    pub role: String,
+    /// Parent agent ID when this is a child/subagent.
+    pub parent_agent_id: Option<AgentId>,
+    /// Default model selection.
+    pub model: String,
+}
+
+impl AgentHomeTemplate {
+    /// Creates a template descriptor.
+    pub fn new(
+        agent_id: AgentId,
+        display_name: impl Into<String>,
+        role: impl Into<String>,
+        parent_agent_id: Option<AgentId>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            agent_id,
+            display_name: display_name.into(),
+            role: role.into(),
+            parent_agent_id,
+            model: model.into(),
+        }
+    }
+}
+
+/// Typed `AGENT.toml` metadata.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AgentMetadataToml {
+    /// Agent identity and display metadata.
+    pub agent: AgentIdentityToml,
+    /// Conventional files inside the agent home.
+    pub files: AgentFilesToml,
+}
+
+/// Identity section for `AGENT.toml`.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AgentIdentityToml {
+    /// Stable agent ID.
+    pub id: String,
+    /// User-visible agent name.
+    pub display_name: String,
+    /// Runtime role.
+    pub role: String,
+    /// Optional parent agent ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<String>,
+    /// Default model selection.
+    pub model: String,
+}
+
+impl Default for AgentIdentityToml {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            display_name: String::new(),
+            role: String::new(),
+            parent_agent_id: None,
+            model: "auto".to_owned(),
+        }
+    }
+}
+
+/// Conventional file paths section for `AGENT.toml`.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AgentFilesToml {
+    /// Persona markdown path.
+    pub persona: PathBuf,
+    /// Runtime instructions markdown path.
+    pub instructions: PathBuf,
+    /// User preferences markdown path.
+    pub user: PathBuf,
+    /// Agent memory markdown path.
+    pub memory: PathBuf,
+    /// Tool guidance markdown path.
+    pub tools: PathBuf,
+    /// Machine-readable policy TOML path.
+    pub policy: PathBuf,
+    /// Machine-readable skill policy TOML path.
+    pub skill_policy: PathBuf,
+}
+
+impl Default for AgentFilesToml {
+    fn default() -> Self {
+        Self {
+            persona: PathBuf::from("PERSONA.md"),
+            instructions: PathBuf::from("INSTRUCTIONS.md"),
+            user: PathBuf::from("USER.md"),
+            memory: PathBuf::from("MEMORY.md"),
+            tools: PathBuf::from("TOOLS.md"),
+            policy: PathBuf::from("POLICY.toml"),
+            skill_policy: PathBuf::from("SKILL_POLICY.toml"),
+        }
+    }
+}
+
+/// Typed `POLICY.toml` metadata. Runtime enforcement remains daemon/policy-owned.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AgentPolicyToml {
+    /// Policy capability defaults.
+    pub policy: AgentPolicyDefaultsToml,
+    /// Sandbox path defaults.
+    pub sandbox: AgentSandboxToml,
+    /// File-size guardrails for profile/agent doctor checks.
+    pub limits: AgentPolicyLimitsToml,
+}
+
+/// Policy defaults section for `POLICY.toml`.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AgentPolicyDefaultsToml {
+    /// Schema version for future migrations.
+    pub version: u32,
+    /// Default workspace access metadata.
+    pub default_workspace_access: Vec<WorkspaceAccess>,
+    /// Whether network-capable tools are allowed without additional policy.
+    pub allow_network: bool,
+    /// Whether secret access is allowed without additional policy.
+    pub allow_secret_access: bool,
+    /// Whether system-changing tools are allowed without additional policy.
+    pub allow_system_change: bool,
+    /// Whether non-safe actions require approval.
+    pub approval_required: bool,
+}
+
+impl Default for AgentPolicyDefaultsToml {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            default_workspace_access: vec![WorkspaceAccess::Read],
+            allow_network: false,
+            allow_secret_access: false,
+            allow_system_change: false,
+            approval_required: true,
+        }
+    }
+}
+
+/// Sandbox defaults section for `POLICY.toml`.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AgentSandboxToml {
+    /// Default sandbox mode label.
+    pub default: String,
+    /// Metadata denied paths. Track D/tool runtime owns enforcement.
+    pub denied_paths: Vec<PathBuf>,
+}
+
+impl Default for AgentSandboxToml {
+    fn default() -> Self {
+        Self {
+            default: "workspace".to_owned(),
+            denied_paths: default_agent_denied_paths(),
+        }
+    }
+}
+
+/// Doctor guardrail limits section for `POLICY.toml`.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AgentPolicyLimitsToml {
+    /// Maximum `AGENT.toml` size.
+    pub max_agent_toml_bytes: u64,
+    /// Maximum `POLICY.toml` size.
+    pub max_policy_toml_bytes: u64,
+    /// Maximum persona/instruction/user/tool guidance file size.
+    pub max_text_file_bytes: u64,
+    /// Maximum memory markdown file size.
+    pub max_memory_file_bytes: u64,
+}
+
+impl Default for AgentPolicyLimitsToml {
+    fn default() -> Self {
+        Self {
+            max_agent_toml_bytes: 64 * 1024,
+            max_policy_toml_bytes: 64 * 1024,
+            max_text_file_bytes: 128 * 1024,
+            max_memory_file_bytes: 1024 * 1024,
+        }
+    }
+}
+
+/// Typed `SKILL_POLICY.toml` metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SkillPolicyToml {
+    /// Whether agent-local skills are active.
+    pub enabled: bool,
+    /// Skill precedence labels for this agent home.
+    pub precedence: Vec<String>,
+    /// Whether generated skill candidates require review.
+    pub require_review: bool,
+}
+
+impl Default for SkillPolicyToml {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            precedence: vec![
+                "agent".to_owned(),
+                "workspace".to_owned(),
+                "profile".to_owned(),
+            ],
+            require_review: true,
+        }
+    }
+}
+
+/// Agent-home doctor options.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentHomeDoctorOptions {
+    /// Maximum `AGENT.toml` size.
+    pub max_agent_toml_bytes: u64,
+    /// Maximum `POLICY.toml` size.
+    pub max_policy_toml_bytes: u64,
+    /// Maximum persona/instruction/user/tool guidance file size.
+    pub max_text_file_bytes: u64,
+    /// Maximum memory markdown file size.
+    pub max_memory_file_bytes: u64,
+}
+
+impl Default for AgentHomeDoctorOptions {
+    fn default() -> Self {
+        let limits = AgentPolicyLimitsToml::default();
+        Self {
+            max_agent_toml_bytes: limits.max_agent_toml_bytes,
+            max_policy_toml_bytes: limits.max_policy_toml_bytes,
+            max_text_file_bytes: limits.max_text_file_bytes,
+            max_memory_file_bytes: limits.max_memory_file_bytes,
+        }
+    }
+}
+
+/// One profile/agent-home doctor diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentHomeDiagnostic {
+    /// Check name.
+    pub name: String,
+    /// `ok`, `warn`, or `error`.
+    pub status: String,
+    /// Human-readable diagnostic.
+    pub message: String,
 }
 
 /// Profile-local workspace registry stored as TOML.
@@ -1509,8 +2054,91 @@ fn profile_gitignore_template() -> &'static str {
     ".env\nsecrets/\nchannels/\nsessions/\nworkers/\ncheckpoints/\nsandboxes/\nlogs/\nlocks/\nrun/\n*.key\n*.pem\n*.token\n*.sqlite-wal\n*.sqlite-shm\n"
 }
 
+fn agent_toml_template(template: &AgentHomeTemplate) -> Result<String, StoreError> {
+    let metadata = AgentMetadataToml {
+        agent: AgentIdentityToml {
+            id: template.agent_id.to_string(),
+            display_name: template.display_name.clone(),
+            role: template.role.clone(),
+            parent_agent_id: template.parent_agent_id.as_ref().map(ToString::to_string),
+            model: template.model.clone(),
+        },
+        files: AgentFilesToml::default(),
+    };
+    let mut toml = redact(&toml::to_string_pretty(&metadata)?);
+    if !toml.ends_with('\n') {
+        toml.push('\n');
+    }
+    Ok(toml)
+}
+
+fn agent_policy_toml_template() -> Result<String, StoreError> {
+    let mut toml = toml::to_string_pretty(&AgentPolicyToml::default())?;
+    if !toml.ends_with('\n') {
+        toml.push('\n');
+    }
+    Ok(toml)
+}
+
+fn skill_policy_toml_template() -> Result<String, StoreError> {
+    let mut toml = toml::to_string_pretty(&SkillPolicyToml::default())?;
+    if !toml.ends_with('\n') {
+        toml.push('\n');
+    }
+    Ok(toml)
+}
+
+fn persona_template(template: &AgentHomeTemplate) -> String {
+    format!(
+        "# Persona\n\n{} is a CADIS agent with the {} role.\n",
+        template.display_name, template.role
+    )
+}
+
+fn instructions_template(template: &AgentHomeTemplate) -> String {
+    format!(
+        "# Instructions\n\nFollow CADIS daemon-owned policy and workspace grants for the {} role.\n",
+        template.role
+    )
+}
+
+fn user_template() -> &'static str {
+    "# User\n\nProfile-specific user preferences may be summarized here.\n"
+}
+
+fn memory_template() -> &'static str {
+    "# Memory\n\nDurable agent memory notes may be promoted here after review.\n"
+}
+
+fn tools_template() -> &'static str {
+    "# Tools\n\nThis file is guidance only. Hard permissions belong in POLICY.toml and daemon policy.\n"
+}
+
+fn agent_readme_template() -> &'static str {
+    "# Agent Home\n\nThis directory stores persistent agent identity, instructions, memory, skills, and policy metadata. It is not a project workspace.\n"
+}
+
 fn project_gitignore_template() -> &'static str {
     "worktrees/\nartifacts/\ntmp/\nlogs/\n*.key\n*.pem\n*.token\n.env\n"
+}
+
+fn default_agent_denied_paths() -> Vec<PathBuf> {
+    [
+        "~/.ssh",
+        "~/.aws",
+        "~/.gnupg",
+        "~/.config/gcloud",
+        "~/.cadis/profiles/*/.env",
+        "~/.cadis/profiles/*/secrets",
+        "~/.cadis/profiles/*/channels/*/tokens",
+        "/etc",
+        "/dev",
+        "/proc",
+        "/sys",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
 }
 
 fn expand_home(path: &Path) -> PathBuf {
@@ -1951,6 +2579,93 @@ mod tests {
         let registry =
             fs::read_to_string(profile.workspace_registry_path()).expect("registry should exist");
         assert_eq!(registry, "workspace = []\n");
+    }
+
+    #[test]
+    fn agent_home_initializes_typed_templates() {
+        let config = test_config("agent-home");
+        let profile = CadisHome::new(&config.cadis_home)
+            .init_profile("default")
+            .expect("profile should initialize");
+        let template = AgentHomeTemplate::new(
+            AgentId::from("coder/main"),
+            "Coder",
+            "Coding",
+            Some(AgentId::from("main")),
+            "echo",
+        );
+
+        let agent = profile
+            .init_agent(&template)
+            .expect("agent home should initialize");
+
+        assert!(agent.root().ends_with("agents/coder_main"));
+        assert!(agent.root().join("PERSONA.md").is_file());
+        assert!(agent.root().join("INSTRUCTIONS.md").is_file());
+        assert!(agent.root().join("MEMORY.md").is_file());
+        assert!(agent.root().join("TOOLS.md").is_file());
+        assert!(agent.root().join("SKILL_POLICY.toml").is_file());
+        assert!(agent.root().join("memory/daily").is_dir());
+        assert!(agent.root().join("memory/decisions.md").is_file());
+
+        let metadata = agent.load_metadata().expect("AGENT.toml should parse");
+        assert_eq!(metadata.agent.id, "coder/main");
+        assert_eq!(metadata.agent.display_name, "Coder");
+        assert_eq!(metadata.agent.role, "Coding");
+        assert_eq!(metadata.agent.parent_agent_id.as_deref(), Some("main"));
+        assert_eq!(metadata.files.policy, PathBuf::from("POLICY.toml"));
+
+        let policy = agent.load_policy().expect("POLICY.toml should parse");
+        assert_eq!(policy.policy.version, 1);
+        assert_eq!(
+            policy.policy.default_workspace_access,
+            vec![WorkspaceAccess::Read]
+        );
+        assert!(policy
+            .sandbox
+            .denied_paths
+            .contains(&PathBuf::from("~/.ssh")));
+        assert!(policy.policy.approval_required);
+    }
+
+    #[test]
+    fn agent_doctor_reports_corrupt_and_oversized_files() {
+        let config = test_config("agent-doctor");
+        let profile = CadisHome::new(&config.cadis_home)
+            .init_profile("default")
+            .expect("profile should initialize");
+        let agent = profile
+            .init_agent(&AgentHomeTemplate::new(
+                AgentId::from("main"),
+                "CADIS",
+                "Orchestrator",
+                None,
+                "echo",
+            ))
+            .expect("agent home should initialize");
+
+        fs::write(agent.policy_toml_path(), "[policy\n").expect("corrupt policy should write");
+        fs::write(agent.root().join("PERSONA.md"), "x".repeat(128))
+            .expect("oversized persona should write");
+
+        let diagnostics = profile
+            .agent_doctor_diagnostics(AgentHomeDoctorOptions {
+                max_agent_toml_bytes: 1024,
+                max_policy_toml_bytes: 1024,
+                max_text_file_bytes: 16,
+                max_memory_file_bytes: 1024,
+            })
+            .expect("agent doctor should run");
+
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.name == "main/agent.POLICY.toml" && diagnostic.status == "error"
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.name == "main/agent.PERSONA.md" && diagnostic.status == "warn"
+        }));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.name == "profile.agents" && diagnostic.message == "1 agent home(s) found"
+        }));
     }
 
     #[test]

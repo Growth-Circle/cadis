@@ -326,8 +326,8 @@
 - [x] Document project `.cadis/media/` asset convention.
 - [x] Define workspace protocol/types.
 - [x] Implement `CADIS_HOME` and default `CADIS_PROFILE_HOME` resolver.
-- [ ] Implement profile home manager.
-- [ ] Implement agent home manager and templates.
+- [x] Implement profile home manager baseline.
+- [x] Implement agent home manager and templates.
 - [x] Implement workspace registry and aliases baseline.
 - [x] Implement workspace grants with expiry baseline.
 - [ ] Enforce denied paths across file, shell, git, and worker tools.
@@ -337,7 +337,7 @@
 - [ ] Persist worker artifacts under profile `artifacts/workers/`.
 - [ ] Add project `.cadis/media/` manifests for generated media.
 - [x] Add workspace doctor checks for project metadata mismatch and duplicate roots.
-- [ ] Add profile/agent doctor checks.
+- [x] Add profile/agent doctor checks for missing, corrupt, and oversized agent-home files.
 
 ## 16. Code Work Window
 
