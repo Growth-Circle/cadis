@@ -3,12 +3,14 @@
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+
+use reqwest::StatusCode;
 
 const CODEX_CLI_DEFAULT_BIN: &str = "codex";
 const CODEX_CLI_TIMEOUT: Duration = Duration::from_secs(300);
@@ -213,6 +215,29 @@ impl fmt::Display for ModelError {
 
 impl Error for ModelError {}
 
+fn provider_http_error(provider: &str, status: StatusCode) -> ModelError {
+    let is_auth_error = status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN;
+    let (code, retryable) = if is_auth_error {
+        ("model_auth_failed", false)
+    } else if status == StatusCode::TOO_MANY_REQUESTS {
+        ("provider_rate_limited", true)
+    } else if status == StatusCode::NOT_FOUND {
+        ("model_not_found", false)
+    } else if status.is_server_error() {
+        ("provider_unavailable", true)
+    } else if status.is_client_error() {
+        ("model_request_rejected", false)
+    } else {
+        ("provider_http_error", false)
+    };
+
+    ModelError::with_code(
+        code,
+        format!("{provider} returned HTTP status {status}"),
+        retryable,
+    )
+}
+
 /// Conservative provider readiness exposed by the model catalog.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderReadiness {
@@ -363,7 +388,13 @@ impl ModelProvider for OllamaProvider {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
-            .map_err(|error| ModelError::new(format!("failed to create Ollama client: {error}")))?;
+            .map_err(|error| {
+                ModelError::with_code(
+                    "provider_client_error",
+                    format!("failed to create Ollama client: {error}"),
+                    false,
+                )
+            })?;
 
         let response = client
             .post(format!("{}/api/generate", self.endpoint))
@@ -373,21 +404,29 @@ impl ModelProvider for OllamaProvider {
                 stream: false,
             })
             .send()
-            .map_err(|error| ModelError::new(format!("Ollama request failed: {error}")))?;
+            .map_err(|_| {
+                ModelError::with_code("provider_unavailable", "Ollama request failed", true)
+            })?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(ModelError::new(format!(
-                "Ollama returned HTTP status {status}"
-            )));
+            return Err(provider_http_error("Ollama", status));
         }
 
-        let body = response
-            .json::<OllamaGenerateResponse>()
-            .map_err(|error| ModelError::new(format!("Ollama response was invalid: {error}")))?;
+        let body = response.json::<OllamaGenerateResponse>().map_err(|error| {
+            ModelError::with_code(
+                "provider_response_invalid",
+                format!("Ollama response was invalid: {error}"),
+                false,
+            )
+        })?;
 
         if let Some(error) = body.error {
-            return Err(ModelError::new(format!("Ollama error: {error}")));
+            return Err(ModelError::with_code(
+                "model_request_rejected",
+                format!("Ollama error: {error}"),
+                false,
+            ));
         }
 
         Ok(chunk_text(body.response.as_deref().unwrap_or_default()))
@@ -450,15 +489,23 @@ impl ModelProvider for OpenAiProvider {
 
     fn chat(&self, prompt: &str) -> Result<Vec<String>, ModelError> {
         if self.api_key.trim().is_empty() {
-            return Err(ModelError::new(
+            return Err(ModelError::with_code(
+                "model_auth_missing",
                 "OpenAI provider requires OPENAI_API_KEY or CADIS_OPENAI_API_KEY",
+                false,
             ));
         }
 
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
-            .map_err(|_| ModelError::new("failed to create OpenAI client"))?;
+            .map_err(|_| {
+                ModelError::with_code(
+                    "provider_client_error",
+                    "failed to create OpenAI client",
+                    false,
+                )
+            })?;
 
         let response = client
             .post(format!("{}/chat/completions", self.base_url))
@@ -471,18 +518,22 @@ impl ModelProvider for OpenAiProvider {
                 }],
             })
             .send()
-            .map_err(|_| ModelError::new("OpenAI request failed"))?;
+            .map_err(|_| {
+                ModelError::with_code("provider_unavailable", "OpenAI request failed", true)
+            })?;
 
         let status = response.status();
         if !status.is_success() {
-            return Err(ModelError::new(format!(
-                "OpenAI returned HTTP status {status}"
-            )));
+            return Err(provider_http_error("OpenAI", status));
         }
 
-        let body = response
-            .json::<OpenAiChatResponse>()
-            .map_err(|_| ModelError::new("OpenAI response was invalid"))?;
+        let body = response.json::<OpenAiChatResponse>().map_err(|_| {
+            ModelError::with_code(
+                "provider_response_invalid",
+                "OpenAI response was invalid",
+                false,
+            )
+        })?;
         let content = body
             .choices
             .first()
@@ -490,7 +541,11 @@ impl ModelProvider for OpenAiProvider {
             .unwrap_or_default();
 
         if content.is_empty() {
-            return Err(ModelError::new("OpenAI response was empty"));
+            return Err(ModelError::with_code(
+                "provider_response_empty",
+                "OpenAI response was empty",
+                true,
+            ));
         }
 
         Ok(chunk_text(content))
@@ -554,7 +609,11 @@ impl ModelProvider for CodexCliProvider {
     fn chat(&self, prompt: &str) -> Result<Vec<String>, ModelError> {
         let output = run_codex_exec(&self.command, prompt, self.timeout)?;
         if !output.status.success() {
-            return Err(ModelError::new(format_codex_failure(&output)));
+            return Err(ModelError::with_code(
+                "codex_cli_failed",
+                format_codex_failure(&output),
+                false,
+            ));
         }
 
         Ok(chunk_text(output.stdout.trim()))
@@ -649,13 +708,21 @@ fn run_codex_exec(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                ModelError::new(format!(
+            if error.kind() == ErrorKind::NotFound {
+                ModelError::with_code(
+                    "codex_cli_missing",
+                    format!(
                     "Codex CLI binary '{}' was not found. Install the official Codex CLI, run `codex login`, or set CADIS_CODEX_BIN.",
                     command.bin
-                ))
+                    ),
+                    false,
+                )
             } else {
-                ModelError::new(format!("failed to start Codex CLI '{}': {error}", command.bin))
+                ModelError::with_code(
+                    "codex_cli_start_failed",
+                    format!("failed to start Codex CLI '{}': {error}", command.bin),
+                    false,
+                )
             }
         })?;
 
@@ -666,30 +733,41 @@ fn run_codex_exec(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(ModelError::new(format!(
-                    "failed to send prompt to Codex CLI: {error}"
-                )));
+                return Err(ModelError::with_code(
+                    "codex_cli_io_error",
+                    format!("failed to send prompt to Codex CLI: {error}"),
+                    false,
+                ));
             }
         }
     }
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ModelError::new("failed to capture Codex CLI stdout"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| ModelError::new("failed to capture Codex CLI stderr"))?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ModelError::with_code(
+            "codex_cli_io_error",
+            "failed to capture Codex CLI stdout",
+            false,
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        ModelError::with_code(
+            "codex_cli_io_error",
+            "failed to capture Codex CLI stderr",
+            false,
+        )
+    })?;
     let stdout_reader = read_pipe(stdout);
     let stderr_reader = read_pipe(stderr);
 
     let started = std::time::Instant::now();
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| ModelError::new(format!("failed to wait for Codex CLI: {error}")))?
-        {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            ModelError::with_code(
+                "codex_cli_wait_failed",
+                format!("failed to wait for Codex CLI: {error}"),
+                false,
+            )
+        })? {
             let stderr = join_pipe(stderr_reader, "stderr")?;
             drop(stderr);
             return Ok(CodexCliOutput {
@@ -703,11 +781,15 @@ fn run_codex_exec(
             let _ = child.wait();
             let _ = join_pipe(stdout_reader, "stdout");
             let _ = join_pipe(stderr_reader, "stderr");
-            return Err(ModelError::new(format!(
-                "Codex CLI timed out after {} seconds while running `{} exec`.",
-                timeout.as_secs(),
-                command.bin
-            )));
+            return Err(ModelError::with_code(
+                "codex_cli_timeout",
+                format!(
+                    "Codex CLI timed out after {} seconds while running `{} exec`.",
+                    timeout.as_secs(),
+                    command.bin
+                ),
+                true,
+            ));
         }
 
         thread::sleep(Duration::from_millis(50));
@@ -731,8 +813,20 @@ fn join_pipe(
 ) -> Result<String, ModelError> {
     handle
         .join()
-        .map_err(|_| ModelError::new(format!("Codex CLI {label} reader panicked")))?
-        .map_err(|error| ModelError::new(format!("failed to read Codex CLI {label}: {error}")))
+        .map_err(|_| {
+            ModelError::with_code(
+                "codex_cli_io_error",
+                format!("Codex CLI {label} reader panicked"),
+                false,
+            )
+        })?
+        .map_err(|error| {
+            ModelError::with_code(
+                "codex_cli_io_error",
+                format!("failed to read Codex CLI {label}: {error}"),
+                false,
+            )
+        })
 }
 
 fn parse_extra_args(input: &str) -> Result<Vec<String>, ModelError> {
@@ -763,9 +857,11 @@ fn parse_extra_args(input: &str) -> Result<Vec<String>, ModelError> {
     }
 
     if let Some(active_quote) = quote {
-        return Err(ModelError::new(format!(
-            "CADIS_CODEX_EXTRA_ARGS has an unterminated {active_quote} quote"
-        )));
+        return Err(ModelError::with_code(
+            "codex_cli_args_invalid",
+            format!("CADIS_CODEX_EXTRA_ARGS has an unterminated {active_quote} quote"),
+            false,
+        ));
     }
 
     if !current.is_empty() {
@@ -795,9 +891,11 @@ fn validate_codex_extra_args(args: &[String]) -> Result<(), ModelError> {
             .iter()
             .any(|blocked| arg == blocked || arg.starts_with(&format!("{blocked}=")))
         {
-            return Err(ModelError::new(format!(
-                "CADIS_CODEX_EXTRA_ARGS contains unsupported unsafe option: {arg}"
-            )));
+            return Err(ModelError::with_code(
+                "codex_cli_args_unsafe",
+                format!("CADIS_CODEX_EXTRA_ARGS contains unsupported unsafe option: {arg}"),
+                false,
+            ));
         }
     }
     Ok(())
@@ -1235,6 +1333,41 @@ mod tests {
     }
 
     #[test]
+    fn ollama_connection_failure_has_structured_error() {
+        let provider = OllamaProvider::new("http://127.0.0.1:1", "llama3.2");
+
+        let error = provider
+            .chat_with_request(
+                ModelRequest::new("hello").with_selected_model(Some("ollama/llama3.2")),
+            )
+            .expect_err("closed localhost port should fail");
+
+        assert_eq!(error.code(), "provider_unavailable");
+        assert!(error.retryable());
+        assert_eq!(
+            error
+                .invocation()
+                .map(|invocation| invocation.effective_provider.as_str()),
+            Some("ollama")
+        );
+    }
+
+    #[test]
+    fn http_status_errors_are_structured() {
+        let auth_error = provider_http_error("OpenAI", StatusCode::UNAUTHORIZED);
+        assert_eq!(auth_error.code(), "model_auth_failed");
+        assert!(!auth_error.retryable());
+
+        let rate_limit = provider_http_error("OpenAI", StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(rate_limit.code(), "provider_rate_limited");
+        assert!(rate_limit.retryable());
+
+        let server_error = provider_http_error("Ollama", StatusCode::BAD_GATEWAY);
+        assert_eq!(server_error.code(), "provider_unavailable");
+        assert!(server_error.retryable());
+    }
+
+    #[test]
     fn router_uses_per_agent_echo_model_selection() {
         let provider = provider_from_config(
             "openai",
@@ -1337,6 +1470,8 @@ mod tests {
         let error =
             parse_extra_args("--sandbox danger-full-access").expect_err("unsafe arg should fail");
 
+        assert_eq!(error.code(), "codex_cli_args_unsafe");
+        assert!(!error.retryable());
         assert!(error
             .to_string()
             .contains("unsupported unsafe option: --sandbox"));
@@ -1352,6 +1487,8 @@ mod tests {
         let error =
             run_codex_exec(&command, "hello", Duration::from_millis(10)).expect_err("missing bin");
 
+        assert_eq!(error.code(), "codex_cli_missing");
+        assert!(!error.retryable());
         assert!(error.to_string().contains("Codex CLI binary"));
     }
 }

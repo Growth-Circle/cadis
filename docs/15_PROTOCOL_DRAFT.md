@@ -377,6 +377,25 @@ Model-backed `message.delta` and `message.completed` payloads may include a
 actually served the request. When fallback occurs, `fallback` is true and
 `fallback_reason` may contain a redacted reason suitable for logs and clients.
 
+Model provider failures use the normal `ErrorPayload` shape on `session.failed`
+events:
+
+```json
+{
+  "code": "provider_unavailable",
+  "message": "Ollama request failed",
+  "retryable": true
+}
+```
+
+Clients should treat `code` and `retryable` as the machine-readable fields.
+Provider error messages are for display only and must be redacted before they
+reach protocol events or logs. Common Track B provider codes are
+`model_auth_missing`, `model_auth_failed`, `provider_client_error`,
+`provider_unavailable`, `provider_rate_limited`, `provider_http_error`,
+`model_not_found`, `model_request_rejected`, `provider_response_invalid`,
+`provider_response_empty`, and `codex_cli_*`.
+
 ## 5. Content Kind
 
 ```text

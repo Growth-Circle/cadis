@@ -4202,6 +4202,40 @@ mod tests {
     }
 
     #[test]
+    fn message_send_surfaces_structured_provider_error() {
+        let provider = provider_from_config(
+            "openai",
+            "http://127.0.0.1:11434",
+            "llama3.2",
+            "https://api.openai.com/v1",
+            "gpt-5.2",
+            None,
+        );
+        let mut runtime = runtime_with_provider(provider, "openai");
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_chat"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("main")),
+                content: "hello".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::SessionFailed(error)
+                    if error.code == "model_auth_missing"
+                        && !error.retryable
+                        && error.message.contains("OpenAI provider requires")
+            )
+        }));
+    }
+
+    #[test]
     fn agent_list_returns_roster_snapshot() {
         let mut runtime = runtime();
         let outcome = runtime.handle_request(RequestEnvelope::new(
