@@ -381,7 +381,7 @@ pub enum ClientRequest {
     SessionCancel(SessionTargetRequest),
     /// Subscribe to a session stream.
     #[serde(rename = "session.subscribe")]
-    SessionSubscribe(SessionTargetRequest),
+    SessionSubscribe(SessionSubscriptionRequest),
     /// Unsubscribe from a session stream.
     #[serde(rename = "session.unsubscribe")]
     SessionUnsubscribe(SessionTargetRequest),
@@ -495,6 +495,22 @@ pub struct SessionCreateRequest {
 pub struct SessionTargetRequest {
     /// Target session ID.
     pub session_id: SessionId,
+}
+
+/// Payload for subscribing to one session's event stream.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct SessionSubscriptionRequest {
+    /// Target session ID.
+    pub session_id: SessionId,
+    /// Optional event ID. Buffered replay starts after this ID when still retained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since_event_id: Option<EventId>,
+    /// Maximum buffered matching events to replay before live events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_limit: Option<u32>,
+    /// Whether the daemon should send the current session state before replay.
+    #[serde(default = "default_true")]
+    pub include_snapshot: bool,
 }
 
 /// Payload for a user message.
@@ -1475,6 +1491,38 @@ mod tests {
     }
 
     #[test]
+    fn session_subscription_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
+                session_id: SessionId::from("ses_1"),
+                since_event_id: Some(EventId::from("evt_000010")),
+                replay_limit: Some(16),
+                include_snapshot: true,
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_1",
+                "client_id": "cli_1",
+                "type": "session.subscribe",
+                "payload": {
+                    "session_id": "ses_1",
+                    "since_event_id": "evt_000010",
+                    "replay_limit": 16,
+                    "include_snapshot": true
+                }
+            })
+        );
+    }
+
+    #[test]
     fn tool_call_request_matches_documented_shape() {
         let envelope = RequestEnvelope::new(
             RequestId::from("req_1"),
@@ -1608,6 +1656,32 @@ mod tests {
         match envelope.request {
             ClientRequest::EventsSubscribe(payload) => {
                 assert!(payload.include_snapshot);
+                assert_eq!(payload.since_event_id, None);
+                assert_eq!(payload.replay_limit, None);
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_subscription_defaults_include_snapshot() {
+        let value = json!({
+            "protocol_version": CURRENT_PROTOCOL_VERSION,
+            "request_id": "req_1",
+            "client_id": "cli_1",
+            "type": "session.subscribe",
+            "payload": {
+                "session_id": "ses_1"
+            }
+        });
+
+        let envelope =
+            serde_json::from_value::<RequestEnvelope>(value).expect("request should parse");
+
+        match envelope.request {
+            ClientRequest::SessionSubscribe(payload) => {
+                assert!(payload.include_snapshot);
+                assert_eq!(payload.session_id.as_str(), "ses_1");
                 assert_eq!(payload.since_event_id, None);
                 assert_eq!(payload.replay_limit, None);
             }

@@ -109,10 +109,10 @@
 - [x] Add daemon config loader.
 - [x] Add daemon health status.
 - [x] Add local transport listener.
-- [ ] Add event bus.
-- [ ] Add event fan-out to multiple clients.
+- [x] Add event bus.
+- [x] Add event fan-out to multiple clients.
 - [x] Add `session.subscribe` protocol/request baseline.
-- [ ] Add live persistent `session.subscribe` stream.
+- [x] Add live persistent `session.subscribe` stream.
 - [ ] Avoid blocking daemon mutex during model generation.
 - [x] Add session registry.
 - [ ] Add shutdown handling.

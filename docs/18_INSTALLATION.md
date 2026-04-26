@@ -164,8 +164,8 @@ target/release/cadis chat "hello"
 - No native file/shell tool runtime yet.
 - Approval commands exist in the CLI protocol surface but approval storage and tool gating are not implemented yet.
 - Protocol types exist for orchestrator route, `session.subscribe`, and worker
-  events, but live multi-client event fan-out and worker execution are not
-  implemented yet.
+  events. Live event fan-out exists for daemon-wide and session-filtered
+  streams, but worker execution is not implemented yet.
 - Telegram, production daemon-owned voice output, full HUD parity, and code work window are not implemented yet.
 - The Tauri HUD is source-built for now; packaged desktop artifacts are not published yet.
 

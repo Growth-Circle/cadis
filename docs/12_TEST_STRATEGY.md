@@ -149,5 +149,5 @@ frontend dependency failure is visible:
 - HUD native shell check runs `cargo check --manifest-path apps/cadis-hud/src-tauri/Cargo.toml --locked`
 - browser preview and Playwright E2E are local or later-stage checks until stable enough for required CI
 - current orchestrator coverage should include route events, agent status events,
-  request-driven spawn limits, and the fact that live `session.subscribe`
-  fan-out is not implemented yet
+  request-driven spawn limits, and live `session.subscribe` fan-out to multiple
+  session-filtered subscribers

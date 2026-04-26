@@ -13,7 +13,8 @@ use cadis_core::{Runtime, RuntimeOptions};
 use cadis_models::provider_from_config;
 use cadis_protocol::{
     ClientRequest, DaemonResponse, ErrorPayload, EventEnvelope, EventId, EventSubscriptionRequest,
-    RequestEnvelope, RequestId, ResponseEnvelope, ServerFrame,
+    RequestEnvelope, RequestId, ResponseEnvelope, ServerFrame, SessionId,
+    SessionSubscriptionRequest,
 };
 use cadis_store::{
     ensure_layout, load_config, openai_api_key_from_env, redact, CadisConfig, EventLog,
@@ -147,7 +148,12 @@ where
         match serde_json::from_str::<RequestEnvelope>(&line) {
             Ok(envelope) => {
                 let subscription = match &envelope.request {
-                    ClientRequest::EventsSubscribe(request) => Some(request.clone()),
+                    ClientRequest::EventsSubscribe(request) => {
+                        Some(EventBusSubscription::all(request))
+                    }
+                    ClientRequest::SessionSubscribe(request) => {
+                        Some(EventBusSubscription::session(request))
+                    }
                     _ => None,
                 };
                 let snapshot_only = matches!(envelope.request, ClientRequest::EventsSnapshot(_));
@@ -155,15 +161,21 @@ where
                     .lock()
                     .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
                     .handle_request(envelope);
+                let accepted_subscription = matches!(
+                    &outcome.response.response,
+                    DaemonResponse::RequestAccepted(_)
+                )
+                .then_some(subscription)
+                .flatten();
 
                 write_frame(&mut writer, &ServerFrame::Response(outcome.response))?;
 
-                if let Some(subscription) = subscription {
+                if let Some(subscription) = accepted_subscription {
                     for event in outcome.events {
                         write_frame(&mut writer, &ServerFrame::Event(event))?;
                     }
 
-                    let (replay, receiver) = event_bus.subscribe(&subscription);
+                    let (replay, receiver) = event_bus.subscribe(subscription);
                     for event in replay {
                         write_frame(&mut writer, &ServerFrame::Event(event))?;
                     }
@@ -213,7 +225,56 @@ struct EventBus {
 
 struct EventBusInner {
     replay: VecDeque<EventEnvelope>,
-    subscribers: Vec<mpsc::Sender<EventEnvelope>>,
+    subscribers: Vec<EventSubscriber>,
+}
+
+struct EventSubscriber {
+    subscription: EventBusSubscription,
+    sender: mpsc::Sender<EventEnvelope>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EventBusSubscription {
+    since_event_id: Option<EventId>,
+    replay_limit: Option<u32>,
+    filter: EventFilter,
+}
+
+impl EventBusSubscription {
+    fn all(request: &EventSubscriptionRequest) -> Self {
+        Self {
+            since_event_id: request.since_event_id.clone(),
+            replay_limit: request.replay_limit,
+            filter: EventFilter::All,
+        }
+    }
+
+    fn session(request: &SessionSubscriptionRequest) -> Self {
+        Self {
+            since_event_id: request.since_event_id.clone(),
+            replay_limit: request.replay_limit,
+            filter: EventFilter::Session(request.session_id.clone()),
+        }
+    }
+
+    fn matches(&self, event: &EventEnvelope) -> bool {
+        self.filter.matches(event)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EventFilter {
+    All,
+    Session(SessionId),
+}
+
+impl EventFilter {
+    fn matches(&self, event: &EventEnvelope) -> bool {
+        match self {
+            Self::All => true,
+            Self::Session(session_id) => event.session_id.as_ref() == Some(session_id),
+        }
+    }
 }
 
 impl EventBus {
@@ -240,14 +301,15 @@ impl EventBus {
             inner.replay.push_back(event.clone());
         }
 
-        inner
-            .subscribers
-            .retain(|subscriber| subscriber.send(event.clone()).is_ok());
+        inner.subscribers.retain(|subscriber| {
+            !subscriber.subscription.matches(&event)
+                || subscriber.sender.send(event.clone()).is_ok()
+        });
     }
 
     fn subscribe(
         &self,
-        request: &EventSubscriptionRequest,
+        subscription: EventBusSubscription,
     ) -> (Vec<EventEnvelope>, mpsc::Receiver<EventEnvelope>) {
         let (sender, receiver) = mpsc::channel();
         let Ok(mut inner) = self.inner.lock() else {
@@ -257,11 +319,15 @@ impl EventBus {
 
         let replay = bounded_replay(
             &inner.replay,
-            request.since_event_id.as_ref(),
-            request.replay_limit,
+            subscription.since_event_id.as_ref(),
+            subscription.replay_limit,
             self.max_replay,
+            &subscription.filter,
         );
-        inner.subscribers.push(sender);
+        inner.subscribers.push(EventSubscriber {
+            subscription,
+            sender,
+        });
         (replay, receiver)
     }
 }
@@ -271,6 +337,7 @@ fn bounded_replay(
     since_event_id: Option<&EventId>,
     replay_limit: Option<u32>,
     max_replay: usize,
+    filter: &EventFilter,
 ) -> Vec<EventEnvelope> {
     let limit = replay_limit
         .and_then(|limit| usize::try_from(limit).ok())
@@ -284,7 +351,12 @@ fn bounded_replay(
         .and_then(|event_id| replay.iter().position(|event| &event.event_id == event_id))
         .map(|index| index + 1)
         .unwrap_or(0);
-    let available = replay.iter().skip(start_index).cloned().collect::<Vec<_>>();
+    let available = replay
+        .iter()
+        .skip(start_index)
+        .filter(|event| filter.matches(event))
+        .cloned()
+        .collect::<Vec<_>>();
     let start = available.len().saturating_sub(limit);
     available[start..].to_vec()
 }
@@ -292,7 +364,7 @@ fn bounded_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cadis_protocol::{CadisEvent, EmptyPayload, Timestamp};
+    use cadis_protocol::{CadisEvent, EmptyPayload, SessionEventPayload, Timestamp};
 
     #[test]
     fn bounded_replay_returns_events_after_retained_event_id() {
@@ -302,7 +374,13 @@ mod tests {
             event("evt_000003"),
         ]);
 
-        let events = bounded_replay(&replay, Some(&EventId::from("evt_000001")), Some(1), 8);
+        let events = bounded_replay(
+            &replay,
+            Some(&EventId::from("evt_000001")),
+            Some(1),
+            8,
+            &EventFilter::All,
+        );
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_id.as_str(), "evt_000003");
@@ -311,11 +389,12 @@ mod tests {
     #[test]
     fn event_bus_fans_out_published_runtime_events() {
         let bus = EventBus::new(8);
-        let (_replay, receiver) = bus.subscribe(&EventSubscriptionRequest {
-            include_snapshot: false,
-            replay_limit: Some(8),
-            since_event_id: None,
-        });
+        let (_replay, receiver) =
+            bus.subscribe(EventBusSubscription::all(&EventSubscriptionRequest {
+                include_snapshot: false,
+                replay_limit: Some(8),
+                since_event_id: None,
+            }));
 
         bus.publish(event("evt_000001"));
 
@@ -323,6 +402,82 @@ mod tests {
             .try_recv()
             .expect("subscriber should receive event");
         assert_eq!(received.event_id.as_str(), "evt_000001");
+    }
+
+    #[test]
+    fn event_bus_replays_only_matching_session_events() {
+        let bus = EventBus::new(8);
+        bus.publish(session_event("evt_000001", "ses_target"));
+        bus.publish(session_event("evt_000002", "ses_other"));
+        bus.publish(session_event("evt_000003", "ses_target"));
+
+        let (replay, _receiver) = bus.subscribe(EventBusSubscription {
+            since_event_id: Some(EventId::from("evt_000001")),
+            replay_limit: Some(8),
+            filter: EventFilter::Session(SessionId::from("ses_target")),
+        });
+
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].event_id.as_str(), "evt_000003");
+    }
+
+    #[test]
+    fn event_bus_fans_out_session_events_to_two_filtered_clients() {
+        let bus = EventBus::new(8);
+        let subscription = EventBusSubscription {
+            since_event_id: None,
+            replay_limit: Some(8),
+            filter: EventFilter::Session(SessionId::from("ses_target")),
+        };
+        let (_replay, left) = bus.subscribe(subscription.clone());
+        let (_replay, right) = bus.subscribe(subscription);
+
+        bus.publish(session_event("evt_000001", "ses_other"));
+        assert!(left.try_recv().is_err());
+        assert!(right.try_recv().is_err());
+
+        bus.publish(session_event("evt_000002", "ses_target"));
+
+        let left_event = left
+            .try_recv()
+            .expect("left subscriber should receive event");
+        let right_event = right
+            .try_recv()
+            .expect("right subscriber should receive event");
+        assert_eq!(left_event.event_id.as_str(), "evt_000002");
+        assert_eq!(right_event.event_id.as_str(), "evt_000002");
+    }
+
+    #[test]
+    fn event_bus_keeps_unmatched_filtered_subscribers() {
+        let bus = EventBus::new(8);
+        let (_replay, receiver) = bus.subscribe(EventBusSubscription {
+            since_event_id: None,
+            replay_limit: Some(8),
+            filter: EventFilter::Session(SessionId::from("ses_target")),
+        });
+
+        bus.publish(session_event("evt_000001", "ses_other"));
+        bus.publish(session_event("evt_000002", "ses_target"));
+
+        let received = receiver
+            .try_recv()
+            .expect("subscriber should remain attached until a matching event");
+        assert_eq!(received.event_id.as_str(), "evt_000002");
+    }
+
+    fn session_event(event_id: &str, session_id: &str) -> EventEnvelope {
+        let session_id = SessionId::from(session_id);
+        EventEnvelope::new(
+            EventId::from(event_id),
+            Timestamp::new_utc("2026-04-26T00:00:00Z").expect("timestamp should parse"),
+            "cadisd",
+            Some(session_id.clone()),
+            CadisEvent::SessionStarted(SessionEventPayload {
+                session_id,
+                title: None,
+            }),
+        )
     }
 
     fn event(event_id: &str) -> EventEnvelope {

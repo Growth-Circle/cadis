@@ -247,15 +247,19 @@ impl Runtime {
             }
             ClientRequest::SessionSubscribe(request) => {
                 if let Some(session) = self.sessions.get(&request.session_id) {
-                    let title = session.title.clone();
-                    let event = self.session_event(
-                        request.session_id.clone(),
-                        CadisEvent::SessionUpdated(SessionEventPayload {
-                            session_id: request.session_id,
-                            title,
-                        }),
-                    );
-                    self.accept(request_id, vec![event])
+                    let events = if request.include_snapshot {
+                        let title = session.title.clone();
+                        vec![self.session_event(
+                            request.session_id.clone(),
+                            CadisEvent::SessionUpdated(SessionEventPayload {
+                                session_id: request.session_id,
+                                title,
+                            }),
+                        )]
+                    } else {
+                        Vec::new()
+                    };
+                    self.accept(request_id, events)
                 } else {
                     self.reject(
                         request_id,
@@ -3336,9 +3340,9 @@ mod tests {
     use cadis_protocol::{
         AgentModelSetRequest, AgentRenameRequest, AgentSpawnRequest, ApprovalResponseRequest,
         ClientId, ContentKind, EmptyPayload, EventSubscriptionRequest, EventsSnapshotRequest,
-        MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest, SessionTargetRequest,
-        ToolCallRequest, WorkspaceAccess, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
-        WorkspaceRegisterRequest,
+        MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest,
+        SessionSubscriptionRequest, SessionTargetRequest, ToolCallRequest, WorkspaceAccess,
+        WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceRegisterRequest,
     };
 
     fn runtime() -> Runtime {
@@ -3740,8 +3744,11 @@ mod tests {
         let outcome = runtime.handle_request(RequestEnvelope::new(
             RequestId::from("req_subscribe_session"),
             ClientId::from("cli_1"),
-            ClientRequest::SessionSubscribe(SessionTargetRequest {
+            ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
                 session_id: session_id.clone(),
+                since_event_id: None,
+                replay_limit: None,
+                include_snapshot: true,
             }),
         ));
 
@@ -3770,7 +3777,12 @@ mod tests {
         let outcome = runtime.handle_request(RequestEnvelope::new(
             RequestId::from("req_subscribe_removed_session"),
             ClientId::from("cli_1"),
-            ClientRequest::SessionSubscribe(SessionTargetRequest { session_id }),
+            ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
+                session_id,
+                since_event_id: None,
+                replay_limit: None,
+                include_snapshot: true,
+            }),
         ));
 
         assert!(matches!(
@@ -4098,6 +4110,44 @@ mod tests {
             ClientRequest::EventsSubscribe(EventSubscriptionRequest {
                 include_snapshot: false,
                 ..EventSubscriptionRequest::default()
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome.events.is_empty());
+    }
+
+    #[test]
+    fn session_subscribe_can_skip_initial_snapshot() {
+        let mut runtime = runtime();
+        let create = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_create"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionCreate(SessionCreateRequest {
+                title: Some("Quiet session stream".to_owned()),
+                cwd: None,
+            }),
+        ));
+        let session_id = create
+            .events
+            .into_iter()
+            .find_map(|event| match event.event {
+                CadisEvent::SessionStarted(payload) => Some(payload.session_id),
+                _ => None,
+            })
+            .expect("session.started should be emitted");
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_subscribe"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
+                session_id,
+                since_event_id: None,
+                replay_limit: None,
+                include_snapshot: false,
             }),
         ));
 

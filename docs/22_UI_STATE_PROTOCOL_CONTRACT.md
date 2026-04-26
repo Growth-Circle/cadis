@@ -111,6 +111,25 @@ Sent when the HUD needs a one-shot daemon-owned state snapshot.
 The current desktop MVP snapshot is encoded as event frames, including
 `agent.list.response`, `ui.preferences.updated`, and `session.updated`.
 
+### `session.subscribe`
+
+Sent when a client wants only one session's events rather than the daemon-wide
+event stream.
+
+```json
+{
+  "type": "session.subscribe",
+  "session_id": "ses_...",
+  "replay_limit": 128,
+  "include_snapshot": true
+}
+```
+
+The daemon responds with `request.accepted`, then sends the current
+`session.updated` event, bounded replay, and live events whose envelope
+`session_id` matches the request. The HUD may use this for focused session panes
+while keeping daemon-wide `events.subscribe` as the main state feed.
+
 ### `message.send`
 
 Sent when the user submits text in the chat panel.
