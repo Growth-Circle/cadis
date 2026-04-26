@@ -6,9 +6,11 @@ The project name is written as `cadis` for packages, binaries, directories, and 
 
 ## Status
 
-Early implementation baseline. The first Rust crate, `cadis-protocol`, now defines the typed protocol contract; no production daemon runtime has been implemented yet.
+Desktop MVP implementation baseline. The repository now includes the typed protocol crate, a local `cadisd` daemon, a `cadis` CLI client, a native `cadis-hud` desktop prototype, JSONL event persistence with redaction, optional Ollama/OpenAI model adapters, a credential-free local fallback, and an official Codex CLI adapter for ChatGPT-plan auth.
 
-This repository starts from a clean architecture instead of using OpenClaw as the core backend. Codex-style coding capabilities may be integrated later through a separate compatibility or extraction layer after license, design, and performance review.
+Tools, approval-gated shell/file execution, workers, Telegram, full voice runtime, full HUD parity, and code work windows are still planned work.
+
+This repository starts from a clean architecture instead of using OpenClaw as the core backend. CADIS does not fork Codex CLI for v0.1; it can call the installed official CLI as an adapter while keeping daemon authority in `cadisd`.
 
 ## Product Direction
 
@@ -24,11 +26,38 @@ Android   -> cadisd
 
 The daemon owns orchestration, events, tools, policy, persistence, sessions, and approvals. Interfaces are clients only and must not contain core agent logic.
 
+## Quick Start
+
+Build from source:
+
+```bash
+cargo build --release
+```
+
+Start the daemon:
+
+```bash
+target/release/cadisd --check
+target/release/cadisd
+```
+
+In another terminal:
+
+```bash
+target/release/cadis status
+target/release/cadis doctor
+target/release/cadis models
+target/release/cadis chat "hello"
+target/release/cadis-hud
+```
+
+The default model mode is `auto`: CADIS tries Ollama at `http://127.0.0.1:11434` and falls back to a local credential-free response if Ollama is not running. To use OpenAI API billing, set `[model].provider = "openai"` and provide `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` in the daemon environment. To use ChatGPT Plus/Pro through Codex, install the official Codex CLI, run `codex login`, then set `[model].provider = "codex-cli"`.
+
 ## Initial Scope
 
 Linux desktop is the first target.
 
-The first engineering milestone is not a full GUI. The first milestone is a fast daemon, typed event protocol, local CLI client, basic model streaming, native tool dispatch, and central approval policy.
+The current MVP proves the daemon, typed event protocol, local CLI client, native HUD prototype, model response path, and event persistence. Native tool dispatch and central approval policy are next.
 
 ## Repository Layout
 

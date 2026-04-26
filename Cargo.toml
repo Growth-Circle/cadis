@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["crates/cadis-protocol"]
+members = [
+    "crates/cadis-cli",
+    "crates/cadis-core",
+    "crates/cadis-daemon",
+    "crates/cadis-hud",
+    "crates/cadis-models",
+    "crates/cadis-policy",
+    "crates/cadis-protocol",
+    "crates/cadis-store",
+]
 
 [workspace.package]
 edition = "2021"
@@ -10,8 +19,18 @@ homepage = "https://github.com/cadis-ai/cadis"
 readme = "README.md"
 
 [workspace.dependencies]
+cadis-core = { path = "crates/cadis-core" }
+cadis-models = { path = "crates/cadis-models" }
+cadis-policy = { path = "crates/cadis-policy" }
+cadis-protocol = { path = "crates/cadis-protocol" }
+cadis-store = { path = "crates/cadis-store" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+eframe = "0.29"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

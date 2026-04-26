@@ -158,6 +158,24 @@ Consequence:
 - Public protocol changes must update docs and tests together.
 - Higher-performance encodings can be evaluated later without replacing the typed contract.
 
+### ADR-012: Use egui for the first native HUD prototype
+
+Status: Accepted.
+
+Decision: The first CADIS HUD prototype uses `eframe/egui` as a Rust-native desktop client.
+
+Reason:
+
+- CADIS needs a window that can run immediately from the Rust workspace.
+- The HUD must remain a protocol client and must not add Node.js to the daemon.
+- `egui` supports custom-drawn orbital UI, low-radius panels, config controls, and a single Cargo-built binary.
+
+Consequence:
+
+- This is an operational prototype path, not a guarantee of final 100% RamaClaw visual parity.
+- Tauri + React and Dioxus remain valid future options if the project optimizes for exact RamaClaw parity or Rust-first WebView UI.
+- HUD state still belongs to `cadisd`; the UI only caches view state.
+
 ## Pending Decisions
 
 ### ADR-P001: First model provider
@@ -195,7 +213,7 @@ Options:
 
 Current recommendation:
 
-- If fastest 100% RamaClaw visual parity is required, use Tauri + React for the HUD client while keeping `cadisd` as the core. If Rust-first UI consistency is more important, use Dioxus and port the RamaClaw design system.
+- Use the accepted `egui` prototype for the first runnable desktop HUD. If fastest 100% RamaClaw visual parity is required later, use Tauri + React for the HUD client while keeping `cadisd` as the core. If Rust-first WebView UI consistency becomes more important, evaluate Dioxus.
 
 ### ADR-P004: TTS provider
 
@@ -221,7 +239,13 @@ Options:
 
 Current recommendation:
 
-- Do not import code during v0.1. Revisit after daemon, protocol, policy, and tool runtime are stable.
+- Do not import or fork Codex CLI code during v0.1.
+- Use an optional adapter to the installed official Codex CLI for ChatGPT-plan
+  auth experiments.
+- Keep `cadisd` as the authority boundary; the adapter must not read or persist
+  `~/.codex/auth.json`.
+- Revisit direct integration only after daemon, protocol, policy, and tool
+  runtime are stable.
 
 ## Decision Rules
 

@@ -78,6 +78,7 @@ Important boundaries:
 ## 6. Pre-Alpha Security Gates
 
 - Redaction tests pass.
+- Secret scan or equivalent credential-leak check passes before publishing.
 - Approval allow, deny, expire, and duplicate response tests pass.
 - Shell tool cannot run without policy decision.
 - Outside-workspace write is blocked or approval-gated.
@@ -90,4 +91,3 @@ Important boundaries:
 - Worktree cleanup reviewed.
 - Dependency license and security audit completed.
 - Known limitations published.
-

@@ -1,0 +1,15 @@
+[package]
+name = "cadis-policy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[dependencies]
+cadis-protocol.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

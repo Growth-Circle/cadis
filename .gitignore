@@ -3,8 +3,18 @@
 
 # CADIS local state
 .cadis/
+.cadis-*/
+cadis.toml
+config/cadis.toml
+config/*.local.toml
+!config/*.example.toml
 *.jsonl
+*.ndjson
 *.tmp
+*.sock
+*.pid
+hud-gateway.port
+cadisd.sock
 
 # Secrets
 .env
@@ -12,6 +22,31 @@
 !.env.example
 secrets/
 tokens/
+.codex/
+**/.codex/
+.openai/
+*.pem
+*.key
+*.p12
+*.pfx
+*.token
+*.secret
+*.credentials
+credentials.*
+auth.local.json
+codex-auth.json
+openai-auth.json
+.netrc
+id_rsa*
+id_ed25519*
+
+# Diagnostics that may contain prompts, headers, paths, or tokens
+*.har
+*.trace
+*.dmp
+*.crash
+crash-reports/
+diagnostics/
 
 # Editors
 .idea/
@@ -26,3 +61,15 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Desktop HUD/frontend artifacts
+apps/*/node_modules/
+apps/*/dist/
+apps/*/build/
+apps/*/.vite/
+apps/*/.dioxus/
+apps/*/src-tauri/target/
+apps/*/src-tauri/gen/
+*.tsbuildinfo
+playwright-report/
+test-results/

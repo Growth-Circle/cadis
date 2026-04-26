@@ -259,6 +259,39 @@ impl EventEnvelope {
     }
 }
 
+/// Response envelope emitted by `cadisd` for one client request.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct ResponseEnvelope {
+    /// Protocol version used by the daemon.
+    pub protocol_version: ProtocolVersion,
+    /// Request ID this response belongs to.
+    pub request_id: RequestId,
+    /// Typed immediate daemon response.
+    #[serde(flatten)]
+    pub response: DaemonResponse,
+}
+
+impl ResponseEnvelope {
+    /// Creates a response envelope with the current protocol version.
+    pub fn new(request_id: RequestId, response: DaemonResponse) -> Self {
+        Self {
+            protocol_version: ProtocolVersion::current(),
+            request_id,
+            response,
+        }
+    }
+}
+
+/// Newline-delimited JSON frame sent by `cadisd`.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "frame", content = "payload", rename_all = "snake_case")]
+pub enum ServerFrame {
+    /// Immediate response to a request.
+    Response(ResponseEnvelope),
+    /// Runtime event emitted by the daemon.
+    Event(EventEnvelope),
+}
+
 /// Immediate response returned for request handling failures or acknowledgements.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", content = "payload")]
@@ -266,6 +299,9 @@ pub enum DaemonResponse {
     /// Request was accepted and follow-up state will arrive through events.
     #[serde(rename = "request.accepted")]
     RequestAccepted(RequestAcceptedPayload),
+    /// Current daemon status.
+    #[serde(rename = "daemon.status.response")]
+    DaemonStatus(DaemonStatusPayload),
     /// Request was rejected before execution.
     #[serde(rename = "request.rejected")]
     RequestRejected(ErrorPayload),
@@ -276,6 +312,28 @@ pub enum DaemonResponse {
 pub struct RequestAcceptedPayload {
     /// Request ID that was accepted.
     pub request_id: RequestId,
+}
+
+/// Current daemon health and runtime status.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct DaemonStatusPayload {
+    /// Human-readable daemon state.
+    pub status: String,
+    /// CADIS binary version.
+    pub version: String,
+    /// Protocol version served by the daemon.
+    pub protocol_version: ProtocolVersion,
+    /// Local CADIS state directory.
+    pub cadis_home: String,
+    /// Local socket path when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket_path: Option<String>,
+    /// Number of sessions known by this daemon process.
+    pub sessions: usize,
+    /// Configured model provider label.
+    pub model_provider: String,
+    /// Daemon uptime in seconds.
+    pub uptime_seconds: u64,
 }
 
 /// Machine-readable error payload for responses and error events.
@@ -914,6 +972,47 @@ mod tests {
                 "payload": {
                     "delta": "Halo",
                     "content_kind": "chat"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn server_response_frame_matches_transport_shape() {
+        let frame = ServerFrame::Response(ResponseEnvelope::new(
+            RequestId::from("req_1"),
+            DaemonResponse::DaemonStatus(DaemonStatusPayload {
+                status: "ok".to_owned(),
+                version: "0.1.0".to_owned(),
+                protocol_version: ProtocolVersion::current(),
+                cadis_home: "/home/user/.cadis".to_owned(),
+                socket_path: Some("/run/user/1000/cadis/cadisd.sock".to_owned()),
+                sessions: 0,
+                model_provider: "echo".to_owned(),
+                uptime_seconds: 3,
+            }),
+        ));
+
+        let value = serde_json::to_value(&frame).expect("frame should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "frame": "response",
+                "payload": {
+                    "protocol_version": CURRENT_PROTOCOL_VERSION,
+                    "request_id": "req_1",
+                    "type": "daemon.status.response",
+                    "payload": {
+                        "status": "ok",
+                        "version": "0.1.0",
+                        "protocol_version": CURRENT_PROTOCOL_VERSION,
+                        "cadis_home": "/home/user/.cadis",
+                        "socket_path": "/run/user/1000/cadis/cadisd.sock",
+                        "sessions": 0,
+                        "model_provider": "echo",
+                        "uptime_seconds": 3
+                    }
                 }
             })
         );

@@ -1,0 +1,37 @@
+# CADIS desktop MVP config.
+# This example is safe to commit and contains no credentials.
+# Do not put API keys, Telegram tokens, auth headers, or private absolute paths here.
+# Provider credentials must use environment variables or future keychain support.
+# Copy relevant values to ~/.cadis/config.toml.
+
+cadis_home = "~/.cadis"
+log_level = "info"
+
+# Leave unset to use:
+# - $XDG_RUNTIME_DIR/cadis/cadisd.sock when XDG_RUNTIME_DIR exists
+# - ~/.cadis/run/cadisd.sock otherwise
+# socket_path = "~/.cadis/run/cadisd.sock"
+
+[model]
+# auto tries Ollama first and falls back to the local credential-free provider.
+# Use "openai" with OPENAI_API_KEY or CADIS_OPENAI_API_KEY for OpenAI.
+# Use "codex-cli" after authenticating the official Codex CLI with `codex login`.
+# Use "ollama" to require Ollama, or "echo" for explicit local fallback.
+provider = "auto"
+ollama_model = "llama3.2"
+ollama_endpoint = "http://127.0.0.1:11434"
+openai_model = "gpt-5.2"
+openai_base_url = "https://api.openai.com/v1"
+
+[hud]
+theme = "arc"
+background_opacity = 90
+always_on_top = false
+
+[voice]
+enabled = false
+voice_id = "id-ID-GadisNeural"
+rate = 0
+pitch = 0
+volume = 0
+auto_speak = false

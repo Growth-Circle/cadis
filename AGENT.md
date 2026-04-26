@@ -17,7 +17,7 @@ Do not rebuild CADIS as an OpenClaw backend, a UI-first app, or a hosted SaaS. O
 
 ## Current Status
 
-CADIS is an early implementation baseline with open-source docs and an initial `cadis-protocol` crate. No production daemon runtime exists yet.
+CADIS is an early implementation baseline with open-source docs, protocol types, a desktop MVP `cadisd` plus `cadis` CLI, and a native `cadis-hud` prototype. No production-grade tool runtime, approval engine, worker runtime, or full HUD parity exists yet.
 
 Start from:
 

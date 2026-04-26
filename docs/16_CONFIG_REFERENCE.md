@@ -2,138 +2,105 @@
 
 ## 1. Default Location
 
-CADIS reads user config from:
+The desktop MVP reads user config from:
 
 ```text
 ~/.cadis/config.toml
 ```
 
-Environment variables may override selected fields.
+`CADIS_HOME` can move that directory. CADIS creates this local state layout on
+first run:
 
-## 2. Draft Config
+```text
+~/.cadis/
+|-- config.toml
+|-- logs/
+|-- sessions/
+|-- workers/
+|-- worktrees/
+|-- run/
+|-- tokens/
+`-- approvals/
+```
+
+## 2. Desktop MVP Config
+
+The current implementation supports these keys:
 
 ```toml
-[daemon]
-home = "~/.cadis"
+cadis_home = "~/.cadis"
 log_level = "info"
-transport = "unix"
 
-[transport.unix]
-path = "~/.cadis/cadisd.sock"
+# Optional. If unset, CADIS uses $XDG_RUNTIME_DIR/cadis/cadisd.sock when
+# available, otherwise ~/.cadis/run/cadisd.sock.
+# socket_path = "~/.cadis/run/cadisd.sock"
 
-[agents]
-max_depth = 2
-max_children_per_agent = 4
-max_global_agents = 12
-default_timeout_sec = 900
-allow_recursive_spawn = false
-
-[policy]
-safe_read = "allow"
-workspace_edit = "allow"
-network_access = "ask"
-secret_access = "ask"
-system_change = "ask"
-dangerous_delete = "ask"
-outside_workspace = "ask"
-git_push_main = "ask"
-git_force_push = "ask"
-sudo_system = "ask"
-
-[models.default]
-provider = "ollama"
-model = "llama3.1"
-
-[models.openai]
-api_key_env = "OPENAI_API_KEY"
-model = "gpt-4.1"
-
-[models.ollama]
-base_url = "http://localhost:11434"
-model = "llama3.1"
-
-[telegram]
-enabled = false
-bot_token_env = "TELEGRAM_BOT_TOKEN"
-allowed_chat_ids = []
+[model]
+# auto tries Ollama first and falls back to the local credential-free provider.
+# Supported values: "auto", "codex-cli", "openai", "ollama", "echo".
+provider = "auto"
+ollama_model = "llama3.2"
+ollama_endpoint = "http://127.0.0.1:11434"
+openai_model = "gpt-5.2"
+openai_base_url = "https://api.openai.com/v1"
 
 [hud]
 theme = "arc"
-background_opacity = 82
-hotkey = "Super+Space"
+background_opacity = 90
 always_on_top = false
-
-[hud.chat]
-thinking = false
-fast = true
 
 [voice]
 enabled = false
-provider = "edge"
 voice_id = "id-ID-GadisNeural"
 rate = 0
 pitch = 0
 volume = 0
-auto_speak = true
-max_spoken_chars = 800
-
-[agents.display_names]
-main = "CADIS"
-
-[agents.models]
-main = "openai/gpt-5.5"
+auto_speak = false
 ```
 
-## 3. Secret Rules
+An example file is available at `config/cadis.example.toml`.
 
-- Store secrets in environment variables or an OS keychain later.
-- Do not store raw API keys in config examples.
-- Do not write resolved secrets to logs.
-- Redact values from keys ending in `_KEY`, `_TOKEN`, `_SECRET`, or `_PASSWORD`.
+## 3. Model Provider Behavior
 
-## 4. Policy Values
+- `auto`: tries Ollama at `ollama_endpoint`, then falls back to the local echo provider.
+- `codex-cli`: delegates to the installed official Codex CLI with `codex exec`.
+  Authenticate the CLI separately with `codex login` for ChatGPT Plus/Pro access.
+  CADIS does not read, copy, or persist `~/.codex/auth.json`.
+- `openai`: sends chat requests to the OpenAI Chat Completions API. It requires
+  `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` in the daemon environment.
+- `ollama`: requires a running Ollama server and returns an error event if unavailable.
+- `echo`: uses the credential-free local fallback.
 
-Allowed values:
+The OpenAI API key is not a config key. Do not put API keys, bearer tokens, or
+auth headers in `~/.cadis/config.toml`, examples, or logs.
 
-```text
-allow
-ask
-deny
-```
-
-Default should be conservative where actions are destructive, external, or privileged.
-
-## 5. Environment Variables
+## 4. Environment Variables
 
 ```text
 CADIS_HOME
 CADIS_LOG_LEVEL
+CADIS_MODEL_PROVIDER
 OPENAI_API_KEY
-ANTHROPIC_API_KEY
-GEMINI_API_KEY
-OPENROUTER_API_KEY
+CADIS_OPENAI_API_KEY
+CODEX_API_KEY
+CADIS_CODEX_BIN
+CADIS_CODEX_MODEL
+CADIS_CODEX_EXTRA_ARGS
 TELEGRAM_BOT_TOKEN
 ```
 
-## 6. HUD Theme Keys
+The desktop MVP reads `CADIS_HOME`, `CADIS_LOG_LEVEL`, `CADIS_MODEL_PROVIDER`,
+`CADIS_OPENAI_API_KEY`, `OPENAI_API_KEY`, `CADIS_CODEX_BIN`,
+`CADIS_CODEX_MODEL`, and `CADIS_CODEX_EXTRA_ARGS`. `CODEX_API_KEY` is consumed
+by the official Codex CLI when that CLI is configured for API-key auth; CADIS
+does not read it directly. Other provider key variables are reserved for future
+model adapters and examples must keep their values empty.
 
-Allowed values:
+## 5. Secret Rules
 
-```text
-arc
-amber
-phosphor
-violet
-alert
-ice
-```
-
-## 7. Voice Preference Ranges
-
-```text
-rate   -50..50, step 5
-pitch  -50..50, step 5
-volume -50..50, step 5
-```
-
-Initial voice catalog is documented in `docs/23_UI_DESIGN_SYSTEM.md`.
+- Do not store raw API keys in committed files.
+- Do not commit `~/.codex/auth.json`; treat it as a password-equivalent file.
+- Prefer `~/.cadis/config.toml` for local runtime config and keep provider keys in environment variables or a future OS keychain integration.
+- Do not write resolved secrets to logs.
+- Event logs pass through CADIS redaction before JSONL persistence.
+- Redact values from keys containing `api_key`, `token`, `secret`, or `authorization`.

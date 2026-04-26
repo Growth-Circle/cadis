@@ -32,6 +32,24 @@ This order prevents the project from becoming a UI shell before the core runtime
 | P14 | Code Work Window | Diff, logs, tests, patch approval |
 | P15 | Alpha Hardening | Tests, docs, packaging, release |
 
+## 2.1 Current Desktop MVP Scope
+
+Implemented in the first runnable baseline:
+
+- P1 workspace skeleton crates: `cadis-core`, `cadis-daemon`, `cadis-cli`, `cadis-store`, `cadis-policy`, and `cadis-models`.
+- P3 daemon subset: `cadisd --version`, `cadisd --check`, Unix socket transport, stdio test mode, config load, health status, session registry, and event emission.
+- P4 CLI subset: `cadis status`, `cadis doctor`, `cadis models`, `cadis chat`, JSON frame output, and `cadis daemon` launcher.
+- P5 model subset: local fallback provider plus optional Ollama adapter.
+- P8 persistence subset: `~/.cadis` layout, JSONL event logs, and redaction before persistence.
+- P13 HUD prototype subset: native Rust `cadis-hud` window, orbital shell, status bar, chat command panel, config tabs, six themes, model controls, rename dialog, voice preview hooks, and approval stack rendering.
+
+Still pending:
+
+- Native file/shell tools.
+- Approval storage and tool gating.
+- Agent runtime beyond the main chat path.
+- Worker isolation, Telegram, production voice output, full HUD parity, and code work window.
+
 ## 3. P0 - Repository Foundation
 
 Goal: make the project ready to publish as an open-source repository.
@@ -459,4 +477,3 @@ Exit criteria:
 - No direct import of third-party source code without ADR.
 - No recursive agent spawning by default.
 - No full Android local runtime before desktop alpha.
-

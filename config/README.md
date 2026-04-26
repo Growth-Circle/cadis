@@ -1,6 +1,6 @@
 # Config
 
-Example CADIS configuration files will live here.
+Example CADIS configuration files live here.
 
 Runtime user configuration defaults to:
 
@@ -10,3 +10,6 @@ Runtime user configuration defaults to:
 
 Do not commit real provider keys, Telegram tokens, or local private paths.
 
+The desktop MVP example is:
+
+- [cadis.example.toml](cadis.example.toml)

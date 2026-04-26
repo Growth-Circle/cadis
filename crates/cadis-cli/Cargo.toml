@@ -1,0 +1,20 @@
+[package]
+name = "cadis-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "cadis"
+path = "src/main.rs"
+
+[dependencies]
+cadis-protocol.workspace = true
+cadis-store.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -214,7 +214,20 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [ ] Send agent rename.
 - [ ] Send approval response.
 
-## 17. Testing
+## 17. Prototype Validation
+
+- [ ] HUD prototype can run against mock CADIS events without a full agent runtime.
+- [ ] Prototype view model contains only ephemeral UI state plus event-derived snapshots.
+- [ ] Prototype does not use localStorage, browser storage, or UI files as authoritative durable state.
+- [ ] Prototype shows daemon connected, disconnected, and reconnecting states.
+- [ ] Prototype renders active, idle, waiting, failed, and cancelled agent states.
+- [ ] Prototype renders worker lifecycle updates through `worker.event`.
+- [ ] Prototype renders approval lifecycle from `approval.requested` to `approval.resolved`.
+- [ ] Prototype keeps approval card visible after click until daemon resolution event.
+- [ ] Prototype confirms rename and model changes only after daemon events/responses.
+- [ ] Prototype disables unsafe actions while disconnected.
+
+## 18. Testing
 
 - [ ] Theme helper tests.
 - [ ] Agent name normalization tests.
@@ -228,7 +241,7 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [ ] Screenshot parity: 1920x1080.
 - [ ] No OpenClaw text/path remains in UI.
 
-## 18. Open-Source Cleanup
+## 19. Open-Source Cleanup
 
 - [ ] Replace RamaClaw brand text with CADIS.
 - [ ] Replace OpenClaw wording with CADIS daemon wording.
@@ -236,4 +249,3 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [ ] Recreate icons for CADIS.
 - [ ] Confirm asset licensing.
 - [ ] Ensure no provider keys or local config values are committed.
-

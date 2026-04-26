@@ -12,7 +12,7 @@ CADIS has high potential but also high risk because it will execute local tools,
 | R-002 | OpenClaw assumptions leak into new core | Medium | Medium | Keep core fresh; use adapters only if needed | Maintainer |
 | R-003 | Third-party source import causes license issue | High | Medium | ADR and license review before import | Maintainer |
 | R-004 | Tool approval bypass | Critical | Medium | Central policy engine; tests; no adapter tool execution | Security |
-| R-005 | Secrets appear in logs | Critical | Medium | Redaction before write; tests; safe examples | Security |
+| R-005 | Secrets appear in logs or commits | Critical | Medium | Redaction before write; tests; safe examples; secret scan before publish | Security |
 | R-006 | Shell tool damages system | Critical | Medium | Risk classes; approvals; workspace constraints | Core |
 | R-007 | Agent fan-out consumes resources | High | Medium | Depth, child, global, timeout, and budget limits | Core |
 | R-008 | Parallel agents conflict on files | High | Medium | Mandatory worktree isolation for coding workers | Workers |
@@ -50,4 +50,3 @@ CADIS has high potential but also high risk because it will execute local tools,
 - Review this document before each minor release.
 - Add new risks when adding integrations, providers, or tools.
 - Treat security-sensitive risks as release blockers.
-

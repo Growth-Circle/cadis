@@ -72,11 +72,11 @@
 ## 3. Workspace Skeleton
 
 - [x] Create `crates/cadis-protocol`.
-- [ ] Create `crates/cadis-core`.
-- [ ] Create `crates/cadis-daemon`.
-- [ ] Create `crates/cadis-cli`.
-- [ ] Create `crates/cadis-store`.
-- [ ] Create `crates/cadis-policy`.
+- [x] Create `crates/cadis-core`.
+- [x] Create `crates/cadis-daemon`.
+- [x] Create `crates/cadis-cli`.
+- [x] Create `crates/cadis-store`.
+- [x] Create `crates/cadis-policy`.
 - [x] Add workspace members.
 - [x] Add shared lint config.
 - [x] Add formatting check.
@@ -102,39 +102,39 @@
 
 ## 5. Daemon
 
-- [ ] Create `cadisd` binary.
-- [ ] Add daemon config loader.
-- [ ] Add daemon health status.
-- [ ] Add local transport listener.
+- [x] Create `cadisd` binary.
+- [x] Add daemon config loader.
+- [x] Add daemon health status.
+- [x] Add local transport listener.
 - [ ] Add event bus.
-- [ ] Add session registry.
+- [x] Add session registry.
 - [ ] Add shutdown handling.
-- [ ] Add structured logging.
+- [x] Add structured logging.
 - [ ] Add daemon integration test.
 
 ## 6. CLI
 
-- [ ] Create `cadis` binary.
-- [ ] Add `cadis daemon`.
-- [ ] Add `cadis status`.
-- [ ] Add `cadis chat`.
-- [ ] Add `cadis run`.
+- [x] Create `cadis` binary.
+- [x] Add `cadis daemon`.
+- [x] Add `cadis status`.
+- [x] Add `cadis chat`.
+- [x] Add `cadis run`.
 - [ ] Add `cadis approve`.
 - [ ] Add `cadis deny`.
-- [ ] Add `cadis doctor`.
-- [ ] Add JSON output mode.
+- [x] Add `cadis doctor`.
+- [x] Add JSON output mode.
 - [ ] Add CLI integration tests.
 
 ## 7. Model Provider Layer
 
-- [ ] Define `ModelProvider` trait.
+- [x] Define `ModelProvider` trait.
 - [ ] Define provider capabilities.
-- [ ] Define streaming event type.
+- [x] Define streaming event type.
 - [ ] Define cancellation behavior.
-- [ ] Define provider error mapping.
-- [ ] Implement first provider.
+- [x] Define provider error mapping.
+- [x] Implement first provider.
 - [ ] Add provider conformance tests.
-- [ ] Add provider config docs.
+- [x] Add provider config docs.
 - [ ] Add second provider.
 
 ## 8. Tool Runtime
@@ -156,7 +156,7 @@
 ## 9. Policy and Approval
 
 - [ ] Define policy config.
-- [ ] Define default risk rules.
+- [x] Define default risk rules.
 - [ ] Add approval request type.
 - [ ] Add approval resolution type.
 - [ ] Implement first-response-wins.
@@ -170,15 +170,15 @@
 
 ## 10. Persistence and Logs
 
-- [ ] Create `~/.cadis` layout.
-- [ ] Load `config.toml`.
+- [x] Create `~/.cadis` layout.
+- [x] Load `config.toml`.
 - [ ] Write session metadata.
-- [ ] Write JSONL event logs.
+- [x] Write JSONL event logs.
 - [ ] Write approval state.
 - [ ] Implement atomic writes.
-- [ ] Implement redaction.
+- [x] Implement redaction.
 - [ ] Add crash recovery metadata.
-- [ ] Add redaction tests.
+- [x] Add redaction tests.
 - [ ] Add persistence tests.
 
 ## 11. Agent Runtime
@@ -237,15 +237,27 @@
 ## 15. HUD
 
 - [ ] Choose final UI framework.
-- [ ] Create desktop app skeleton.
-- [ ] Connect to daemon protocol.
-- [ ] Show chat stream.
-- [ ] Show agent tree.
+- [x] Create desktop app skeleton.
+- [x] Connect to daemon protocol.
+- [x] Show chat stream.
+- [x] Show agent tree.
 - [ ] Show worker progress.
-- [ ] Show approval cards.
-- [ ] Add voice controls.
-- [ ] Add status bar.
-- [ ] Add desktop packaging notes.
+- [x] Show approval cards.
+- [x] Add voice controls.
+- [x] Add status bar.
+- [x] Add desktop packaging notes.
+- [ ] Validate HUD prototype against RamaClaw adaptation contract.
+- [ ] Render HUD from a mock CADIS daemon event stream.
+- [x] Confirm HUD is protocol-client only and does not execute tools directly.
+- [ ] Confirm durable HUD preferences are daemon-backed, not browser/local UI storage.
+- [x] Confirm disconnected state references CADIS daemon, not OpenClaw.
+- [ ] Confirm approval cards remain visible until `approval.resolved`.
+- [x] Confirm chat sends through `message.send`.
+- [x] Confirm agent rename sends `agent.rename` and updates only from `agent.renamed`.
+- [x] Confirm model changes send `agent.model.set`.
+- [x] Confirm theme and opacity changes route through `ui.preferences.set`.
+- [ ] Capture HUD screenshot parity at 1200x760, 1600x1000, and 1920x1080.
+- [ ] Confirm no overlapping cards, status text, chat panel, approval stack, or central orb text.
 
 ## 16. Code Work Window
 
@@ -293,15 +305,21 @@
 - [x] Document feature parity checklist.
 - [x] Document UI state and protocol contract.
 - [x] Document UI design system.
-- [ ] Decide HUD toolkit.
-- [ ] Add `agent.rename` to protocol implementation.
-- [ ] Add `agent.model.set` to protocol implementation.
-- [ ] Add `ui.preferences.*` to protocol implementation.
-- [ ] Add `voice.preview` and `voice.stop` to protocol implementation.
+- [x] Decide HUD toolkit.
+- [x] Add `agent.rename` to protocol implementation.
+- [x] Add `agent.model.set` to protocol implementation.
+- [x] Add `ui.preferences.*` to protocol implementation.
+- [x] Add `voice.preview` and `voice.stop` to protocol implementation.
 - [ ] Add HUD preference config.
-- [ ] Add six theme presets to UI implementation.
-- [ ] Add unified config dialog to UI implementation.
-- [ ] Add agent rename dialog to UI implementation.
-- [ ] Add voice selector and preview to UI implementation.
-- [ ] Add per-agent model selector to UI implementation.
+- [x] Add six theme presets to UI implementation.
+- [x] Add unified config dialog to UI implementation.
+- [x] Add agent rename dialog to UI implementation.
+- [x] Add voice selector and preview to UI implementation.
+- [x] Add per-agent model selector to UI implementation.
 - [ ] Add screenshot parity tests.
+- [x] HUD prototype preserves orbital shell: status bar, central orb, 12 agent slots, chat panel, approval stack, config dialog, and rename dialog.
+- [x] HUD prototype preserves six-theme appearance system: `arc`, `amber`, `phosphor`, `violet`, `alert`, `ice`.
+- [x] HUD prototype demonstrates Voice, Models, Appearance, and Window config tabs.
+- [x] HUD prototype demonstrates worker tree rendering under parent agents.
+- [x] HUD prototype demonstrates voice preview UI without speaking code, diffs, logs, or test output.
+- [ ] HUD prototype passes open-source cleanup scan for OpenClaw runtime paths, private RamaClaw source paths, provider keys, and committed local config values.

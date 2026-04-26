@@ -40,6 +40,38 @@ Every daemon event should include:
 }
 ```
 
+The desktop MVP transport sends newline-delimited JSON frames from daemon to
+client:
+
+```json
+{
+  "frame": "response",
+  "payload": {
+    "protocol_version": "0.1",
+    "request_id": "req_...",
+    "type": "daemon.status.response",
+    "payload": {}
+  }
+}
+```
+
+```json
+{
+  "frame": "event",
+  "payload": {
+    "protocol_version": "0.1",
+    "event_id": "evt_...",
+    "timestamp": "2026-04-26T00:00:00Z",
+    "source": "cadisd",
+    "type": "daemon.started",
+    "payload": {}
+  }
+}
+```
+
+Client-to-daemon frames are one `RequestEnvelope` per line. Daemon-to-client
+frames are `ServerFrame` values with `response` or `event`.
+
 ## 3. Request Types
 
 ```text
@@ -62,6 +94,31 @@ ui.preferences.set
 voice.preview
 voice.stop
 config.reload
+```
+
+## 3.1 Response Types
+
+Immediate response types:
+
+```text
+request.accepted
+request.rejected
+daemon.status.response
+```
+
+`daemon.status.response` payload:
+
+```json
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "protocol_version": "0.1",
+  "cadis_home": "/home/user/.cadis",
+  "socket_path": "/run/user/1000/cadis/cadisd.sock",
+  "sessions": 0,
+  "model_provider": "auto",
+  "uptime_seconds": 3
+}
 ```
 
 ## 4. Event Types
@@ -156,6 +213,7 @@ Initial:
 
 - Unix socket for Linux.
 - Stdio for tests.
+- Newline-delimited JSON frames.
 
 Later:
 

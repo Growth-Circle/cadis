@@ -420,10 +420,12 @@ HUD connection behavior should preserve RamaClaw's operational feel:
 CADIS replacement discovery:
 
 ```text
-1. CADIS_HUD_SOCKET or CADIS_HUD_URL
-2. ~/.cadis/cadisd.sock
-3. ~/.cadis/hud-gateway.port, if WebSocket mode is enabled
-4. dev override
+1. --socket CLI argument for cadis-hud
+2. CADIS_HUD_SOCKET
+3. socket_path in ~/.cadis/config.toml
+4. $XDG_RUNTIME_DIR/cadis/cadisd.sock when XDG_RUNTIME_DIR exists
+5. ~/.cadis/run/cadisd.sock
+6. Future CADIS_HUD_URL or hud-gateway.port if WebSocket mode is enabled
 ```
 
 ## 9. Voice Routing Policy
@@ -451,4 +453,3 @@ Protocol adaptation is valid when:
 - Approval card lifecycle is server-confirmed.
 - Rename and model selection survive HUD restart.
 - Disconnection and reconnect behavior are visible and tested.
-
