@@ -508,7 +508,7 @@ impl Runtime {
                     tool_name: request.tool_name.clone(),
                     risk_class,
                     title: format!("Approve {}", request.tool_name),
-                    summary: format!("{} is blocked until approved", request.tool_name),
+                    summary: tool.approval_summary(),
                     command: command.clone(),
                     workspace: workspace.clone(),
                     requested_at,
@@ -2331,6 +2331,24 @@ impl ToolRegistry {
                     message: format!("tool '{}' is registered more than once", definition.name),
                 });
             }
+            if definition.description.trim().is_empty() {
+                return Err(RuntimeError {
+                    code: "invalid_tool_description",
+                    message: format!("tool '{}' is missing a description", definition.name),
+                });
+            }
+            if definition.side_effects.is_empty() {
+                return Err(RuntimeError {
+                    code: "invalid_tool_side_effects",
+                    message: format!("tool '{}' must declare at least one side effect", definition.name),
+                });
+            }
+            if definition.timeout_secs == 0 {
+                return Err(RuntimeError {
+                    code: "invalid_tool_timeout",
+                    message: format!("tool '{}' must declare a positive timeout", definition.name),
+                });
+            }
         }
 
         Ok(Self { definitions })
@@ -2338,38 +2356,101 @@ impl ToolRegistry {
 
     fn builtin() -> Result<Self, RuntimeError> {
         Self::new(vec![
-            ToolDefinition::safe_read("file.read", ToolInputSchema::FileRead),
-            ToolDefinition::safe_read("file.search", ToolInputSchema::FileSearch),
-            ToolDefinition::safe_read("git.status", ToolInputSchema::GitStatus),
+            ToolDefinition::safe_read(
+                "file.read",
+                "Read one file inside an approved workspace",
+                ToolInputSchema::FileRead,
+                &[ToolSideEffect::ReadFiles],
+                5,
+                ToolWorkspaceBehavior::PathScoped,
+            ),
+            ToolDefinition::safe_read(
+                "file.search",
+                "Search text files inside an approved workspace",
+                ToolInputSchema::FileSearch,
+                &[ToolSideEffect::SearchFiles],
+                10,
+                ToolWorkspaceBehavior::PathScoped,
+            ),
+            ToolDefinition::safe_read(
+                "git.status",
+                "Read git status inside an approved workspace",
+                ToolInputSchema::GitStatus,
+                &[ToolSideEffect::ReadGitMetadata],
+                10,
+                ToolWorkspaceBehavior::PathScoped,
+            ),
             ToolDefinition::approval_placeholder(
                 "file.write",
+                "Write or replace files inside an approved workspace",
                 cadis_protocol::RiskClass::WorkspaceEdit,
                 ToolInputSchema::WorkspaceMutation,
+                &[ToolSideEffect::EditWorkspace],
+                30,
+                ToolCancellationBehavior::Cooperative,
+                ToolWorkspaceBehavior::PathScoped,
+                false,
+                false,
             ),
             ToolDefinition::approval_placeholder(
                 "file.patch",
+                "Apply a patch inside an approved workspace",
                 cadis_protocol::RiskClass::WorkspaceEdit,
                 ToolInputSchema::WorkspaceMutation,
+                &[ToolSideEffect::EditWorkspace],
+                30,
+                ToolCancellationBehavior::Cooperative,
+                ToolWorkspaceBehavior::PathScoped,
+                false,
+                false,
             ),
             ToolDefinition::approval_placeholder(
                 "git.diff",
+                "Read git diff output for an approved workspace",
                 cadis_protocol::RiskClass::WorkspaceEdit,
                 ToolInputSchema::GitMutation,
+                &[ToolSideEffect::ReadGitDiff],
+                20,
+                ToolCancellationBehavior::NotSupported,
+                ToolWorkspaceBehavior::PathScoped,
+                false,
+                false,
             ),
             ToolDefinition::approval_placeholder(
                 "git.worktree.create",
+                "Create a CADIS-managed git worktree",
                 cadis_protocol::RiskClass::WorkspaceEdit,
                 ToolInputSchema::GitMutation,
+                &[ToolSideEffect::CreateWorktree],
+                60,
+                ToolCancellationBehavior::Cooperative,
+                ToolWorkspaceBehavior::CadisManagedWorktree,
+                false,
+                false,
             ),
             ToolDefinition::approval_placeholder(
                 "git.worktree.remove",
+                "Remove a CADIS-managed git worktree",
                 cadis_protocol::RiskClass::WorkspaceEdit,
                 ToolInputSchema::GitMutation,
+                &[ToolSideEffect::RemoveWorktree],
+                60,
+                ToolCancellationBehavior::Cooperative,
+                ToolWorkspaceBehavior::CadisManagedWorktree,
+                false,
+                false,
             ),
             ToolDefinition::approval_placeholder(
                 "shell.run",
+                "Run a local shell command in an approved workspace",
                 cadis_protocol::RiskClass::SystemChange,
                 ToolInputSchema::ShellRun,
+                &[ToolSideEffect::RunSubprocess],
+                900,
+                ToolCancellationBehavior::Cooperative,
+                ToolWorkspaceBehavior::RequiresWorkspace,
+                false,
+                true,
             ),
         ])
     }
@@ -2389,45 +2470,107 @@ impl ToolRegistry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ToolDefinition {
     name: &'static str,
+    description: &'static str,
     risk_class: cadis_protocol::RiskClass,
     input_schema: ToolInputSchema,
     execution: ToolExecutionMode,
+    side_effects: &'static [ToolSideEffect],
+    timeout_secs: u64,
+    timeout_behavior: ToolTimeoutBehavior,
+    cancellation_behavior: ToolCancellationBehavior,
+    workspace_behavior: ToolWorkspaceBehavior,
+    needs_network: bool,
+    may_read_secrets: bool,
 }
 
 impl ToolDefinition {
-    fn safe_read(name: &'static str, input_schema: ToolInputSchema) -> Self {
+    fn safe_read(
+        name: &'static str,
+        description: &'static str,
+        input_schema: ToolInputSchema,
+        side_effects: &'static [ToolSideEffect],
+        timeout_secs: u64,
+        workspace_behavior: ToolWorkspaceBehavior,
+    ) -> Self {
         Self {
             name,
+            description,
             risk_class: cadis_protocol::RiskClass::SafeRead,
             input_schema,
             execution: ToolExecutionMode::AutoExecute,
+            side_effects,
+            timeout_secs,
+            timeout_behavior: ToolTimeoutBehavior::FailClosed,
+            cancellation_behavior: ToolCancellationBehavior::NotSupported,
+            workspace_behavior,
+            needs_network: false,
+            may_read_secrets: false,
         }
     }
 
     fn approval_placeholder(
         name: &'static str,
+        description: &'static str,
         risk_class: cadis_protocol::RiskClass,
         input_schema: ToolInputSchema,
+        side_effects: &'static [ToolSideEffect],
+        timeout_secs: u64,
+        cancellation_behavior: ToolCancellationBehavior,
+        workspace_behavior: ToolWorkspaceBehavior,
+        needs_network: bool,
+        may_read_secrets: bool,
     ) -> Self {
         Self {
             name,
+            description,
             risk_class,
             input_schema,
             execution: ToolExecutionMode::ApprovalPlaceholder,
+            side_effects,
+            timeout_secs,
+            timeout_behavior: ToolTimeoutBehavior::FailClosed,
+            cancellation_behavior,
+            workspace_behavior,
+            needs_network,
+            may_read_secrets,
         }
     }
 
     fn policy_reason(&self) -> String {
         match self.execution {
             ToolExecutionMode::AutoExecute => format!(
-                "{} is a read-only tool using {:?} input schema",
-                self.name, self.input_schema
+                "{}: {} | schema={:?} | timeout={}s | workspace={:?}",
+                self.name,
+                self.description,
+                self.input_schema,
+                self.timeout_secs,
+                self.workspace_behavior,
             ),
             ToolExecutionMode::ApprovalPlaceholder => format!(
-                "{} requires approval for {:?} risk using {:?} input schema",
-                self.name, self.risk_class, self.input_schema
+                "{}: {} | risk={:?} | schema={:?} | timeout={}s | workspace={:?}",
+                self.name,
+                self.description,
+                self.risk_class,
+                self.input_schema,
+                self.timeout_secs,
+                self.workspace_behavior,
             ),
         }
+    }
+
+    fn approval_summary(&self) -> String {
+        format!(
+            "{} requires approval before execution; side effects: {}; cancellation: {:?}; network: {}; secrets: {}",
+            self.name,
+            self.side_effects
+                .iter()
+                .map(|effect| effect.label())
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.cancellation_behavior,
+            self.needs_network,
+            self.may_read_secrets,
+        )
     }
 }
 
@@ -2445,6 +2588,51 @@ enum ToolInputSchema {
 enum ToolExecutionMode {
     AutoExecute,
     ApprovalPlaceholder,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolSideEffect {
+    ReadFiles,
+    SearchFiles,
+    ReadGitMetadata,
+    EditWorkspace,
+    ReadGitDiff,
+    CreateWorktree,
+    RemoveWorktree,
+    RunSubprocess,
+}
+
+impl ToolSideEffect {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReadFiles => "read_files",
+            Self::SearchFiles => "search_files",
+            Self::ReadGitMetadata => "read_git_metadata",
+            Self::EditWorkspace => "edit_workspace",
+            Self::ReadGitDiff => "read_git_diff",
+            Self::CreateWorktree => "create_worktree",
+            Self::RemoveWorktree => "remove_worktree",
+            Self::RunSubprocess => "run_subprocess",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolTimeoutBehavior {
+    FailClosed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolCancellationBehavior {
+    NotSupported,
+    Cooperative,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolWorkspaceBehavior {
+    PathScoped,
+    RequiresWorkspace,
+    CadisManagedWorktree,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3519,15 +3707,88 @@ mod tests {
     }
 
     #[test]
+    fn builtin_tool_registry_declares_runtime_contract_metadata() {
+        let registry = ToolRegistry::builtin().expect("registry should build");
+
+        for definition in &registry.definitions {
+            assert!(!definition.description.trim().is_empty());
+            assert!(!definition.side_effects.is_empty());
+            assert!(definition.timeout_secs > 0);
+            assert_eq!(definition.timeout_behavior, ToolTimeoutBehavior::FailClosed);
+        }
+
+        let file_read = registry.get("file.read").expect("file.read should exist");
+        assert_eq!(file_read.workspace_behavior, ToolWorkspaceBehavior::PathScoped);
+        assert_eq!(file_read.cancellation_behavior, ToolCancellationBehavior::NotSupported);
+        assert!(!file_read.needs_network);
+        assert!(!file_read.may_read_secrets);
+
+        let shell = registry.get("shell.run").expect("shell.run should exist");
+        assert_eq!(shell.workspace_behavior, ToolWorkspaceBehavior::RequiresWorkspace);
+        assert_eq!(shell.cancellation_behavior, ToolCancellationBehavior::Cooperative);
+        assert!(shell.may_read_secrets);
+    }
+
+    #[test]
     fn tool_registry_rejects_duplicate_names() {
         let result = ToolRegistry::new(vec![
-            ToolDefinition::safe_read("file.read", ToolInputSchema::FileRead),
-            ToolDefinition::safe_read("file.read", ToolInputSchema::FileSearch),
+            ToolDefinition::safe_read(
+                "file.read",
+                "Read one file",
+                ToolInputSchema::FileRead,
+                &[ToolSideEffect::ReadFiles],
+                5,
+                ToolWorkspaceBehavior::PathScoped,
+            ),
+            ToolDefinition::safe_read(
+                "file.read",
+                "Search files",
+                ToolInputSchema::FileSearch,
+                &[ToolSideEffect::SearchFiles],
+                5,
+                ToolWorkspaceBehavior::PathScoped,
+            ),
         ]);
 
         let error = result.expect_err("duplicate tool names should be rejected");
         assert_eq!(error.code, "duplicate_tool_name");
         assert!(error.message.contains("file.read"));
+    }
+
+    #[test]
+    fn tool_registry_rejects_missing_runtime_contract_fields() {
+        let missing_description = ToolRegistry::new(vec![ToolDefinition::safe_read(
+            "file.read",
+            "",
+            ToolInputSchema::FileRead,
+            &[ToolSideEffect::ReadFiles],
+            5,
+            ToolWorkspaceBehavior::PathScoped,
+        )])
+        .expect_err("empty descriptions should be rejected");
+        assert_eq!(missing_description.code, "invalid_tool_description");
+
+        let missing_side_effects = ToolRegistry::new(vec![ToolDefinition::safe_read(
+            "file.read",
+            "Read one file",
+            ToolInputSchema::FileRead,
+            &[],
+            5,
+            ToolWorkspaceBehavior::PathScoped,
+        )])
+        .expect_err("empty side effects should be rejected");
+        assert_eq!(missing_side_effects.code, "invalid_tool_side_effects");
+
+        let invalid_timeout = ToolRegistry::new(vec![ToolDefinition::safe_read(
+            "file.read",
+            "Read one file",
+            ToolInputSchema::FileRead,
+            &[ToolSideEffect::ReadFiles],
+            0,
+            ToolWorkspaceBehavior::PathScoped,
+        )])
+        .expect_err("zero timeout should be rejected");
+        assert_eq!(invalid_timeout.code, "invalid_tool_timeout");
     }
 
     #[test]
@@ -3561,6 +3822,16 @@ mod tests {
             .events
             .iter()
             .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolRequested(payload)
+                    if payload.summary.as_deref().is_some_and(|summary|
+                        summary.contains("timeout=5s")
+                            && summary.contains("workspace=PathScoped")
+                    )
+            )
+        }));
         assert!(outcome.events.iter().any(|event| {
             matches!(
                 &event.event,
@@ -3968,6 +4239,15 @@ mod tests {
                 _ => None,
             })
             .expect("approval.requested should be emitted");
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalRequested(payload)
+                    if payload.summary.contains("side effects: run_subprocess")
+                        && payload.summary.contains("cancellation: Cooperative")
+                        && payload.summary.contains("secrets: true")
+            )
+        }));
         assert!(!outcome
             .events
             .iter()
