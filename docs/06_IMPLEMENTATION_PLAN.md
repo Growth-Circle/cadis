@@ -250,7 +250,8 @@ Tasks:
 - Extend the implemented workspace registry/grants with full alias management,
   richer expiry UX, and denied-path checks for mutating tools.
 - Add project `.cadis/workspace.toml`, `.cadis/worktrees/`, `.cadis/artifacts/`,
-  and `.cadis/media/` conventions.
+  and `.cadis/media/` conventions. Store-level `.cadis/workspace.toml` support
+  and doctor checks for metadata mismatch now exist.
 - Route coding workers into git worktrees and persist worker artifacts under the
   profile home.
 - Add doctor checks for duplicated roots, broad grants, symlink escapes, secret
@@ -571,6 +572,8 @@ Tasks:
 - W7: integrate workspace, grant, worker, checkpoint, and rollback events.
 - W8: add deterministic channel and cwd/project routing.
 - W9: add doctor and migration checks for the full layout.
+  Baseline complete for duplicate registered roots, missing project metadata,
+  and registry/metadata ID mismatch.
 
 ## 14. P11 - Telegram Adapter
 
