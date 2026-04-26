@@ -129,8 +129,9 @@ Example:
 
 `events.snapshot` is a one-shot request for daemon-owned state. The desktop MVP
 snapshot is represented as normal event frames, currently including
-`agent.list.response`, `ui.preferences.updated`, and `session.updated` for known
-sessions.
+`agent.list.response`, `ui.preferences.updated`, `session.updated` for known
+sessions, recovered worker lifecycle events, and `daemon.error` diagnostics for
+corrupt or skipped durable metadata.
 
 `tool.call` requests daemon-owned native tool execution. Tool calls must resolve
 a registered workspace and an active workspace grant before execution or

@@ -28,7 +28,7 @@ use cadis_protocol::{
 };
 use cadis_store::{
     redact, ApprovalRecord, ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
-    GrantSource as StoreGrantSource, ProfileHome, StateStore,
+    GrantSource as StoreGrantSource, ProfileHome, StateRecoveryDiagnostic, StateStore,
     WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
     WorkspaceGrantRecord as StoreWorkspaceGrantRecord, WorkspaceKind as StoreWorkspaceKind,
     WorkspaceMetadata, WorkspaceRegistry, WorkspaceVcs,
@@ -117,6 +117,7 @@ pub struct Runtime {
     next_worker: u64,
     sessions: HashMap<SessionId, SessionRecord>,
     agents: HashMap<AgentId, AgentRecord>,
+    workers: HashMap<String, WorkerRecord>,
     orchestrator: Orchestrator,
     ui_preferences: serde_json::Value,
     spawn_limits: AgentSpawnLimits,
@@ -127,6 +128,7 @@ pub struct Runtime {
     pending_approvals: HashMap<ApprovalId, PendingApproval>,
     workspaces: HashMap<WorkspaceId, WorkspaceRecord>,
     workspace_grants: HashMap<WorkspaceGrantId, WorkspaceGrantRecord>,
+    recovery_diagnostics: Vec<ErrorPayload>,
     next_tool: u64,
     next_approval: u64,
     next_workspace_grant: u64,
@@ -151,13 +153,23 @@ impl Runtime {
         let workspaces = load_workspace_registry(&profile_home);
         let workspace_grants = load_workspace_grants(&profile_home, &workspaces);
         let next_workspace_grant = next_workspace_grant_counter(&workspace_grants);
-        let sessions = recover_session_records(&state_store);
+        let RuntimeRecovery {
+            records: sessions,
+            mut diagnostics,
+        } = recover_session_records(&state_store);
         let mut agents = default_agents(&options.model_provider);
-        for (agent_id, record) in recover_agent_records(&state_store) {
+        let agent_recovery = recover_agent_records(&state_store);
+        diagnostics.extend(agent_recovery.diagnostics);
+        for (agent_id, record) in agent_recovery.records {
             agents.insert(agent_id, record);
         }
+        let worker_recovery = recover_worker_records(&state_store);
+        diagnostics.extend(worker_recovery.diagnostics);
+        let mut workers = worker_recovery.records;
+        diagnostics.extend(reconcile_recovered_workers(&state_store, &mut workers));
         let next_session = next_session_counter(&sessions);
         let next_agent = next_agent_counter(&agents);
+        let next_worker = next_worker_counter(&workers);
 
         Self {
             options,
@@ -168,9 +180,10 @@ impl Runtime {
             next_session,
             next_agent,
             next_route: 1,
-            next_worker: 1,
+            next_worker,
             sessions,
             agents,
+            workers,
             orchestrator,
             ui_preferences,
             spawn_limits,
@@ -181,6 +194,7 @@ impl Runtime {
             pending_approvals: HashMap::new(),
             workspaces,
             workspace_grants,
+            recovery_diagnostics: diagnostics,
             next_tool: 1,
             next_approval: 1,
             next_workspace_grant,
@@ -780,20 +794,19 @@ impl Runtime {
         });
 
         if let Some(worker) = &worker {
-            events.push(self.session_event(
-                session_id.clone(),
-                CadisEvent::WorkerStarted(WorkerEventPayload {
-                    worker_id: worker.worker_id.clone(),
-                    agent_id: Some(route.agent_id.clone()),
-                    parent_agent_id: worker.parent_agent_id.clone(),
-                    status: Some("running".to_owned()),
-                    cli: None,
-                    cwd: None,
-                    summary: Some(worker.summary.clone()),
-                    worktree: Some(worker.worktree.clone()),
-                    artifacts: Some(worker.artifacts.clone()),
-                }),
-            ));
+            let payload = WorkerEventPayload {
+                worker_id: worker.worker_id.clone(),
+                agent_id: Some(route.agent_id.clone()),
+                parent_agent_id: worker.parent_agent_id.clone(),
+                status: Some("running".to_owned()),
+                cli: None,
+                cwd: None,
+                summary: Some(worker.summary.clone()),
+                worktree: Some(worker.worktree.clone()),
+                artifacts: Some(worker.artifacts.clone()),
+            };
+            self.track_worker_event(session_id.clone(), &payload);
+            events.push(self.session_event(session_id.clone(), CadisEvent::WorkerStarted(payload)));
         }
 
         if route.agent_id.as_str() != "main" {
@@ -888,20 +901,24 @@ impl Runtime {
                     ));
                 }
                 if let Some(worker) = &worker {
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::WorkerCompleted(WorkerEventPayload {
-                            worker_id: worker.worker_id.clone(),
-                            agent_id: Some(route.agent_id.clone()),
-                            parent_agent_id: worker.parent_agent_id.clone(),
-                            status: Some("completed".to_owned()),
-                            cli: None,
-                            cwd: None,
-                            summary: Some(worker.summary.clone()),
-                            worktree: Some(worker.worktree.clone()),
-                            artifacts: Some(worker.artifacts.clone()),
-                        }),
-                    ));
+                    let payload = WorkerEventPayload {
+                        worker_id: worker.worker_id.clone(),
+                        agent_id: Some(route.agent_id.clone()),
+                        parent_agent_id: worker.parent_agent_id.clone(),
+                        status: Some("completed".to_owned()),
+                        cli: None,
+                        cwd: None,
+                        summary: Some(worker.summary.clone()),
+                        worktree: Some(worker.worktree.clone()),
+                        artifacts: Some(worker.artifacts.clone()),
+                    };
+                    self.track_worker_event(session_id.clone(), &payload);
+                    events.push(
+                        self.session_event(
+                            session_id.clone(),
+                            CadisEvent::WorkerCompleted(payload),
+                        ),
+                    );
                 }
                 events.push(self.session_event(
                     session_id.clone(),
@@ -922,20 +939,24 @@ impl Runtime {
                     }),
                 ));
                 if let Some(worker) = &worker {
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::WorkerCompleted(WorkerEventPayload {
-                            worker_id: worker.worker_id.clone(),
-                            agent_id: Some(route.agent_id.clone()),
-                            parent_agent_id: worker.parent_agent_id.clone(),
-                            status: Some("failed".to_owned()),
-                            cli: None,
-                            cwd: None,
-                            summary: Some(error_message.clone()),
-                            worktree: Some(worker.worktree.clone()),
-                            artifacts: Some(worker.artifacts.clone()),
-                        }),
-                    ));
+                    let payload = WorkerEventPayload {
+                        worker_id: worker.worker_id.clone(),
+                        agent_id: Some(route.agent_id.clone()),
+                        parent_agent_id: worker.parent_agent_id.clone(),
+                        status: Some("failed".to_owned()),
+                        cli: None,
+                        cwd: None,
+                        summary: Some(error_message.clone()),
+                        worktree: Some(worker.worktree.clone()),
+                        artifacts: Some(worker.artifacts.clone()),
+                    };
+                    self.track_worker_event(session_id.clone(), &payload);
+                    events.push(
+                        self.session_event(
+                            session_id.clone(),
+                            CadisEvent::WorkerCompleted(payload),
+                        ),
+                    );
                 }
                 events.push(self.session_event(
                     session_id,
@@ -1295,13 +1316,25 @@ impl Runtime {
         sessions
     }
 
+    fn worker_records_sorted(&self) -> Vec<WorkerRecord> {
+        let mut workers = self.workers.values().cloned().collect::<Vec<_>>();
+        workers.sort_by(|left, right| left.worker_id.cmp(&right.worker_id));
+        workers
+    }
+
     fn snapshot_events(&mut self) -> Vec<EventEnvelope> {
         let agents = self
             .agent_records_sorted()
             .into_iter()
             .map(AgentRecord::event_payload)
             .collect();
-        let mut events = vec![
+        let diagnostics = self.recovery_diagnostics.clone();
+        let mut events = diagnostics
+            .into_iter()
+            .map(|diagnostic| self.event(None, CadisEvent::DaemonError(diagnostic)))
+            .collect::<Vec<_>>();
+
+        events.extend([
             self.event(
                 None,
                 CadisEvent::AgentListResponse(AgentListPayload { agents }),
@@ -1319,7 +1352,7 @@ impl Runtime {
                     preferences: self.ui_preferences.clone(),
                 }),
             ),
-        ];
+        ]);
 
         for (session_id, session) in self.session_records_sorted() {
             events.push(self.session_event(
@@ -1329,6 +1362,18 @@ impl Runtime {
                     title: session.title,
                 }),
             ));
+        }
+
+        for worker in self.worker_records_sorted() {
+            let session_id = worker.session_id.clone();
+            let is_terminal = worker.is_terminal();
+            let payload = worker.event_payload();
+            let event = if is_terminal {
+                CadisEvent::WorkerCompleted(payload)
+            } else {
+                CadisEvent::WorkerStarted(payload)
+            };
+            events.push(self.session_event(session_id, event));
         }
 
         events
@@ -1794,6 +1839,15 @@ impl Runtime {
         let _ = self.persist_session_record(&session_id);
     }
 
+    fn track_worker_event(&mut self, session_id: SessionId, payload: &WorkerEventPayload) {
+        let worker_id = payload.worker_id.clone();
+        self.workers.insert(
+            worker_id.clone(),
+            WorkerRecord::from_event_payload(session_id, payload, now_timestamp()),
+        );
+        let _ = self.persist_worker_record(&worker_id);
+    }
+
     fn persist_session_record(
         &self,
         session_id: &SessionId,
@@ -1803,6 +1857,14 @@ impl Runtime {
                 session_id,
                 &SessionMetadata::from_record(session_id.clone(), record),
             )?;
+        }
+        Ok(())
+    }
+
+    fn persist_worker_record(&self, worker_id: &str) -> Result<(), cadis_store::StoreError> {
+        if let Some(record) = self.workers.get(worker_id) {
+            self.state_store
+                .write_worker_metadata(worker_id, &WorkerMetadata::from_record(record))?;
         }
         Ok(())
     }
@@ -2157,6 +2219,117 @@ impl AgentRecord {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkerRecord {
+    worker_id: String,
+    session_id: SessionId,
+    agent_id: Option<AgentId>,
+    parent_agent_id: Option<AgentId>,
+    status: String,
+    cli: Option<String>,
+    cwd: Option<String>,
+    summary: Option<String>,
+    worktree: Option<WorkerWorktreeIntent>,
+    artifacts: Option<WorkerArtifactLocations>,
+    updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct WorkerMetadata {
+    worker_id: String,
+    session_id: SessionId,
+    agent_id: Option<AgentId>,
+    parent_agent_id: Option<AgentId>,
+    status: String,
+    cli: Option<String>,
+    cwd: Option<String>,
+    summary: Option<String>,
+    worktree: Option<WorkerWorktreeIntent>,
+    artifacts: Option<WorkerArtifactLocations>,
+    updated_at: Timestamp,
+}
+
+impl WorkerRecord {
+    fn from_event_payload(
+        session_id: SessionId,
+        payload: &WorkerEventPayload,
+        updated_at: Timestamp,
+    ) -> Self {
+        Self {
+            worker_id: payload.worker_id.clone(),
+            session_id,
+            agent_id: payload.agent_id.clone(),
+            parent_agent_id: payload.parent_agent_id.clone(),
+            status: payload
+                .status
+                .clone()
+                .unwrap_or_else(|| "running".to_owned()),
+            cli: payload.cli.clone(),
+            cwd: payload.cwd.clone(),
+            summary: payload.summary.clone(),
+            worktree: payload.worktree.clone(),
+            artifacts: payload.artifacts.clone(),
+            updated_at,
+        }
+    }
+
+    fn event_payload(self) -> WorkerEventPayload {
+        WorkerEventPayload {
+            worker_id: self.worker_id,
+            agent_id: self.agent_id,
+            parent_agent_id: self.parent_agent_id,
+            status: Some(self.status),
+            cli: self.cli,
+            cwd: self.cwd,
+            summary: self.summary,
+            worktree: self.worktree,
+            artifacts: self.artifacts,
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        worker_status_is_terminal(&self.status)
+    }
+}
+
+impl WorkerMetadata {
+    fn from_record(record: &WorkerRecord) -> Self {
+        Self {
+            worker_id: record.worker_id.clone(),
+            session_id: record.session_id.clone(),
+            agent_id: record.agent_id.clone(),
+            parent_agent_id: record.parent_agent_id.clone(),
+            status: record.status.clone(),
+            cli: record.cli.clone(),
+            cwd: record.cwd.clone(),
+            summary: record.summary.clone(),
+            worktree: record.worktree.clone(),
+            artifacts: record.artifacts.clone(),
+            updated_at: record.updated_at.clone(),
+        }
+    }
+
+    fn into_record(self) -> (String, WorkerRecord) {
+        let worker_id = self.worker_id;
+        (
+            worker_id.clone(),
+            WorkerRecord {
+                worker_id,
+                session_id: self.session_id,
+                agent_id: self.agent_id,
+                parent_agent_id: self.parent_agent_id,
+                status: self.status,
+                cli: self.cli,
+                cwd: self.cwd,
+                summary: self.summary,
+                worktree: self.worktree,
+                artifacts: self.artifacts,
+                updated_at: self.updated_at,
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct WorkspaceRecord {
     id: WorkspaceId,
     kind: WorkspaceKind,
@@ -2494,24 +2667,151 @@ fn protocol_readiness(readiness: ProviderReadiness) -> ModelReadiness {
     }
 }
 
-fn recover_session_records(state_store: &StateStore) -> HashMap<SessionId, SessionRecord> {
-    state_store
-        .recover_session_metadata::<SessionMetadata>()
-        .map(|recovery| recovery.records)
-        .unwrap_or_default()
+#[derive(Debug)]
+struct RuntimeRecovery<K, V> {
+    records: HashMap<K, V>,
+    diagnostics: Vec<ErrorPayload>,
+}
+
+fn recover_session_records(state_store: &StateStore) -> RuntimeRecovery<SessionId, SessionRecord> {
+    match state_store.recover_session_metadata::<SessionMetadata>() {
+        Ok(recovery) => RuntimeRecovery {
+            records: recovery
+                .records
+                .into_iter()
+                .map(|record| record.metadata.into_record())
+                .collect(),
+            diagnostics: recovery_diagnostics("session", recovery.diagnostics),
+        },
+        Err(error) => RuntimeRecovery {
+            records: HashMap::new(),
+            diagnostics: vec![recovery_error(
+                "session_recovery_failed",
+                error.to_string(),
+                true,
+            )],
+        },
+    }
+}
+
+fn recover_agent_records(state_store: &StateStore) -> RuntimeRecovery<AgentId, AgentRecord> {
+    match state_store.recover_agent_metadata::<AgentMetadata>() {
+        Ok(recovery) => RuntimeRecovery {
+            records: recovery
+                .records
+                .into_iter()
+                .map(|record| record.metadata.into_record())
+                .collect(),
+            diagnostics: recovery_diagnostics("agent", recovery.diagnostics),
+        },
+        Err(error) => RuntimeRecovery {
+            records: HashMap::new(),
+            diagnostics: vec![recovery_error(
+                "agent_recovery_failed",
+                error.to_string(),
+                true,
+            )],
+        },
+    }
+}
+
+fn recover_worker_records(state_store: &StateStore) -> RuntimeRecovery<String, WorkerRecord> {
+    match state_store.recover_worker_metadata::<WorkerMetadata>() {
+        Ok(recovery) => RuntimeRecovery {
+            records: recovery
+                .records
+                .into_iter()
+                .map(|record| record.metadata.into_record())
+                .collect(),
+            diagnostics: recovery_diagnostics("worker", recovery.diagnostics),
+        },
+        Err(error) => RuntimeRecovery {
+            records: HashMap::new(),
+            diagnostics: vec![recovery_error(
+                "worker_recovery_failed",
+                error.to_string(),
+                true,
+            )],
+        },
+    }
+}
+
+fn reconcile_recovered_workers(
+    state_store: &StateStore,
+    workers: &mut HashMap<String, WorkerRecord>,
+) -> Vec<ErrorPayload> {
+    let mut diagnostics = Vec::new();
+
+    for worker in workers.values_mut() {
+        if worker.is_terminal() {
+            continue;
+        }
+
+        worker.status = "failed".to_owned();
+        worker.summary = Some(match worker.summary.take() {
+            Some(summary) if !summary.trim().is_empty() => {
+                format!("{summary} (marked failed during daemon recovery)")
+            }
+            _ => "Worker was marked failed during daemon recovery".to_owned(),
+        });
+        worker.updated_at = now_timestamp();
+
+        match state_store.write_worker_metadata(
+            &worker.worker_id,
+            &WorkerMetadata::from_record(worker),
+        ) {
+            Ok(()) => diagnostics.push(recovery_error(
+                "worker_recovered_stale",
+                format!(
+                    "worker '{}' had non-terminal status on daemon startup and was marked failed",
+                    worker.worker_id
+                ),
+                false,
+            )),
+            Err(error) => diagnostics.push(recovery_error(
+                "worker_recovery_persist_failed",
+                format!(
+                    "worker '{}' was marked failed in memory, but recovery state could not be persisted: {error}",
+                    worker.worker_id
+                ),
+                true,
+            )),
+        }
+    }
+
+    diagnostics
+}
+
+fn recovery_diagnostics(
+    kind: &'static str,
+    diagnostics: Vec<StateRecoveryDiagnostic>,
+) -> Vec<ErrorPayload> {
+    diagnostics
         .into_iter()
-        .map(|record| record.metadata.into_record())
+        .map(|diagnostic| {
+            recovery_error(
+                format!("{kind}_metadata_recovery_skipped"),
+                format!(
+                    "skipped invalid {kind} metadata '{}': {}",
+                    diagnostic.path.display(),
+                    diagnostic.reason
+                ),
+                false,
+            )
+        })
         .collect()
 }
 
-fn recover_agent_records(state_store: &StateStore) -> HashMap<AgentId, AgentRecord> {
-    state_store
-        .recover_agent_metadata::<AgentMetadata>()
-        .map(|recovery| recovery.records)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|record| record.metadata.into_record())
-        .collect()
+fn recovery_error(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    retryable: bool,
+) -> ErrorPayload {
+    ErrorPayload {
+        code: code.into(),
+        message: message.into(),
+        retryable,
+    }
 }
 
 fn next_session_counter(sessions: &HashMap<SessionId, SessionRecord>) -> u64 {
@@ -2532,6 +2832,23 @@ fn next_agent_counter(agents: &HashMap<AgentId, AgentRecord>) -> u64 {
         .max()
         .unwrap_or(0)
         + 1
+}
+
+fn next_worker_counter(workers: &HashMap<String, WorkerRecord>) -> u64 {
+    workers
+        .keys()
+        .filter_map(|worker_id| worker_id.strip_prefix("worker_"))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn worker_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "canceled" | "expired"
+    )
 }
 
 fn load_workspace_registry(profile_home: &ProfileHome) -> HashMap<WorkspaceId, WorkspaceRecord> {
@@ -3822,6 +4139,169 @@ mod tests {
                     && agent.model.as_deref() == Some("echo/cadis-local-fallback")
                     && agent.parent_agent_id.as_ref() == Some(&AgentId::from("main"))
             })
+        }));
+    }
+
+    #[test]
+    fn worker_metadata_survives_runtime_restart_and_snapshot_replays_worker() {
+        let cadis_home = test_workspace("persistent-worker-home");
+        let worker_id = {
+            let mut runtime = runtime_with_home(cadis_home.clone());
+            let outcome = runtime.handle_request(RequestEnvelope::new(
+                RequestId::from("req_worker"),
+                ClientId::from("hud_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "/route @codex run focused tests".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ));
+
+            assert!(matches!(
+                outcome.response.response,
+                DaemonResponse::RequestAccepted(_)
+            ));
+            outcome
+                .events
+                .iter()
+                .find_map(|event| match &event.event {
+                    CadisEvent::WorkerCompleted(payload) => Some(payload.worker_id.clone()),
+                    _ => None,
+                })
+                .expect("worker.completed should be emitted")
+        };
+
+        assert_eq!(worker_id, "worker_000001");
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCompleted(payload)
+                    if payload.worker_id == worker_id
+                        && payload.agent_id.as_ref().map(AgentId::as_str) == Some("codex")
+                        && payload.status.as_deref() == Some("completed")
+            )
+        }));
+
+        let next = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_next_worker"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: "/route @codex inspect next task".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(next.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerStarted(payload)
+                    if payload.worker_id == "worker_000002"
+                        && payload.status.as_deref() == Some("running")
+            )
+        }));
+    }
+
+    #[test]
+    fn stale_running_worker_metadata_is_failed_on_runtime_recovery() {
+        let cadis_home = test_workspace("stale-worker-home");
+        let state_store = StateStore::new(&CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        });
+        state_store
+            .ensure_layout()
+            .expect("state layout should initialize");
+        state_store
+            .write_worker_metadata(
+                "worker_000007",
+                &WorkerMetadata {
+                    worker_id: "worker_000007".to_owned(),
+                    session_id: SessionId::from("ses_stale"),
+                    agent_id: Some(AgentId::from("codex")),
+                    parent_agent_id: Some(AgentId::from("main")),
+                    status: "running".to_owned(),
+                    cli: None,
+                    cwd: None,
+                    summary: Some("stale worker".to_owned()),
+                    worktree: None,
+                    artifacts: None,
+                    updated_at: now_timestamp(),
+                },
+            )
+            .expect("stale worker metadata should write");
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::DaemonError(payload)
+                    if payload.code == "worker_recovered_stale"
+                        && payload.message.contains("worker_000007")
+            )
+        }));
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCompleted(payload)
+                    if payload.worker_id == "worker_000007"
+                        && payload.status.as_deref() == Some("failed")
+                        && payload.summary.as_deref().is_some_and(|summary| {
+                            summary.contains("marked failed during daemon recovery")
+                        })
+            )
+        }));
+
+        let recovered = state_store
+            .recover_worker_metadata::<WorkerMetadata>()
+            .expect("worker metadata should recover");
+        assert_eq!(recovered.records.len(), 1);
+        assert_eq!(recovered.records[0].metadata.status, "failed");
+    }
+
+    #[test]
+    fn invalid_session_metadata_surfaces_recovery_diagnostic_in_snapshot() {
+        let cadis_home = test_workspace("invalid-session-recovery");
+        let state_store = StateStore::new(&CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        });
+        state_store
+            .ensure_layout()
+            .expect("state layout should initialize");
+        fs::write(state_store.state_dir().join("sessions/broken.json"), "{")
+            .expect("corrupt session metadata should write");
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::DaemonError(payload)
+                    if payload.code == "session_metadata_recovery_skipped"
+                        && payload.message.contains("broken.json")
+            )
         }));
     }
 

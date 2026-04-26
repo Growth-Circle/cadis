@@ -184,16 +184,18 @@
 - [x] Load `config.toml`.
 - [x] Write session metadata.
 - [x] Write agent metadata.
-- [ ] Write worker metadata.
+- [x] Write worker metadata for daemon-planned worker delegations.
 - [x] Write JSONL event logs.
 - [ ] Write approval state.
 - [x] Add store-level atomic JSON state helpers under `~/.cadis/state`.
 - [x] Implement atomic writes for store-level JSON metadata.
 - [x] Implement redaction.
 - [x] Add crash recovery metadata for daemon session/agent metadata.
+- [x] Add daemon recovery for stale non-terminal worker metadata.
 - [x] Add redaction tests.
 - [x] Add store-level recovery tests for partial and corrupt metadata files.
 - [x] Add daemon persistence integration tests for session/agent restart recovery.
+- [x] Add daemon persistence integration tests for worker restart recovery.
 
 ## 11. Agent Runtime
 
@@ -313,6 +315,7 @@
 - [ ] Track F: durable metadata and restart recovery for sessions, agents, workers, and approvals.
 - [x] Track F store baseline: atomic JSON helpers and fail-safe metadata recovery.
 - [x] Track F daemon baseline: session/agent metadata survives runtime restart and cancelled sessions are removed.
+- [x] Track F daemon worker baseline: worker metadata survives runtime restart and stale running workers recover as failed.
 - [ ] Track G: CADIS-native Wulan avatar engine.
 - [ ] Track H: profile homes, agent homes, workspace registry, grants, and worker worktrees.
 - [x] Track H baseline: default profile layout plus persistent workspace registry/grants.
