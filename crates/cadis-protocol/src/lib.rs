@@ -76,6 +76,10 @@ string_id!(
     AgentId
 );
 string_id!(
+    /// CADIS per-route agent runtime session identifier.
+    AgentSessionId
+);
+string_id!(
     /// CADIS registered workspace identifier.
     WorkspaceId
 );
@@ -748,6 +752,21 @@ pub enum CadisEvent {
     /// Agent completed a task.
     #[serde(rename = "agent.completed")]
     AgentCompleted(AgentEventPayload),
+    /// Agent runtime session started.
+    #[serde(rename = "agent.session.started")]
+    AgentSessionStarted(AgentSessionEventPayload),
+    /// Agent runtime session state changed.
+    #[serde(rename = "agent.session.updated")]
+    AgentSessionUpdated(AgentSessionEventPayload),
+    /// Agent runtime session completed.
+    #[serde(rename = "agent.session.completed")]
+    AgentSessionCompleted(AgentSessionEventPayload),
+    /// Agent runtime session failed.
+    #[serde(rename = "agent.session.failed")]
+    AgentSessionFailed(AgentSessionEventPayload),
+    /// Agent runtime session was cancelled.
+    #[serde(rename = "agent.session.cancelled")]
+    AgentSessionCancelled(AgentSessionEventPayload),
     /// Workspace registry snapshot.
     #[serde(rename = "workspace.list.response")]
     WorkspaceListResponse(WorkspaceListPayload),
@@ -944,6 +963,44 @@ pub struct AgentStatusChangedPayload {
     /// Optional current task summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+}
+
+/// Agent runtime session lifecycle payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct AgentSessionEventPayload {
+    /// Per-route agent runtime session ID.
+    pub agent_session_id: AgentSessionId,
+    /// Owning CADIS user session ID.
+    pub session_id: SessionId,
+    /// Route identifier that caused this agent session.
+    pub route_id: String,
+    /// Agent running the task.
+    pub agent_id: AgentId,
+    /// Parent agent for tree display and spawn accounting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<AgentId>,
+    /// Current task summary.
+    pub task: String,
+    /// Runtime state machine status.
+    pub status: AgentSessionStatus,
+    /// Absolute timeout deadline.
+    pub timeout_at: Timestamp,
+    /// Step budget for this session.
+    pub budget_steps: u32,
+    /// Consumed step count.
+    pub steps_used: u32,
+    /// Redacted result summary for terminal success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// Stable error code for terminal failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Redacted error summary for terminal failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Cancellation request timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancellation_requested_at: Option<Timestamp>,
 }
 
 /// Workspace registry snapshot payload.
@@ -1387,6 +1444,8 @@ pub enum ApprovalDecision {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
+    /// Agent is being created.
+    Spawning,
     /// Agent is idle.
     Idle,
     /// Agent is running.
@@ -1397,6 +1456,28 @@ pub enum AgentStatus {
     Completed,
     /// Agent failed.
     Failed,
+    /// Agent was cancelled.
+    Cancelled,
+}
+
+/// Agent runtime session status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSessionStatus {
+    /// Session was created and assigned.
+    Started,
+    /// Session is actively working.
+    Running,
+    /// Session completed successfully.
+    Completed,
+    /// Session failed.
+    Failed,
+    /// Session was cancelled.
+    Cancelled,
+    /// Session exceeded its timeout.
+    TimedOut,
+    /// Session exceeded its configured step budget.
+    BudgetExceeded,
 }
 
 /// Test status.
@@ -1792,6 +1873,59 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_session_event_serializes_runtime_metadata() {
+        let envelope = EventEnvelope::new(
+            EventId::from("evt_4"),
+            Timestamp::new_utc("2026-04-26T00:00:00Z").expect("timestamp should be UTC"),
+            "cadisd",
+            Some(SessionId::from("ses_1")),
+            CadisEvent::AgentSessionStarted(AgentSessionEventPayload {
+                agent_session_id: AgentSessionId::from("ags_000001"),
+                session_id: SessionId::from("ses_1"),
+                route_id: "route_000001".to_owned(),
+                agent_id: AgentId::from("coder"),
+                parent_agent_id: Some(AgentId::from("main")),
+                task: "run focused tests".to_owned(),
+                status: AgentSessionStatus::Running,
+                timeout_at: Timestamp::new_utc("2026-04-26T00:15:00Z")
+                    .expect("timestamp should be UTC"),
+                budget_steps: 1,
+                steps_used: 0,
+                result: None,
+                error_code: None,
+                error: None,
+                cancellation_requested_at: None,
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("event should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "event_id": "evt_4",
+                "timestamp": "2026-04-26T00:00:00Z",
+                "source": "cadisd",
+                "session_id": "ses_1",
+                "type": "agent.session.started",
+                "payload": {
+                    "agent_session_id": "ags_000001",
+                    "session_id": "ses_1",
+                    "route_id": "route_000001",
+                    "agent_id": "coder",
+                    "parent_agent_id": "main",
+                    "task": "run focused tests",
+                    "status": "running",
+                    "timeout_at": "2026-04-26T00:15:00Z",
+                    "budget_steps": 1,
+                    "steps_used": 0
+                }
+            })
+        );
     }
 
     #[test]

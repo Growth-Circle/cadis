@@ -127,6 +127,25 @@ impl Default for AgentSpawnConfig {
     }
 }
 
+/// Daemon-owned Agent Runtime settings.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AgentRuntimeConfig {
+    /// Default per-route AgentSession timeout.
+    pub default_timeout_sec: i64,
+    /// Maximum state-machine steps per AgentSession.
+    pub max_steps_per_session: u32,
+}
+
+impl Default for AgentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_sec: 900,
+            max_steps_per_session: 1,
+        }
+    }
+}
+
 /// Daemon-owned orchestration settings.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -180,6 +199,8 @@ pub struct CadisConfig {
     pub voice: VoiceConfig,
     /// Request-driven agent spawn limits.
     pub agent_spawn: AgentSpawnConfig,
+    /// Per-route AgentSession runtime limits.
+    pub agent_runtime: AgentRuntimeConfig,
     /// Daemon-owned orchestrator settings.
     pub orchestrator: OrchestratorConfig,
     /// Profile-home selection and profile layout settings.
@@ -196,6 +217,7 @@ impl Default for CadisConfig {
             hud: HudConfig::default(),
             voice: VoiceConfig::default(),
             agent_spawn: AgentSpawnConfig::default(),
+            agent_runtime: AgentRuntimeConfig::default(),
             orchestrator: OrchestratorConfig::default(),
             profile: ProfileConfig::default(),
         }
@@ -238,6 +260,10 @@ impl CadisConfig {
                 "max_depth": self.agent_spawn.max_depth,
                 "max_children_per_parent": self.agent_spawn.max_children_per_parent,
                 "max_total_agents": self.agent_spawn.max_total_agents
+            },
+            "agent_runtime": {
+                "default_timeout_sec": self.agent_runtime.default_timeout_sec,
+                "max_steps_per_session": self.agent_runtime.max_steps_per_session
             },
             "orchestrator": {
                 "worker_delegation_enabled": self.orchestrator.worker_delegation_enabled,
@@ -1598,6 +1624,25 @@ mod tests {
         assert_eq!(
             config.ui_preferences()["agent_spawn"]["max_children_per_parent"],
             serde_json::json!(2)
+        );
+    }
+
+    #[test]
+    fn parses_agent_runtime_limits() {
+        let config = toml::from_str::<CadisConfig>(
+            r#"
+            [agent_runtime]
+            default_timeout_sec = 60
+            max_steps_per_session = 3
+            "#,
+        )
+        .expect("agent runtime config should parse");
+
+        assert_eq!(config.agent_runtime.default_timeout_sec, 60);
+        assert_eq!(config.agent_runtime.max_steps_per_session, 3);
+        assert_eq!(
+            config.ui_preferences()["agent_runtime"]["max_steps_per_session"],
+            serde_json::json!(3)
         );
     }
 

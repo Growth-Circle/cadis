@@ -49,6 +49,9 @@ Implemented in the first runnable baseline:
 - Orchestrator baseline: daemon-owned `@agent` routing, `orchestrator.route`
   events, route-time `agent.status.changed` events, request-driven
   `agent.spawn`, and spawn limits.
+- Agent Runtime baseline: in-memory per-route `AgentSession` records with route,
+  task, result, timeout deadline, step budget, cancellation, and parent-child
+  metadata exposed through `agent.session.*` lifecycle events.
 - Track C worker baseline: in-memory daemon worker registry, route-time
   `worker.log.delta` lifecycle logs, `events.snapshot` worker lifecycle
   snapshots, and one-shot `worker.tail` replay.
@@ -70,8 +73,9 @@ Implemented in the first runnable baseline:
 Still pending:
 
 - Native mutating file/shell tools.
-- Agent runtime beyond the current route-and-answer path; existing
-  `agent.spawn` is client-requested, not agent-driven.
+- Agent runtime beyond the current route-and-answer path: async cancellation,
+  model-driven spawn, multi-step budgets, durable AgentSession recovery, and a
+  provider/tool-call loop remain future work.
 - Daemon startup wiring for durable session, agent, worker, and approval
   recovery. The store-level atomic write and fail-safe recovery helpers exist.
 - Worker execution lifecycle, isolated worktrees, Telegram/mobile adapters,
@@ -132,17 +136,21 @@ Owner: agent-runtime and worker agents.
 Tasks:
 
 - Introduce an `AgentSession` state machine with route, task, result, timeout,
-  budget, cancellation, and parent-child metadata.
+  budget, cancellation, and parent-child metadata. Initial baseline is
+  in-memory and wraps the existing synchronous route-and-answer path.
 - Extend the current request-driven spawn limits into agent-driven spawn:
   max depth, max children per agent, and global agent cap.
 - Implement agent-driven spawn as a daemon-authorized action, not HUD logic.
+  The current safe slice supports explicit daemon-owned `/worker` and `/spawn`
+  orchestration through the same core spawn path; implicit model-driven spawn is
+  still reserved for later runtime work.
 - Add a worker registry with `worker.started`, `worker.log.delta`,
   `worker.completed`, `worker.failed`, and `worker.cancelled`.
 - Implement `worker.tail` from daemon-owned worker logs.
 
 Exit criteria:
 
-- An agent can request a subagent through the orchestrator and the daemon enforces
+- An explicit orchestrator action can request a subagent and the daemon enforces
   limits.
 - HUD worker tree is driven by daemon worker events.
 - Worker logs can be tailed from CLI and HUD.
@@ -517,8 +525,8 @@ Tasks:
 - Define agent roles.
 - Define task input and result.
 - Add lifecycle events.
-- Add budget and timeout.
-- Add cancellation.
+- Add budget and timeout metadata.
+- Add cancellation metadata.
 - Add basic tool-call loop if provider supports tool calls.
 - Add text protocol fallback for models without native tool calls later.
 

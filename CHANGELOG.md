@@ -15,6 +15,7 @@ The format follows Keep a Changelog style, and the project will use Semantic Ver
 - Desktop MVP runtime with `cadisd`, `cadis`, Unix socket NDJSON frames, status/chat/doctor commands, optional Ollama model adapter, local fallback responses, JSONL event logs, and redaction.
 - Native `cadis-hud` prototype with orbital HUD shell, status bar, chat command panel, config tabs, theme controls, model controls, voice preview hooks, rename dialog, and approval stack UI.
 - Example desktop MVP config at `config/cadis.example.toml`.
+- Agent Runtime baseline with daemon-owned `AgentSession` lifecycle events, per-route timeout and step-budget metadata, cancellation metadata, and explicit `/worker` or `/spawn` orchestration through core spawn limits.
 
 ### Changed
 

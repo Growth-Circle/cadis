@@ -13,19 +13,20 @@ use cadis_models::{
 use cadis_policy::{PolicyDecision, PolicyEngine};
 use cadis_protocol::{
     AgentEventPayload, AgentId, AgentListPayload, AgentModelChangedPayload, AgentRenamedPayload,
-    AgentSpawnRequest, AgentStatus, AgentStatusChangedPayload, ApprovalDecision, ApprovalId,
-    ApprovalRequestPayload, ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent,
-    ClientRequest, DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope, EventId,
-    MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
-    ModelInvocationPayload, ModelReadiness, ModelsListPayload, OrchestratorRoutePayload,
-    ProtocolVersion, RequestAcceptedPayload, RequestEnvelope, RequestId, ResponseEnvelope,
-    SessionEventPayload, SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload,
-    ToolFailedPayload, UiPreferencesPayload, WorkerArtifactLocations, WorkerEventPayload,
-    WorkerLogDeltaPayload, WorkerTailRequest, WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent,
-    WorkerWorktreeState, WorkspaceAccess, WorkspaceDoctorCheck, WorkspaceDoctorPayload,
-    WorkspaceDoctorRequest, WorkspaceGrantId, WorkspaceGrantPayload, WorkspaceGrantRequest,
-    WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest, WorkspaceRecordPayload,
-    WorkspaceRegisterRequest, WorkspaceRevokeRequest,
+    AgentSessionEventPayload, AgentSessionId, AgentSessionStatus, AgentSpawnRequest, AgentStatus,
+    AgentStatusChangedPayload, ApprovalDecision, ApprovalId, ApprovalRequestPayload,
+    ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent, ClientRequest, DaemonResponse,
+    DaemonStatusPayload, ErrorPayload, EventEnvelope, EventId, MessageCompletedPayload,
+    MessageDeltaPayload, MessageSendRequest, ModelDescriptor, ModelInvocationPayload,
+    ModelReadiness, ModelsListPayload, OrchestratorRoutePayload, ProtocolVersion,
+    RequestAcceptedPayload, RequestEnvelope, RequestId, ResponseEnvelope, SessionEventPayload,
+    SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload, ToolFailedPayload,
+    UiPreferencesPayload, WorkerArtifactLocations, WorkerEventPayload, WorkerLogDeltaPayload,
+    WorkerTailRequest, WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent, WorkerWorktreeState,
+    WorkspaceAccess, WorkspaceDoctorCheck, WorkspaceDoctorPayload, WorkspaceDoctorRequest,
+    WorkspaceGrantId, WorkspaceGrantPayload, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
+    WorkspaceListPayload, WorkspaceListRequest, WorkspaceRecordPayload, WorkspaceRegisterRequest,
+    WorkspaceRevokeRequest,
 };
 use cadis_store::{
     redact, ApprovalRecord, ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
@@ -98,6 +99,24 @@ impl Default for OrchestratorConfig {
     }
 }
 
+/// Configuration for the in-memory AgentSession state machine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentRuntimeConfig {
+    /// Default timeout for a per-route agent session.
+    pub default_timeout_sec: i64,
+    /// Maximum state-machine steps a single agent route may consume.
+    pub max_steps_per_session: u32,
+}
+
+impl Default for AgentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_sec: 900,
+            max_steps_per_session: 1,
+        }
+    }
+}
+
 /// Result of handling one client request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestOutcome {
@@ -116,14 +135,17 @@ pub struct Runtime {
     next_event: u64,
     next_session: u64,
     next_agent: u64,
+    next_agent_session: u64,
     next_route: u64,
     next_worker: u64,
     sessions: HashMap<SessionId, SessionRecord>,
     agents: HashMap<AgentId, AgentRecord>,
+    agent_sessions: HashMap<AgentSessionId, AgentSessionRecord>,
     workers: HashMap<String, WorkerRecord>,
     orchestrator: Orchestrator,
     ui_preferences: serde_json::Value,
     spawn_limits: AgentSpawnLimits,
+    agent_runtime: AgentRuntimeConfig,
     policy: PolicyEngine,
     approval_store: ApprovalStore,
     state_store: StateStore,
@@ -141,6 +163,7 @@ impl Runtime {
     pub fn new(options: RuntimeOptions, provider: Box<dyn ModelProvider>) -> Self {
         let ui_preferences = options.ui_preferences.clone();
         let spawn_limits = AgentSpawnLimits::from_options(&options.ui_preferences);
+        let agent_runtime = AgentRuntimeConfig::from_options(&options.ui_preferences);
         let orchestrator =
             Orchestrator::new(OrchestratorConfig::from_options(&options.ui_preferences));
         let approval_store = ApprovalStore::new(&options.cadis_home);
@@ -171,14 +194,17 @@ impl Runtime {
             next_event: 1,
             next_session,
             next_agent,
+            next_agent_session: 1,
             next_route: 1,
             next_worker: 1,
             sessions,
             agents,
+            agent_sessions: HashMap::new(),
             workers: HashMap::new(),
             orchestrator,
             ui_preferences,
             spawn_limits,
+            agent_runtime,
             policy: PolicyEngine,
             approval_store,
             state_store,
@@ -230,6 +256,7 @@ impl Runtime {
             }
             ClientRequest::SessionCancel(request) => {
                 if self.sessions.remove(&request.session_id).is_some() {
+                    let mut events = self.cancel_agent_sessions_for_session(&request.session_id);
                     let _ = self
                         .state_store
                         .remove_session_metadata(&request.session_id);
@@ -240,7 +267,8 @@ impl Runtime {
                             title: None,
                         }),
                     );
-                    self.accept(request_id, vec![event])
+                    events.push(event);
+                    self.accept(request_id, events)
                 } else {
                     self.reject(
                         request_id,
@@ -752,17 +780,26 @@ impl Runtime {
             ));
         }
 
+        let route_id = format!("route_{:06}", self.next_route);
+        self.next_route += 1;
+        let (agent_session_id, agent_session_started) = self.start_agent_session(
+            session_id.clone(),
+            route_id.clone(),
+            route.agent_id.clone(),
+            route.content.clone(),
+        );
+        events.push(agent_session_started);
+
         events.push(self.session_event(
             session_id.clone(),
             CadisEvent::OrchestratorRoute(OrchestratorRoutePayload {
-                id: format!("route_{:06}", self.next_route),
+                id: route_id,
                 source: "cadisd".to_owned(),
                 target_agent_id: route.agent_id.clone(),
                 target_agent_name: route.agent_name.clone(),
                 reason: route.reason.clone(),
             }),
         ));
-        self.next_route += 1;
 
         let session_workspace = self.session_workspace(&session_id);
         let artifact_root = self.options.cadis_home.join("artifacts").join("workers");
@@ -812,6 +849,33 @@ impl Runtime {
             }),
         ));
 
+        if let Some(event) = self.consume_agent_session_step(&agent_session_id) {
+            events.push(event);
+        }
+        if self
+            .agent_sessions
+            .get(&agent_session_id)
+            .is_some_and(|record| record.status == AgentSessionStatus::BudgetExceeded)
+        {
+            events.push(self.session_event(
+                session_id.clone(),
+                CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                    agent_id: route.agent_id.clone(),
+                    status: AgentStatus::Failed,
+                    task: Some("agent budget exceeded".to_owned()),
+                }),
+            ));
+            events.push(self.session_event(
+                session_id,
+                CadisEvent::SessionFailed(ErrorPayload {
+                    code: "agent_budget_exceeded".to_owned(),
+                    message: "agent session exceeded its configured step budget".to_owned(),
+                    retryable: false,
+                }),
+            ));
+            return self.accept(request_id, events);
+        }
+
         let prompt = self.agent_prompt(&route.agent_id, &route.content);
         let selected_model = self
             .agents
@@ -856,12 +920,48 @@ impl Runtime {
                     session_id.clone(),
                     CadisEvent::MessageCompleted(MessageCompletedPayload {
                         content_kind,
-                        content: Some(final_content),
+                        content: Some(final_content.clone()),
                         agent_id: Some(route.agent_id.clone()),
                         agent_name: Some(route.agent_name.clone()),
                         model,
                     }),
                 ));
+                if self.agent_session_timed_out(&agent_session_id) {
+                    let error_message = format!(
+                        "agent session exceeded default_timeout_sec={}",
+                        self.agent_runtime.default_timeout_sec
+                    );
+                    if let Some(event) = self.fail_agent_session(
+                        &agent_session_id,
+                        AgentSessionStatus::TimedOut,
+                        "agent_timeout",
+                        error_message.clone(),
+                    ) {
+                        events.push(event);
+                    }
+                    events.push(self.session_event(
+                        session_id.clone(),
+                        CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                            agent_id: route.agent_id.clone(),
+                            status: AgentStatus::Failed,
+                            task: Some(error_message.clone()),
+                        }),
+                    ));
+                    events.push(self.session_event(
+                        session_id,
+                        CadisEvent::SessionFailed(ErrorPayload {
+                            code: "agent_timeout".to_owned(),
+                            message: error_message,
+                            retryable: true,
+                        }),
+                    ));
+                    return self.accept(request_id, events);
+                }
+                if let Some(event) =
+                    self.complete_agent_session(&agent_session_id, final_content.clone())
+                {
+                    events.push(event);
+                }
                 events.push(self.session_event(
                     session_id.clone(),
                     CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
@@ -897,6 +997,14 @@ impl Runtime {
             }
             Err(error) => {
                 let error_message = error.message().to_owned();
+                if let Some(event) = self.fail_agent_session(
+                    &agent_session_id,
+                    AgentSessionStatus::Failed,
+                    error.code(),
+                    error_message.clone(),
+                ) {
+                    events.push(event);
+                }
                 events.push(self.session_event(
                     session_id.clone(),
                     CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
@@ -1310,6 +1418,12 @@ impl Runtime {
         workers
     }
 
+    fn agent_session_records_sorted(&self) -> Vec<AgentSessionRecord> {
+        let mut records = self.agent_sessions.values().cloned().collect::<Vec<_>>();
+        records.sort_by(|left, right| left.id.cmp(&right.id));
+        records
+    }
+
     fn snapshot_events(&mut self) -> Vec<EventEnvelope> {
         let agents = self
             .agent_records_sorted()
@@ -1346,6 +1460,26 @@ impl Runtime {
             ));
         }
 
+        for record in self.agent_session_records_sorted() {
+            let event = match record.status {
+                AgentSessionStatus::Completed => {
+                    CadisEvent::AgentSessionCompleted(record.event_payload())
+                }
+                AgentSessionStatus::Failed
+                | AgentSessionStatus::TimedOut
+                | AgentSessionStatus::BudgetExceeded => {
+                    CadisEvent::AgentSessionFailed(record.event_payload())
+                }
+                AgentSessionStatus::Cancelled => {
+                    CadisEvent::AgentSessionCancelled(record.event_payload())
+                }
+                AgentSessionStatus::Started | AgentSessionStatus::Running => {
+                    CadisEvent::AgentSessionUpdated(record.event_payload())
+                }
+            };
+            events.push(self.session_event(record.session_id.clone(), event));
+        }
+
         for worker in self.worker_records_sorted() {
             let event = if worker.status == "running" {
                 CadisEvent::WorkerStarted(worker.event_payload())
@@ -1373,6 +1507,159 @@ impl Runtime {
         let worker_id = format!("worker_{:06}", self.next_worker);
         self.next_worker += 1;
         worker_id
+    }
+
+    fn next_agent_session_id(&mut self) -> AgentSessionId {
+        let agent_session_id = AgentSessionId::from(format!("ags_{:06}", self.next_agent_session));
+        self.next_agent_session += 1;
+        agent_session_id
+    }
+
+    fn start_agent_session(
+        &mut self,
+        session_id: SessionId,
+        route_id: String,
+        agent_id: AgentId,
+        task: String,
+    ) -> (AgentSessionId, EventEnvelope) {
+        let parent_agent_id = self
+            .agents
+            .get(&agent_id)
+            .and_then(|agent| agent.parent_agent_id.clone());
+        let id = self.next_agent_session_id();
+        let record = AgentSessionRecord {
+            id: id.clone(),
+            session_id: session_id.clone(),
+            route_id,
+            agent_id,
+            parent_agent_id,
+            task,
+            status: AgentSessionStatus::Running,
+            timeout_at: timestamp_after_seconds(self.agent_runtime.default_timeout_sec),
+            budget_steps: self.agent_runtime.max_steps_per_session,
+            steps_used: 0,
+            result: None,
+            error_code: None,
+            error: None,
+            cancellation_requested_at: None,
+        };
+        let event = self.session_event(
+            session_id,
+            CadisEvent::AgentSessionStarted(record.event_payload()),
+        );
+        self.agent_sessions.insert(id.clone(), record);
+        (id, event)
+    }
+
+    fn consume_agent_session_step(
+        &mut self,
+        agent_session_id: &AgentSessionId,
+    ) -> Option<EventEnvelope> {
+        let (session_id, payload) = {
+            let record = self.agent_sessions.get_mut(agent_session_id)?;
+            if record.steps_used >= record.budget_steps {
+                record.status = AgentSessionStatus::BudgetExceeded;
+                record.error_code = Some("agent_budget_exceeded".to_owned());
+                record.error = Some(format!(
+                    "agent session exceeded max_steps_per_session={}",
+                    record.budget_steps
+                ));
+                (
+                    record.session_id.clone(),
+                    CadisEvent::AgentSessionFailed(record.event_payload()),
+                )
+            } else {
+                record.steps_used += 1;
+                (
+                    record.session_id.clone(),
+                    CadisEvent::AgentSessionUpdated(record.event_payload()),
+                )
+            }
+        };
+        Some(self.session_event(session_id, payload))
+    }
+
+    fn complete_agent_session(
+        &mut self,
+        agent_session_id: &AgentSessionId,
+        result: impl Into<String>,
+    ) -> Option<EventEnvelope> {
+        let (session_id, payload) = {
+            let record = self.agent_sessions.get_mut(agent_session_id)?;
+            record.status = AgentSessionStatus::Completed;
+            record.result = Some(redact(&result.into()));
+            (record.session_id.clone(), record.event_payload())
+        };
+        Some(self.session_event(session_id, CadisEvent::AgentSessionCompleted(payload)))
+    }
+
+    fn fail_agent_session(
+        &mut self,
+        agent_session_id: &AgentSessionId,
+        status: AgentSessionStatus,
+        code: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Option<EventEnvelope> {
+        let (session_id, payload) = {
+            let record = self.agent_sessions.get_mut(agent_session_id)?;
+            record.status = status;
+            record.error_code = Some(code.into());
+            record.error = Some(redact(&error.into()));
+            (record.session_id.clone(), record.event_payload())
+        };
+        Some(self.session_event(session_id, CadisEvent::AgentSessionFailed(payload)))
+    }
+
+    fn agent_session_timed_out(&self, agent_session_id: &AgentSessionId) -> bool {
+        self.agent_sessions
+            .get(agent_session_id)
+            .is_some_and(|record| timestamp_is_past(&record.timeout_at))
+    }
+
+    fn cancel_agent_sessions_for_session(&mut self, session_id: &SessionId) -> Vec<EventEnvelope> {
+        let agent_session_ids = self
+            .agent_sessions
+            .iter()
+            .filter(|(_, record)| {
+                &record.session_id == session_id && !agent_session_is_terminal(record.status)
+            })
+            .map(|(agent_session_id, _)| agent_session_id.clone())
+            .collect::<Vec<_>>();
+        let cancellation_requested_at = now_timestamp();
+
+        let mut events = Vec::new();
+        for agent_session_id in agent_session_ids {
+            let Some((event_session_id, payload, agent_id)) = ({
+                self.agent_sessions
+                    .get_mut(&agent_session_id)
+                    .map(|record| {
+                        record.status = AgentSessionStatus::Cancelled;
+                        record.error_code = Some("session_cancelled".to_owned());
+                        record.error = Some("session was cancelled".to_owned());
+                        record.cancellation_requested_at = Some(cancellation_requested_at.clone());
+                        (
+                            record.session_id.clone(),
+                            record.event_payload(),
+                            record.agent_id.clone(),
+                        )
+                    })
+            }) else {
+                continue;
+            };
+            events.push(self.session_event(
+                event_session_id.clone(),
+                CadisEvent::AgentSessionCancelled(payload),
+            ));
+            events.push(self.session_event(
+                event_session_id,
+                CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                    agent_id,
+                    status: AgentStatus::Cancelled,
+                    task: Some("session cancelled".to_owned()),
+                }),
+            ));
+        }
+        events
     }
 
     fn start_worker(
@@ -1976,6 +2263,23 @@ impl AgentSpawnLimits {
     }
 }
 
+impl AgentRuntimeConfig {
+    fn from_options(options: &serde_json::Value) -> Self {
+        let defaults = Self::default();
+        let Some(agent_runtime) = options.get("agent_runtime") else {
+            return defaults;
+        };
+
+        Self {
+            default_timeout_sec: json_i64(agent_runtime, "default_timeout_sec")
+                .filter(|value| *value > 0)
+                .unwrap_or(defaults.default_timeout_sec),
+            max_steps_per_session: json_u32(agent_runtime, "max_steps_per_session")
+                .unwrap_or(defaults.max_steps_per_session),
+        }
+    }
+}
+
 impl OrchestratorConfig {
     fn from_options(options: &serde_json::Value) -> Self {
         let defaults = Self::default();
@@ -2254,6 +2558,45 @@ impl AgentRecord {
             parent_agent_id: self.parent_agent_id,
             model: Some(self.model),
             status: Some(self.status),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentSessionRecord {
+    id: AgentSessionId,
+    session_id: SessionId,
+    route_id: String,
+    agent_id: AgentId,
+    parent_agent_id: Option<AgentId>,
+    task: String,
+    status: AgentSessionStatus,
+    timeout_at: Timestamp,
+    budget_steps: u32,
+    steps_used: u32,
+    result: Option<String>,
+    error_code: Option<String>,
+    error: Option<String>,
+    cancellation_requested_at: Option<Timestamp>,
+}
+
+impl AgentSessionRecord {
+    fn event_payload(&self) -> AgentSessionEventPayload {
+        AgentSessionEventPayload {
+            agent_session_id: self.id.clone(),
+            session_id: self.session_id.clone(),
+            route_id: self.route_id.clone(),
+            agent_id: self.agent_id.clone(),
+            parent_agent_id: self.parent_agent_id.clone(),
+            task: self.task.clone(),
+            status: self.status,
+            timeout_at: self.timeout_at.clone(),
+            budget_steps: self.budget_steps,
+            steps_used: self.steps_used,
+            result: self.result.clone(),
+            error_code: self.error_code.clone(),
+            error: self.error.clone(),
+            cancellation_requested_at: self.cancellation_requested_at.clone(),
         }
     }
 }
@@ -2846,6 +3189,18 @@ fn timestamp_after_minutes(minutes: i64) -> Timestamp {
     let value =
         (Utc::now() + Duration::minutes(minutes)).to_rfc3339_opts(SecondsFormat::Secs, true);
     Timestamp::new_utc(value).expect("chrono UTC timestamp should satisfy protocol")
+}
+
+fn timestamp_after_seconds(seconds: i64) -> Timestamp {
+    let value =
+        (Utc::now() + Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true);
+    Timestamp::new_utc(value).expect("chrono UTC timestamp should satisfy protocol")
+}
+
+fn timestamp_is_past(timestamp: &Timestamp) -> bool {
+    DateTime::parse_from_rfc3339(timestamp.as_str())
+        .map(|timestamp| timestamp.with_timezone(&Utc) <= Utc::now())
+        .unwrap_or(true)
 }
 
 fn approval_is_expired(record: &ApprovalRecord) -> bool {
@@ -3462,11 +3817,33 @@ fn branch_slug(value: &str) -> String {
     }
 }
 
+fn agent_session_is_terminal(status: AgentSessionStatus) -> bool {
+    matches!(
+        status,
+        AgentSessionStatus::Completed
+            | AgentSessionStatus::Failed
+            | AgentSessionStatus::Cancelled
+            | AgentSessionStatus::TimedOut
+            | AgentSessionStatus::BudgetExceeded
+    )
+}
+
 fn json_usize(value: &serde_json::Value, key: &str) -> Option<usize> {
     value
         .get(key)
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
+}
+
+fn json_u32(value: &serde_json::Value, key: &str) -> Option<u32> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn json_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(serde_json::Value::as_i64)
 }
 
 fn merge_json(mut base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
@@ -3577,6 +3954,33 @@ mod tests {
                 }),
             },
             provider,
+        )
+    }
+
+    fn runtime_with_agent_runtime_config(agent_runtime: AgentRuntimeConfig) -> Runtime {
+        Runtime::new(
+            RuntimeOptions {
+                cadis_home: test_workspace("cadis-home"),
+                profile_id: "default".to_owned(),
+                socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
+                model_provider: "echo".to_owned(),
+                ui_preferences: serde_json::json!({
+                    "agent_spawn": {
+                        "max_depth": AgentSpawnLimits::default().max_depth,
+                        "max_children_per_parent": AgentSpawnLimits::default().max_children_per_parent,
+                        "max_total_agents": AgentSpawnLimits::default().max_total_agents
+                    },
+                    "agent_runtime": {
+                        "default_timeout_sec": agent_runtime.default_timeout_sec,
+                        "max_steps_per_session": agent_runtime.max_steps_per_session
+                    },
+                    "orchestrator": {
+                        "worker_delegation_enabled": true,
+                        "default_worker_role": "Worker"
+                    }
+                }),
+            },
+            Box::<EchoProvider>::default(),
         )
     }
 
@@ -4182,6 +4586,138 @@ mod tests {
             .events
             .iter()
             .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
+    }
+
+    #[test]
+    fn message_send_emits_agent_session_lifecycle_events() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_agent_session"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("codex")),
+                content: "run tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        let started = outcome.events.iter().find_map(|event| match &event.event {
+            CadisEvent::AgentSessionStarted(payload) => Some(payload),
+            _ => None,
+        });
+        let started = started.expect("agent.session.started should be emitted");
+        assert_eq!(started.agent_id.as_str(), "codex");
+        assert_eq!(started.route_id, "route_000001");
+        assert_eq!(started.status, AgentSessionStatus::Running);
+        assert_eq!(started.task, "run tests");
+        assert_eq!(started.budget_steps, 1);
+        assert_eq!(started.steps_used, 0);
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionUpdated(payload)
+                    if payload.agent_session_id == started.agent_session_id
+                        && payload.steps_used == 1
+            )
+        }));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionCompleted(payload)
+                    if payload.agent_session_id == started.agent_session_id
+                        && payload.result.as_deref().is_some_and(|result| result.contains("run tests"))
+            )
+        }));
+    }
+
+    #[test]
+    fn agent_session_budget_limit_fails_before_provider_execution() {
+        let mut runtime = runtime_with_agent_runtime_config(AgentRuntimeConfig {
+            default_timeout_sec: 900,
+            max_steps_per_session: 0,
+        });
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_budget"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("codex")),
+                content: "run tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionFailed(payload)
+                    if payload.status == AgentSessionStatus::BudgetExceeded
+                        && payload.error_code.as_deref() == Some("agent_budget_exceeded")
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::SessionFailed(payload)
+                    if payload.code == "agent_budget_exceeded"
+            )
+        }));
+    }
+
+    #[test]
+    fn session_cancel_marks_running_agent_sessions_cancelled() {
+        let mut runtime = runtime();
+        let session_id = runtime.create_session(Some("Cancelable".to_owned()), None);
+        let (agent_session_id, _event) = runtime.start_agent_session(
+            session_id.clone(),
+            "route_000001".to_owned(),
+            AgentId::from("codex"),
+            "wait for user".to_owned(),
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_cancel"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionCancel(SessionTargetRequest {
+                session_id: session_id.clone(),
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionCancelled(payload)
+                    if payload.agent_session_id == agent_session_id
+                        && payload.status == AgentSessionStatus::Cancelled
+                        && payload.cancellation_requested_at.is_some()
+            )
+        }));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentStatusChanged(payload)
+                    if payload.agent_id.as_str() == "codex"
+                        && payload.status == AgentStatus::Cancelled
+            )
+        }));
     }
 
     #[test]

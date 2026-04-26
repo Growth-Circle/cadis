@@ -197,19 +197,21 @@
 
 ## 11. Agent Runtime
 
-- [ ] Define `AgentSession`.
+- [x] Define `AgentSession`.
 - [ ] Define agent roles.
-- [ ] Define agent lifecycle.
+- [x] Define AgentSession lifecycle event baseline.
 - [ ] Implement main agent.
 - [x] Implement daemon-owned `@agent` routing baseline.
 - [x] Implement client-driven `agent.spawn` baseline.
-- [ ] Add agent-driven spawn through daemon-approved action.
+- [x] Add daemon-owned explicit `/worker` and `/spawn` orchestration through the core spawn path.
+- [ ] Add implicit model-driven spawn through daemon-approved action.
 - [x] Add request-driven spawn max depth, max children, and global cap.
 - [x] Add route-time agent status events baseline.
 - [ ] Add full lifecycle agent status events.
-- [ ] Add budget limits.
-- [ ] Add timeout limits.
-- [ ] Add cancellation.
+- [x] Add per-route AgentSession step budget baseline.
+- [x] Add per-route AgentSession timeout deadline baseline.
+- [x] Add session-cancel AgentSession cancellation baseline.
+- [ ] Add async provider/tool cancellation.
 - [ ] Add tool-call loop.
 - [ ] Add model fallback behavior.
 
@@ -308,6 +310,9 @@
 - [ ] Track A: daemon event bus and live session subscription.
 - [ ] Track B: provider readiness, effective model metadata, and provider streaming.
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
+  Baselines landed: AgentSession state/events, explicit daemon-owned spawn,
+  spawn limits, worker registry, and worker tail. Remaining: implicit
+  model-driven spawn, worker failed/cancelled events, and executable workers.
 - [ ] Track D: policy-backed tools and approval persistence.
 - [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
 - [ ] Track F: durable metadata and restart recovery for sessions, agents, workers, and approvals.
@@ -354,11 +359,11 @@
 ## 17. Multi-Agent Tree
 
 - [ ] Define tree data model.
-- [ ] Enforce max depth.
-- [ ] Enforce max children.
-- [ ] Enforce max global agents.
-- [ ] Enforce budget.
-- [ ] Support spawn.
+- [x] Enforce max depth.
+- [x] Enforce max children.
+- [x] Enforce max global agents.
+- [x] Enforce budget baseline.
+- [x] Support spawn baseline.
 - [ ] Support kill.
 - [ ] Support tail.
 - [ ] Support result collection.

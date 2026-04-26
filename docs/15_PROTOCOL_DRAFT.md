@@ -277,6 +277,11 @@ agent.renamed
 agent.model.changed
 agent.status.changed
 agent.completed
+agent.session.started
+agent.session.updated
+agent.session.completed
+agent.session.failed
+agent.session.cancelled
 workspace.list.response
 workspace.registered
 workspace.grant.created
@@ -304,6 +309,35 @@ voice.completed
 ```
 
 `models.list.response` payloads include conservative provider readiness metadata:
+
+`agent.session.*` events are emitted by the daemon-owned Agent Runtime baseline
+for each routed agent task. They are in-memory for the desktop MVP and carry the
+route, task, result, timeout, budget, cancellation, and parent-child metadata
+needed by clients to render lifecycle state without owning orchestration:
+
+```json
+{
+  "type": "agent.session.started",
+  "agent_session_id": "ags_000001",
+  "session_id": "ses_...",
+  "route_id": "route_000001",
+  "agent_id": "coder",
+  "parent_agent_id": "main",
+  "task": "run focused tests",
+  "status": "running",
+  "timeout_at": "2026-04-26T00:15:00Z",
+  "budget_steps": 1,
+  "steps_used": 0
+}
+```
+
+Allowed AgentSession statuses are `started`, `running`, `completed`, `failed`,
+`cancelled`, `timed_out`, and `budget_exceeded`. `agent.session.completed` adds
+an optional redacted `result`. Terminal failure/cancellation events add optional
+`error_code`, `error`, and `cancellation_requested_at` fields as applicable.
+The current baseline enforces a per-route step budget before provider execution
+and records timeout deadlines; model/tool-loop cancellation and async interrupt
+remain later runtime work.
 
 `workspace.list.response` payload:
 
@@ -563,6 +597,9 @@ The daemon assigns the new `agent_id` and confirms with `agent.spawned`.
 Client-requested spawning and explicit `/worker` or `/spawn` orchestration are
 bounded by daemon config. The desktop MVP defaults allow child depth 2, 4 direct
 children per parent, and 32 total registered agents including built-in agents.
+Explicit orchestration is daemon-owned: `/worker` and `/spawn` requests create
+an AgentSession, call the same core spawn path as `agent.spawn`, and enforce the
+same depth, child, and global caps before any provider response is produced.
 Rejections use:
 
 - `agent_spawn_depth_limit_exceeded`

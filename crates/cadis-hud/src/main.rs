@@ -1114,11 +1114,13 @@ fn slot_positions(rect: Rect) -> [Pos2; 12] {
 
 fn status_color(status: AgentStatus, theme: &Palette) -> Color32 {
     match status {
+        AgentStatus::Spawning => theme.warn,
         AgentStatus::Idle => theme.dim,
         AgentStatus::Running => theme.ok,
         AgentStatus::WaitingApproval => theme.warn,
         AgentStatus::Completed => theme.accent,
         AgentStatus::Failed => theme.err,
+        AgentStatus::Cancelled => theme.dim,
     }
 }
 
