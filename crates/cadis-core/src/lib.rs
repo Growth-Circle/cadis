@@ -27,12 +27,14 @@ use cadis_protocol::{
     WorkspaceListRequest, WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
 use cadis_store::{
-    redact, ApprovalRecord, ApprovalState, ApprovalStore, CadisHome, CheckpointPolicy,
-    GrantSource as StoreGrantSource, ProfileHome, WorkspaceAccess as StoreWorkspaceAccess,
-    WorkspaceAlias, WorkspaceGrantRecord as StoreWorkspaceGrantRecord,
-    WorkspaceKind as StoreWorkspaceKind, WorkspaceMetadata, WorkspaceRegistry, WorkspaceVcs,
+    redact, ApprovalRecord, ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
+    GrantSource as StoreGrantSource, ProfileHome, StateStore,
+    WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
+    WorkspaceGrantRecord as StoreWorkspaceGrantRecord, WorkspaceKind as StoreWorkspaceKind,
+    WorkspaceMetadata, WorkspaceRegistry, WorkspaceVcs,
 };
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use serde::{Deserialize, Serialize};
 
 const FILE_READ_LIMIT_BYTES: usize = 64 * 1024;
 const FILE_SEARCH_LIMIT_BYTES: u64 = 1024 * 1024;
@@ -120,6 +122,7 @@ pub struct Runtime {
     spawn_limits: AgentSpawnLimits,
     policy: PolicyEngine,
     approval_store: ApprovalStore,
+    state_store: StateStore,
     profile_home: ProfileHome,
     pending_approvals: HashMap<ApprovalId, PendingApproval>,
     workspaces: HashMap<WorkspaceId, WorkspaceRecord>,
@@ -136,15 +139,25 @@ impl Runtime {
         let spawn_limits = AgentSpawnLimits::from_options(&options.ui_preferences);
         let orchestrator =
             Orchestrator::new(OrchestratorConfig::from_options(&options.ui_preferences));
-        let agents = default_agents(&options.model_provider);
-
         let approval_store = ApprovalStore::new(&options.cadis_home);
+        let state_store = StateStore::new(&CadisConfig {
+            cadis_home: options.cadis_home.clone(),
+            ..CadisConfig::default()
+        });
+        let _ = state_store.ensure_layout();
         let profile_home = CadisHome::new(&options.cadis_home)
             .init_profile(&options.profile_id)
             .unwrap_or_else(|_| CadisHome::new(&options.cadis_home).profile(&options.profile_id));
         let workspaces = load_workspace_registry(&profile_home);
         let workspace_grants = load_workspace_grants(&profile_home, &workspaces);
         let next_workspace_grant = next_workspace_grant_counter(&workspace_grants);
+        let sessions = recover_session_records(&state_store);
+        let mut agents = default_agents(&options.model_provider);
+        for (agent_id, record) in recover_agent_records(&state_store) {
+            agents.insert(agent_id, record);
+        }
+        let next_session = next_session_counter(&sessions);
+        let next_agent = next_agent_counter(&agents);
 
         Self {
             options,
@@ -152,17 +165,18 @@ impl Runtime {
             tools: ToolRegistry::builtin().expect("built-in tool registry should be valid"),
             started_at: Instant::now(),
             next_event: 1,
-            next_session: 1,
-            next_agent: 1,
+            next_session,
+            next_agent,
             next_route: 1,
             next_worker: 1,
-            sessions: HashMap::new(),
+            sessions,
             agents,
             orchestrator,
             ui_preferences,
             spawn_limits,
             policy: PolicyEngine,
             approval_store,
+            state_store,
             profile_home,
             pending_approvals: HashMap::new(),
             workspaces,
@@ -211,6 +225,9 @@ impl Runtime {
             }
             ClientRequest::SessionCancel(request) => {
                 if self.sessions.remove(&request.session_id).is_some() {
+                    let _ = self
+                        .state_store
+                        .remove_session_metadata(&request.session_id);
                     let event = self.session_event(
                         request.session_id.clone(),
                         CadisEvent::SessionCompleted(SessionEventPayload {
@@ -260,6 +277,7 @@ impl Runtime {
                     );
                 };
                 agent.display_name = display_name.clone();
+                let _ = self.persist_agent_record(&request.agent_id);
                 let event = self.event(
                     None,
                     CadisEvent::AgentRenamed(AgentRenamedPayload {
@@ -279,6 +297,7 @@ impl Runtime {
                     );
                 };
                 agent.model = request.model.clone();
+                let _ = self.persist_agent_record(&request.agent_id);
                 let event = self.event(
                     None,
                     CadisEvent::AgentModelChanged(AgentModelChangedPayload {
@@ -679,7 +698,7 @@ impl Runtime {
             Some(session_id) if self.sessions.contains_key(&session_id) => (session_id, Vec::new()),
             Some(session_id) => {
                 let title = Some(title_from_message(&content));
-                self.sessions.insert(
+                self.insert_session_record(
                     session_id.clone(),
                     SessionRecord {
                         title: title.clone(),
@@ -1029,6 +1048,7 @@ impl Runtime {
             status: AgentStatus::Idle,
         };
         self.agents.insert(agent_id.clone(), record.clone());
+        let _ = self.persist_agent_record(&agent_id);
         Ok(record)
     }
 
@@ -1049,6 +1069,7 @@ impl Runtime {
                 false,
             );
         };
+        let _ = self.state_store.remove_agent_metadata(&agent_id);
         record.status = AgentStatus::Completed;
         let event = self.event(None, CadisEvent::AgentCompleted(record.event_payload()));
         self.accept(request_id, vec![event])
@@ -1764,9 +1785,34 @@ impl Runtime {
     fn create_session(&mut self, title: Option<String>, cwd: Option<String>) -> SessionId {
         let session_id = SessionId::from(format!("ses_{:06}", self.next_session));
         self.next_session += 1;
-        self.sessions
-            .insert(session_id.clone(), SessionRecord { title, _cwd: cwd });
+        self.insert_session_record(session_id.clone(), SessionRecord { title, _cwd: cwd });
         session_id
+    }
+
+    fn insert_session_record(&mut self, session_id: SessionId, record: SessionRecord) {
+        self.sessions.insert(session_id.clone(), record);
+        let _ = self.persist_session_record(&session_id);
+    }
+
+    fn persist_session_record(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), cadis_store::StoreError> {
+        if let Some(record) = self.sessions.get(session_id) {
+            self.state_store.write_session_metadata(
+                session_id,
+                &SessionMetadata::from_record(session_id.clone(), record),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn persist_agent_record(&self, agent_id: &AgentId) -> Result<(), cadis_store::StoreError> {
+        if let Some(record) = self.agents.get(agent_id) {
+            self.state_store
+                .write_agent_metadata(agent_id, &AgentMetadata::from_record(record))?;
+        }
+        Ok(())
     }
 
     fn accept(&self, request_id: RequestId, events: Vec<EventEnvelope>) -> RequestOutcome {
@@ -2022,6 +2068,33 @@ struct SessionRecord {
     _cwd: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct SessionMetadata {
+    session_id: SessionId,
+    title: Option<String>,
+    cwd: Option<String>,
+}
+
+impl SessionMetadata {
+    fn from_record(session_id: SessionId, record: &SessionRecord) -> Self {
+        Self {
+            session_id,
+            title: record.title.clone(),
+            cwd: record._cwd.clone(),
+        }
+    }
+
+    fn into_record(self) -> (SessionId, SessionRecord) {
+        (
+            self.session_id,
+            SessionRecord {
+                title: self.title,
+                _cwd: self.cwd,
+            },
+        )
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AgentRecord {
     id: AgentId,
@@ -2030,6 +2103,44 @@ struct AgentRecord {
     parent_agent_id: Option<AgentId>,
     model: String,
     status: AgentStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct AgentMetadata {
+    agent_id: AgentId,
+    role: String,
+    display_name: String,
+    parent_agent_id: Option<AgentId>,
+    model: String,
+    status: AgentStatus,
+}
+
+impl AgentMetadata {
+    fn from_record(record: &AgentRecord) -> Self {
+        Self {
+            agent_id: record.id.clone(),
+            role: record.role.clone(),
+            display_name: record.display_name.clone(),
+            parent_agent_id: record.parent_agent_id.clone(),
+            model: record.model.clone(),
+            status: record.status,
+        }
+    }
+
+    fn into_record(self) -> (AgentId, AgentRecord) {
+        let id = self.agent_id;
+        (
+            id.clone(),
+            AgentRecord {
+                id,
+                role: self.role,
+                display_name: self.display_name,
+                parent_agent_id: self.parent_agent_id,
+                model: self.model,
+                status: self.status,
+            },
+        )
+    }
 }
 
 impl AgentRecord {
@@ -2381,6 +2492,46 @@ fn protocol_readiness(readiness: ProviderReadiness) -> ModelReadiness {
         ProviderReadiness::RequiresConfiguration => ModelReadiness::RequiresConfiguration,
         ProviderReadiness::Unavailable => ModelReadiness::Unavailable,
     }
+}
+
+fn recover_session_records(state_store: &StateStore) -> HashMap<SessionId, SessionRecord> {
+    state_store
+        .recover_session_metadata::<SessionMetadata>()
+        .map(|recovery| recovery.records)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|record| record.metadata.into_record())
+        .collect()
+}
+
+fn recover_agent_records(state_store: &StateStore) -> HashMap<AgentId, AgentRecord> {
+    state_store
+        .recover_agent_metadata::<AgentMetadata>()
+        .map(|recovery| recovery.records)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|record| record.metadata.into_record())
+        .collect()
+}
+
+fn next_session_counter(sessions: &HashMap<SessionId, SessionRecord>) -> u64 {
+    sessions
+        .keys()
+        .filter_map(|session_id| session_id.as_str().strip_prefix("ses_"))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn next_agent_counter(agents: &HashMap<AgentId, AgentRecord>) -> u64 {
+    agents
+        .keys()
+        .filter_map(|agent_id| agent_id.as_str().rsplit_once('_'))
+        .filter_map(|(_, suffix)| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
 }
 
 fn load_workspace_registry(profile_home: &ProfileHome) -> HashMap<WorkspaceId, WorkspaceRecord> {
@@ -3185,8 +3336,8 @@ mod tests {
     use cadis_protocol::{
         AgentModelSetRequest, AgentRenameRequest, AgentSpawnRequest, ApprovalResponseRequest,
         ClientId, ContentKind, EmptyPayload, EventSubscriptionRequest, EventsSnapshotRequest,
-        MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest, ToolCallRequest,
-        WorkspaceAccess, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
+        MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest, SessionTargetRequest,
+        ToolCallRequest, WorkspaceAccess, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
         WorkspaceRegisterRequest,
     };
 
@@ -3557,6 +3708,120 @@ mod tests {
                 CadisEvent::ToolCompleted(payload)
                     if payload.summary.as_deref() == Some("persisted")
             )
+        }));
+    }
+
+    #[test]
+    fn session_metadata_survives_runtime_restart_and_cancel_removes_it() {
+        let cadis_home = test_workspace("persistent-session-home");
+        let cwd = test_workspace("persistent-session-cwd");
+        let session_id = {
+            let mut runtime = runtime_with_home(cadis_home.clone());
+            let outcome = runtime.handle_request(RequestEnvelope::new(
+                RequestId::from("req_create_session"),
+                ClientId::from("cli_1"),
+                ClientRequest::SessionCreate(SessionCreateRequest {
+                    title: Some("Durable session".to_owned()),
+                    cwd: Some(cwd.display().to_string()),
+                }),
+            ));
+
+            outcome
+                .events
+                .into_iter()
+                .find_map(|event| match event.event {
+                    CadisEvent::SessionStarted(payload) => Some(payload.session_id),
+                    _ => None,
+                })
+                .expect("session.started should be emitted")
+        };
+
+        let mut runtime = runtime_with_home(cadis_home.clone());
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_subscribe_session"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionSubscribe(SessionTargetRequest {
+                session_id: session_id.clone(),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::SessionUpdated(payload)
+                    if payload.session_id == session_id
+                        && payload.title.as_deref() == Some("Durable session")
+            )
+        }));
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_cancel_session"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionCancel(SessionTargetRequest {
+                session_id: session_id.clone(),
+            }),
+        ));
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_subscribe_removed_session"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionSubscribe(SessionTargetRequest { session_id }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestRejected(error) if error.code == "session_not_found"
+        ));
+    }
+
+    #[test]
+    fn spawned_agent_metadata_survives_runtime_restart() {
+        let cadis_home = test_workspace("persistent-agent-home");
+        let agent_id = {
+            let mut runtime = runtime_with_home(cadis_home.clone());
+            let outcome = runtime.handle_request(RequestEnvelope::new(
+                RequestId::from("req_spawn_agent"),
+                ClientId::from("cli_1"),
+                ClientRequest::AgentSpawn(AgentSpawnRequest {
+                    role: "Research".to_owned(),
+                    parent_agent_id: Some(AgentId::from("main")),
+                    display_name: Some("Research Scout".to_owned()),
+                    model: Some("echo/cadis-local-fallback".to_owned()),
+                }),
+            ));
+
+            outcome
+                .events
+                .iter()
+                .find_map(|event| match &event.event {
+                    CadisEvent::AgentSpawned(payload) => Some(payload.agent_id.clone()),
+                    _ => None,
+                })
+                .expect("agent.spawned should be emitted")
+        };
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_agent_list"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentList(EmptyPayload::default()),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            let CadisEvent::AgentListResponse(payload) = &event.event else {
+                return false;
+            };
+            payload.agents.iter().any(|agent| {
+                agent.agent_id == agent_id
+                    && agent.display_name.as_deref() == Some("Research Scout")
+                    && agent.model.as_deref() == Some("echo/cadis-local-fallback")
+                    && agent.parent_agent_id.as_ref() == Some(&AgentId::from("main"))
+            })
         }));
     }
 

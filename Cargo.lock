@@ -553,6 +553,7 @@ dependencies = [
  "cadis-protocol",
  "cadis-store",
  "chrono",
+ "serde",
  "serde_json",
 ]
 

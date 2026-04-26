@@ -13,6 +13,7 @@ cadis-policy.workspace = true
 cadis-protocol.workspace = true
 cadis-store.workspace = true
 chrono.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [lints]

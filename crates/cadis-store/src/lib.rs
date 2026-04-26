@@ -1085,6 +1085,26 @@ impl StateStore {
         self.write_metadata(StateKind::Approval, approval_id.as_str(), metadata)
     }
 
+    /// Removes one persisted session metadata JSON file when present.
+    pub fn remove_session_metadata(&self, session_id: &SessionId) -> Result<(), StoreError> {
+        self.remove_metadata(StateKind::Session, session_id.as_str())
+    }
+
+    /// Removes one persisted agent metadata JSON file when present.
+    pub fn remove_agent_metadata(&self, agent_id: &AgentId) -> Result<(), StoreError> {
+        self.remove_metadata(StateKind::Agent, agent_id.as_str())
+    }
+
+    /// Removes one persisted worker metadata JSON file when present.
+    pub fn remove_worker_metadata(&self, worker_id: &str) -> Result<(), StoreError> {
+        self.remove_metadata(StateKind::Worker, worker_id)
+    }
+
+    /// Removes one persisted approval metadata JSON file when present.
+    pub fn remove_approval_metadata(&self, approval_id: &ApprovalId) -> Result<(), StoreError> {
+        self.remove_metadata(StateKind::Approval, approval_id.as_str())
+    }
+
     /// Recovers valid session metadata files and reports invalid files as diagnostics.
     pub fn recover_session_metadata<T: DeserializeOwned>(
         &self,
@@ -1190,6 +1210,15 @@ impl StateStore {
             records,
             diagnostics,
         })
+    }
+
+    fn remove_metadata(&self, kind: StateKind, id: &str) -> Result<(), StoreError> {
+        let path = self.metadata_path(kind, id);
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(StoreError::Io(error)),
+        }
     }
 
     fn kind_dir(&self, kind: StateKind) -> PathBuf {
