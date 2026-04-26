@@ -149,9 +149,9 @@
 ## 8. Tool Runtime
 
 - [ ] Define tool trait.
-- [ ] Define tool registry.
-- [ ] Define tool schema strategy.
-- [ ] Define tool lifecycle events.
+- [x] Define tool registry.
+- [x] Define tool schema strategy.
+- [x] Define tool lifecycle events.
 - [x] Implement `file.read`.
 - [x] Implement `file.search`.
 - [ ] Implement `file.patch`.
