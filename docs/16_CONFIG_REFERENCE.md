@@ -223,6 +223,7 @@ read by the desktop MVP config loader:
 ```toml
 [avatar]
 renderer = "wgpu_native" # "headless", "wgpu_native", "bevy_scene"
+renderer_fallback = "orb" # "orb", "static_wulan_texture"
 reduced_motion = false
 max_delta_ms = 250
 
@@ -244,6 +245,8 @@ allow_face_identity = false
 Rules:
 
 - Face tracking is off by default.
+- Native Wulan renderer failure falls back to the CADIS orb by default and must
+  not block HUD launch.
 - Enabling face tracking requires explicit permission, a visible camera-active
   indicator, and a one-click disable action.
 - Face tracking data must stay local and must not be persisted by default.

@@ -108,7 +108,7 @@ Performance tests should run locally first and become CI benchmarks later only i
 - HUD voice doctor preflight can report missing `whisper-cli`, missing model,
   blocked mic, Node helper, and audio player states without secrets
 - `cadis-avatar` unit tests cover mode-to-gesture mapping, face-tracking privacy,
-  reduced-motion behavior, and renderer frame shape
+  reduced-motion behavior, renderer fallback state, and renderer frame shape
 
 ### v0.2
 
