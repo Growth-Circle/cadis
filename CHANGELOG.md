@@ -11,9 +11,14 @@ The format follows Keep a Changelog style, and the project will use Semantic Ver
 - Initial planning baseline.
 - Product, business, functional, technical, architecture, roadmap, and open-source governance documents.
 - Open-source repository standard files.
+- GitHub discussion template tailored for C.A.D.I.S. product, architecture, tool-runtime, policy, and UX conversations.
 - Desktop MVP runtime with `cadisd`, `cadis`, Unix socket NDJSON frames, status/chat/doctor commands, optional Ollama model adapter, local fallback responses, JSONL event logs, and redaction.
 - Native `cadis-hud` prototype with orbital HUD shell, status bar, chat command panel, config tabs, theme controls, model controls, voice preview hooks, rename dialog, and approval stack UI.
 - Example desktop MVP config at `config/cadis.example.toml`.
+
+### Changed
+
+- Refreshed the README to present the project publicly as **C.A.D.I.S.** (`Coordinated Agentic Distributed Intelligence System`) with clearer pre-alpha positioning and a more open-source-ready structure.
 
 ### Security
 

@@ -1,34 +1,39 @@
 <p align="center">
-  <img src="icon.png" alt="CADIS logo" width="132" />
+  <img src="icon.png" alt="C.A.D.I.S. logo" width="132" />
 </p>
 
-<h1 align="center">CADIS</h1>
+<h1 align="center">C.A.D.I.S.</h1>
+
+<p align="center"><strong>Coordinated Agentic Distributed Intelligence System</strong></p>
 
 <p align="center">
-  Local-first multi-agent runtime for desktop work, voice, tools, approvals, and code orchestration.
+  Local-first multi-agent runtime for desktop work, native tools, approvals, voice, and isolated coding workflows.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <img alt="Status: Pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-orange.svg">
   <img alt="Rust first" src="https://img.shields.io/badge/runtime-Rust-orange.svg">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-brightgreen.svg">
-  <img alt="Linux desktop MVP" src="https://img.shields.io/badge/target-Linux%20desktop-6f42c1.svg">
+  <img alt="Target: Linux desktop" src="https://img.shields.io/badge/target-Linux%20desktop-6f42c1.svg">
 </p>
 
 <p align="center">
-  <img src="docs/assets/readme/cadis-hud-desktop.png" alt="CADIS desktop HUD with orbital agents, voice chat, and model routing" width="920" />
+  <img src="docs/assets/readme/cadis-hud-desktop.png" alt="C.A.D.I.S. desktop HUD with orbital agents, voice chat, and model routing" width="920" />
 </p>
 
 <p align="center">
-  <sub>CADIS HUD: local daemon status, orbital agents, voice I/O, model routing, and approval-ready desktop control.</sub>
+  <sub>C.A.D.I.S. HUD: local daemon status, orbital agents, voice I/O, model routing, and approval-aware desktop control.</sub>
 </p>
 
-CADIS is a Rust-first, local-first, model-agnostic runtime for coordinating AI
-agents across a desktop HUD, CLI, tools, voice, approvals, and isolated coding
-workflows.
+C.A.D.I.S. is a Rust-first, local-first, model-agnostic runtime for coordinating
+AI agents across a desktop HUD, CLI, voice, approvals, native tools, and
+isolated coding work. The repository and binaries stay lowercase as `cadis` and
+`cadisd`, while the public product name is written as **C.A.D.I.S.**
 
-The daemon, `cadisd`, owns runtime authority. Every UI, voice, Telegram, mobile,
-or CLI surface is just a protocol client.
+The daemon, `cadisd`, is the runtime authority. Every interface, whether CLI,
+HUD, voice, or future Telegram/mobile surfaces, is a protocol client rather
+than a separate backend.
 
 ```text
 HUD / CLI / Voice / Telegram / Android
@@ -38,59 +43,95 @@ HUD / CLI / Voice / Telegram / Android
      agents, models, tools, policy, store
 ```
 
-## Why CADIS
+## Why C.A.D.I.S. exists
 
-Modern AI tools are powerful, but the control plane is often scattered across
-browser tabs, CLIs, background scripts, and private app state. CADIS pulls that
-work into one local daemon with typed events, explicit approvals, and a desktop
-HUD built for repeated daily use.
+Modern AI tooling is often fragmented across browser tabs, terminal sessions,
+background scripts, and app-specific state. C.A.D.I.S. brings that control
+plane into one local daemon with typed events, explicit approvals, and runtime
+boundaries that stay inspectable.
 
-- **Local-first:** sessions, events, policy, and orchestration live on your machine.
-- **Model-agnostic:** use Ollama, OpenAI-compatible APIs, or the official Codex CLI adapter.
-- **Daemon-owned:** UI clients do not own agent runtime logic.
-- **Approval-oriented:** risky actions belong behind a central policy engine.
-- **Voice-aware:** short assistant replies can be spoken; long code/logs stay visual.
-- **Open-source baseline:** clean docs, typed protocol, and a contributor-friendly layout.
+It is meant to feel like an operating layer, not a chatbot wrapper.
 
-## Current Status
+## Design principles
 
-CADIS is an early desktop MVP. The repository includes:
+- **Local-first**: state, logs, approvals, and orchestration live on your machine.
+- **Rust-first core**: critical runtime paths stay in Rust for predictability and performance.
+- **Model-agnostic**: support local and remote providers behind one daemon contract.
+- **Policy-gated**: risky actions must pass centralized approval and audit paths.
+- **Interface-agnostic**: the daemon owns runtime behavior; clients render and control it.
+- **Workload-aware**: code-heavy tasks should flow differently from normal chat.
+
+## Current status
+
+C.A.D.I.S. is currently **pre-alpha**.
+
+The repository already includes a meaningful desktop MVP foundation:
 
 - `cadisd`: local daemon and protocol authority
-- `cadis`: CLI client for status, models, agents, spawn, chat, and doctor checks
-- `apps/cadis-hud`: Tauri + React RamaClaw-style HUD
+- `cadis`: CLI client for status, models, agents, spawn, chat, tools, and doctor checks
+- `apps/cadis-hud`: Tauri + React HUD prototype
 - `crates/cadis-avatar`: renderer-neutral Wulan avatar state engine contract
-- typed protocol events for messages, models, agents, approvals, workspaces,
-  orchestrator routing, and workers
+- typed protocol events for messages, models, agents, approvals, workspaces, orchestrator routing, and workers
 - JSONL event persistence with redaction boundaries
-- profile-local workspace registry/grants for safe-read tools
+- profile-local workspace registry and grants for safe-read tools
 - optional Ollama, OpenAI API, and Codex CLI model adapters
 - official Codex CLI adapter for ChatGPT Plus/Pro login flows
-- HUD-local Edge TTS playback, `whisper-cli` voice input, and voice doctor
-  preflight
+- HUD-local Edge TTS playback, `whisper-cli` voice input, and voice doctor preflight
 
 Planned work still includes production-grade mutating tool execution, full
 policy coverage, richer worker isolation, Telegram/mobile clients,
-daemon-owned production voice, and code work windows. The target workspace
+daemon-owned production voice, and code work windows. The workspace
 architecture is partially implemented; persistent agent homes, real worker
 worktree creation, checkpoint rollback, and project media manifests remain next.
 
-## Quick Start
+## Core capabilities
 
-Build the workspace:
+### 1. Daemon-owned runtime
+
+C.A.D.I.S. keeps execution authority inside `cadisd`. UI clients do not own
+agent orchestration, tool policy, or approval state.
+
+### 2. Multi-agent control surface
+
+The system is built to manage a main orchestrator plus specialist agents,
+workers, and background tasks through one event protocol.
+
+### 3. Native tool runtime
+
+Core capabilities are intended to be native tools first, not just external
+bridges. Early runtime coverage includes read-only file and git flows, approval
+gates for risky actions, and a workspace-aware execution model.
+
+### 4. Approval and policy boundaries
+
+Risk classification, approval state, and audit visibility are first-class parts
+of the architecture, not an afterthought.
+
+### 5. Multiple interfaces
+
+The same daemon is meant to serve:
+
+- CLI workflows
+- desktop HUD workflows
+- voice-enabled control
+- future Telegram and remote surfaces
+
+## Quick start
+
+### Build from source
 
 ```bash
 cargo build --release
 ```
 
-Start the daemon:
+### Start the daemon
 
 ```bash
 target/release/cadisd --check
 target/release/cadisd
 ```
 
-Use the CLI:
+### Use the CLI
 
 ```bash
 target/release/cadis status
@@ -100,7 +141,7 @@ target/release/cadis agents
 target/release/cadis chat "hello"
 ```
 
-Run the desktop HUD:
+### Run the HUD
 
 ```bash
 cd apps/cadis-hud
@@ -109,65 +150,66 @@ pnpm install
 pnpm tauri:dev
 ```
 
-The HUD discovers the daemon socket from `CADIS_HUD_SOCKET`, `CADIS_SOCKET`,
+The HUD resolves the daemon socket from `CADIS_HUD_SOCKET`, `CADIS_SOCKET`,
 `~/.cadis/config.toml`, `$XDG_RUNTIME_DIR/cadis/cadisd.sock`, or
 `~/.cadis/run/cadisd.sock`.
 
-## Models
+## Model provider setup
 
-Default mode is `auto`: CADIS tries Ollama at `http://127.0.0.1:11434`, then
-falls back to a local credential-free response if Ollama is not running.
+Default mode is `auto`: C.A.D.I.S. tries Ollama at
+`http://127.0.0.1:11434`, then falls back to a local credential-free response
+if Ollama is unavailable.
 
-For OpenAI API billing, set `[model].provider = "openai"` and provide
+For OpenAI API billing, set `[model].provider = "openai"` and provide either
 `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` in the daemon environment.
 
-For ChatGPT Plus/Pro through Codex:
+For ChatGPT Plus/Pro through the official Codex CLI:
 
 ```bash
 codex login
 ```
 
-Then set:
+Then configure:
 
 ```toml
 [model]
 provider = "codex-cli"
 ```
 
-CADIS does not store ChatGPT credentials; the official Codex CLI owns that auth.
+C.A.D.I.S. does not store ChatGPT credentials directly; the official Codex CLI
+owns that authentication flow.
 
 ## Voice
 
-The HUD can speak final CADIS replies through Edge TTS. For mic input, the HUD
-records locally and asks Tauri to transcribe via `whisper-cli`. On WebKitGTK,
-CADIS also records WebAudio PCM in parallel, so voice can still transcribe when
-`MediaRecorder` sees the mic but produces zero chunks.
+The HUD can speak final C.A.D.I.S. replies through Edge TTS. For microphone
+input, the HUD records locally and asks Tauri to transcribe via `whisper-cli`.
+On WebKitGTK, C.A.D.I.S. also records WebAudio PCM in parallel so voice can
+still transcribe when `MediaRecorder` sees the mic but produces zero chunks.
 
 ```bash
 export CADIS_WHISPER_CLI="$HOME/.local/bin/whisper-cli"
 export CADIS_WHISPER_MODEL="$HOME/.local/share/cadis/whisper-models/ggml-base.bin"
 ```
 
-On Linux, CADIS installs a WebKitGTK audio permission handler for the HUD. If
-your desktop portal blocks the mic, allow microphone access for CADIS in system
-settings and click the mic again.
+On Linux, if desktop portal permissions block the microphone, allow mic access
+for C.A.D.I.S. in system settings and retry from the HUD.
 
 The HUD Settings -> Voice tab includes a local voice doctor that checks renderer
 mic status, WebAudio analyser/PCM fallback telemetry, `whisper-cli`, the
 configured Whisper model, Node helper execution, and available audio players.
 
-## Repository Layout
+## Repository layout
 
 ```text
 cadis/
 |-- apps/                  # Tauri HUD and future apps
-|-- config/                # Example agents, tools, and policy config
-|-- crates/                # Rust daemon, CLI, protocol, model, store crates
+|-- config/                # Example configuration
+|-- crates/                # Rust daemon, CLI, protocol, policy, store, models
 |-- docs/                  # Product, architecture, protocol, and standards docs
 |   `-- assets/            # Documentation images and README media
 |-- examples/              # Example configs and usage flows
 |-- skills/                # Project-local contributor skills
-|-- AGENT.md               # Canonical guide for coding agents
+|-- AGENT.md               # Coding-agent guidance
 |-- Cargo.toml             # Rust workspace manifest
 |-- SECURITY.md
 `-- LICENSE
@@ -179,6 +221,7 @@ cadis/
 - [Architecture](docs/05_ARCHITECTURE.md)
 - [Implementation Plan](docs/06_IMPLEMENTATION_PLAN.md)
 - [Master Checklist](docs/07_MASTER_CHECKLIST.md)
+- [Open Source Standard](docs/09_OPEN_SOURCE_STANDARD.md)
 - [Protocol Draft](docs/15_PROTOCOL_DRAFT.md)
 - [Configuration Reference](docs/16_CONFIG_REFERENCE.md)
 - [Developer Setup](docs/17_DEVELOPER_SETUP.md)
@@ -189,19 +232,23 @@ cadis/
 - [Memory Concept](docs/25_MEMORY_CONCEPT.md)
 - [Wulan Avatar Engine](docs/26_WULAN_AVATAR_ENGINE.md)
 - [Workspace Architecture](docs/27_WORKSPACE_ARCHITECTURE.md)
-- [Open Source Standard](docs/09_OPEN_SOURCE_STANDARD.md)
-
-## Security
-
-CADIS is built to keep credentials out of git and logs. Local auth artifacts,
-tokens, `.env` files, JSONL traces, sockets, and crash diagnostics are ignored
-by default. See [SECURITY.md](SECURITY.md) for reporting and handling guidance.
 
 ## Contributing
 
 Start with [AGENT.md](AGENT.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
 [docs/standards/00_STANDARD_INDEX.md](docs/standards/00_STANDARD_INDEX.md).
 
+If you want to propose a product direction, protocol change, tool-runtime
+change, or UX concept, use GitHub Discussions first so design feedback can land
+before implementation drift.
+
+## Security
+
+C.A.D.I.S. is built to keep credentials out of git and logs. Local auth
+artifacts, tokens, `.env` files, JSONL traces, sockets, and crash diagnostics
+are ignored by default. See [SECURITY.md](SECURITY.md) for reporting and
+handling guidance.
+
 ## License
 
-CADIS is licensed under the Apache License 2.0.
+C.A.D.I.S. is licensed under the Apache License 2.0.

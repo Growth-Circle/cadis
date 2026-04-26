@@ -1,0 +1,93 @@
+name: Open discussion
+description: Start a product, architecture, tooling, or workflow discussion for C.A.D.I.S.
+title: "[Discussion] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for starting a C.A.D.I.S. discussion.
+
+        Use this template for product ideas, architecture questions, workflow proposals, tool-runtime concepts, HUD/voice UX, or contributor process improvements.
+
+        Before posting, please:
+        - check whether a similar discussion already exists
+        - keep logs, tokens, and local machine secrets out of the thread
+        - be explicit about whether this is product, protocol, policy, tooling, or UX work
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Discussion area
+      description: Which part of C.A.D.I.S. does this affect most?
+      options:
+        - Product direction
+        - Daemon and runtime
+        - Protocol and events
+        - Tool runtime
+        - Policy and approvals
+        - Model providers
+        - CLI
+        - HUD and UX
+        - Voice
+        - Telegram or remote control
+        - Docs and contributor workflow
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What problem, opportunity, or design tension are you seeing?
+      placeholder: Describe the current gap, friction, or goal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal or question
+      description: What do you want the project to discuss?
+      placeholder: Explain the idea, tradeoff, or decision that needs input.
+    validations:
+      required: true
+
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Why this matters
+      description: Explain the user, maintainer, or architecture value.
+      placeholder: Faster runtime, safer approvals, better UX, easier contribution, lower complexity, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Affected components
+      description: List the parts of the repo or system this would likely touch.
+      placeholder: Example: cadis-core, cadis-policy, cadis-tools, docs/15_PROTOCOL_DRAFT.md, apps/cadis-hud
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks, tradeoffs, or open questions
+      description: What could get worse, become harder to maintain, or need explicit review?
+      placeholder: Security impact, performance cost, protocol churn, dependency risk, UX complexity, etc.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submit checklist
+      options:
+        - label: I removed secrets, private paths, and sensitive logs.
+          required: true
+        - label: I checked for an existing issue, PR, or discussion on this topic.
+          required: true
+        - label: I called out security or approval impact if this touches tools, shell, files, network, or credentials.
+          required: false
+        - label: I called out docs impact if this changes public behavior.
+          required: false

@@ -11,6 +11,7 @@
 - [x] Add CODE_OF_CONDUCT.
 - [x] Add CHANGELOG.
 - [x] Add issue templates.
+- [x] Add discussion template.
 - [x] Add PR template.
 - [x] Add CI hygiene workflow.
 - [x] Add Rust workspace placeholder.
