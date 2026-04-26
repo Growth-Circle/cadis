@@ -1,0 +1,73 @@
+name: Feature request
+description: Propose a CADIS capability or product improvement
+title: "feat: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        CADIS is Rust-first, local-first, and daemon-owned. UI, voice, Telegram, mobile, and CLI surfaces should remain protocol clients unless the architecture docs say otherwise.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or maintainer pain does this solve?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - cadisd daemon
+        - Protocol / events
+        - Tool runtime
+        - Policy / approvals
+        - Agent orchestration
+        - Worker isolation
+        - Models / providers
+        - Store / persistence
+        - CLI
+        - HUD / desktop UI
+        - Voice
+        - Telegram / remote client
+        - Documentation
+        - CI / packaging
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful slice first.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: protocol
+    attributes:
+      label: Protocol / daemon impact
+      description: New request/event types, payload changes, state ownership, or compatibility concerns.
+      placeholder: "No protocol changes expected."
+  - type: textarea
+    id: security
+    attributes:
+      label: Security, privacy, and approval impact
+      description: Mention file, shell, network, secret, model, or approval implications.
+      placeholder: "No new privileged behavior."
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      placeholder: |
+        - [ ] ...
+        - [ ] Tests cover ...
+        - [ ] Docs updated ...
+    validations:
+      required: true
