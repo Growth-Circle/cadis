@@ -3,7 +3,7 @@
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -51,50 +51,8 @@ pub trait ModelProvider: Send + Sync {
         callback: &mut ModelStreamCallback<'_>,
     ) -> Result<ModelResponse, ModelError> {
         match self.chat_with_request(request) {
-            Ok(response) => {
-                if emit_stream_event(
-                    callback,
-                    ModelStreamEvent::Started(response.invocation.clone()),
-                    &response.invocation,
-                )? == ModelStreamControl::Cancel
-                {
-                    return cancel_stream(callback, &response.invocation);
-                }
-                for delta in &response.deltas {
-                    if emit_stream_event(
-                        callback,
-                        ModelStreamEvent::Delta(delta.clone()),
-                        &response.invocation,
-                    )? == ModelStreamControl::Cancel
-                    {
-                        return cancel_stream(callback, &response.invocation);
-                    }
-                }
-                if emit_stream_event(
-                    callback,
-                    ModelStreamEvent::Completed(response.invocation.clone()),
-                    &response.invocation,
-                )? == ModelStreamControl::Cancel
-                {
-                    return cancel_stream(callback, &response.invocation);
-                }
-                Ok(response)
-            }
-            Err(error) => {
-                if error.is_cancelled() {
-                    if let Some(invocation) = error.invocation.as_deref() {
-                        let _ = callback(ModelStreamEvent::Cancelled(invocation.clone()))?;
-                    }
-                    return Err(error);
-                }
-                let _ = callback(ModelStreamEvent::Failed(ModelFailure {
-                    code: error.code.clone(),
-                    message: error.message.clone(),
-                    retryable: error.retryable,
-                    invocation: error.invocation.as_deref().cloned(),
-                }))?;
-                Err(error)
-            }
+            Ok(response) => stream_response(response, callback),
+            Err(error) => fail_stream(callback, error),
         }
     }
 }
@@ -303,6 +261,42 @@ fn emit_stream_event(
     callback(event).map_err(|error| error.with_invocation_if_missing(invocation))
 }
 
+fn stream_response(
+    response: ModelResponse,
+    callback: &mut ModelStreamCallback<'_>,
+) -> Result<ModelResponse, ModelError> {
+    if emit_stream_event(
+        callback,
+        ModelStreamEvent::Started(response.invocation.clone()),
+        &response.invocation,
+    )? == ModelStreamControl::Cancel
+    {
+        return cancel_stream(callback, &response.invocation);
+    }
+
+    for delta in &response.deltas {
+        if emit_stream_event(
+            callback,
+            ModelStreamEvent::Delta(delta.clone()),
+            &response.invocation,
+        )? == ModelStreamControl::Cancel
+        {
+            return cancel_stream(callback, &response.invocation);
+        }
+    }
+
+    if emit_stream_event(
+        callback,
+        ModelStreamEvent::Completed(response.invocation.clone()),
+        &response.invocation,
+    )? == ModelStreamControl::Cancel
+    {
+        return cancel_stream(callback, &response.invocation);
+    }
+
+    Ok(response)
+}
+
 fn cancel_stream(
     callback: &mut ModelStreamCallback<'_>,
     invocation: &ModelInvocation,
@@ -313,6 +307,26 @@ fn cancel_stream(
         invocation,
     )?;
     Err(ModelError::cancelled("model request was cancelled").with_invocation(invocation.clone()))
+}
+
+fn fail_stream(
+    callback: &mut ModelStreamCallback<'_>,
+    error: ModelError,
+) -> Result<ModelResponse, ModelError> {
+    if error.is_cancelled() {
+        if let Some(invocation) = error.invocation.as_deref() {
+            let _ = callback(ModelStreamEvent::Cancelled(invocation.clone()))?;
+        }
+        return Err(error);
+    }
+
+    let _ = callback(ModelStreamEvent::Failed(ModelFailure {
+        code: error.code.clone(),
+        message: error.message.clone(),
+        retryable: error.retryable,
+        invocation: error.invocation.as_deref().cloned(),
+    }))?;
+    Err(error)
 }
 
 /// Conservative provider readiness exposed by the model catalog.
@@ -443,7 +457,7 @@ pub fn provider_catalog_for_config(config: &ModelCatalogConfig) -> Vec<ProviderC
             provider: "openai".to_owned(),
             model: config.openai_model.clone(),
             display_name: format!("OpenAI {}", config.openai_model),
-            capabilities: vec!["api_key".to_owned()],
+            capabilities: vec!["api_key".to_owned(), "streaming".to_owned()],
             readiness: openai_readiness,
             effective_provider: "openai".to_owned(),
             effective_model: config.openai_model.clone(),
@@ -577,6 +591,154 @@ impl ModelProvider for OllamaProvider {
             })
             .map_err(|error| error.with_invocation(invocation))
     }
+
+    fn stream_chat(
+        &self,
+        request: ModelRequest<'_>,
+        callback: &mut ModelStreamCallback<'_>,
+    ) -> Result<ModelResponse, ModelError> {
+        let invocation = ModelInvocation {
+            requested_model: request.selected_model.map(ToOwned::to_owned),
+            effective_provider: "ollama".to_owned(),
+            effective_model: self.model.clone(),
+            fallback: false,
+            fallback_reason: None,
+        };
+
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                return fail_stream(
+                    callback,
+                    ModelError::with_code(
+                        "provider_client_error",
+                        format!("failed to create Ollama client: {error}"),
+                        false,
+                    )
+                    .with_invocation(invocation),
+                );
+            }
+        };
+
+        let response = match client
+            .post(format!("{}/api/generate", self.endpoint))
+            .json(&OllamaGenerateRequest {
+                model: self.model.clone(),
+                prompt: request.prompt.to_owned(),
+                stream: true,
+            })
+            .send()
+        {
+            Ok(response) => response,
+            Err(_) => {
+                return fail_stream(
+                    callback,
+                    ModelError::with_code("provider_unavailable", "Ollama request failed", true)
+                        .with_invocation(invocation),
+                );
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            return fail_stream(
+                callback,
+                provider_http_error("Ollama", status).with_invocation(invocation),
+            );
+        }
+
+        if emit_stream_event(
+            callback,
+            ModelStreamEvent::Started(invocation.clone()),
+            &invocation,
+        )? == ModelStreamControl::Cancel
+        {
+            return cancel_stream(callback, &invocation);
+        }
+
+        let mut deltas = Vec::new();
+        for line in BufReader::new(response).lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    return fail_stream(
+                        callback,
+                        ModelError::with_code(
+                            "provider_response_invalid",
+                            format!("failed to read Ollama stream: {error}"),
+                            true,
+                        )
+                        .with_invocation(invocation),
+                    );
+                }
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            let chunk = match serde_json::from_str::<OllamaGenerateResponse>(line) {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    return fail_stream(
+                        callback,
+                        ModelError::with_code(
+                            "provider_response_invalid",
+                            format!("Ollama stream chunk was invalid: {error}"),
+                            false,
+                        )
+                        .with_invocation(invocation),
+                    );
+                }
+            };
+
+            if let Some(error) = chunk.error {
+                return fail_stream(
+                    callback,
+                    ModelError::with_code(
+                        "model_request_rejected",
+                        format!("Ollama error: {error}"),
+                        false,
+                    )
+                    .with_invocation(invocation),
+                );
+            }
+
+            if let Some(delta) = chunk.response.filter(|delta| !delta.is_empty()) {
+                deltas.push(delta.clone());
+                if emit_stream_event(callback, ModelStreamEvent::Delta(delta), &invocation)?
+                    == ModelStreamControl::Cancel
+                {
+                    return cancel_stream(callback, &invocation);
+                }
+            }
+
+            if chunk.done.unwrap_or(false) {
+                break;
+            }
+        }
+
+        if deltas.is_empty() {
+            deltas.push(String::new());
+        }
+
+        let response = ModelResponse {
+            deltas,
+            invocation: invocation.clone(),
+        };
+        if emit_stream_event(
+            callback,
+            ModelStreamEvent::Completed(invocation.clone()),
+            &invocation,
+        )? == ModelStreamControl::Cancel
+        {
+            return cancel_stream(callback, &invocation);
+        }
+        Ok(response)
+    }
 }
 
 /// OpenAI Chat Completions provider.
@@ -646,6 +808,7 @@ impl ModelProvider for OpenAiProvider {
                     role: "user",
                     content: prompt,
                 }],
+                stream: false,
             })
             .send()
             .map_err(|_| {
@@ -695,6 +858,166 @@ impl ModelProvider for OpenAiProvider {
                 invocation: invocation.clone(),
             })
             .map_err(|error| error.with_invocation(invocation))
+    }
+
+    fn stream_chat(
+        &self,
+        request: ModelRequest<'_>,
+        callback: &mut ModelStreamCallback<'_>,
+    ) -> Result<ModelResponse, ModelError> {
+        let invocation = ModelInvocation {
+            requested_model: request.selected_model.map(ToOwned::to_owned),
+            effective_provider: "openai".to_owned(),
+            effective_model: self.model.clone(),
+            fallback: false,
+            fallback_reason: None,
+        };
+
+        if self.api_key.trim().is_empty() {
+            return fail_stream(
+                callback,
+                ModelError::with_code(
+                    "model_auth_missing",
+                    "OpenAI provider requires OPENAI_API_KEY or CADIS_OPENAI_API_KEY",
+                    false,
+                )
+                .with_invocation(invocation),
+            );
+        }
+
+        let client = match reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => {
+                return fail_stream(
+                    callback,
+                    ModelError::with_code(
+                        "provider_client_error",
+                        "failed to create OpenAI client",
+                        false,
+                    )
+                    .with_invocation(invocation),
+                );
+            }
+        };
+
+        let response = match client
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(&OpenAiChatRequest {
+                model: self.model.clone(),
+                messages: vec![OpenAiChatMessage {
+                    role: "user",
+                    content: request.prompt,
+                }],
+                stream: true,
+            })
+            .send()
+        {
+            Ok(response) => response,
+            Err(_) => {
+                return fail_stream(
+                    callback,
+                    ModelError::with_code("provider_unavailable", "OpenAI request failed", true)
+                        .with_invocation(invocation),
+                );
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            return fail_stream(
+                callback,
+                provider_http_error("OpenAI", status).with_invocation(invocation),
+            );
+        }
+
+        if emit_stream_event(
+            callback,
+            ModelStreamEvent::Started(invocation.clone()),
+            &invocation,
+        )? == ModelStreamControl::Cancel
+        {
+            return cancel_stream(callback, &invocation);
+        }
+
+        let mut deltas = Vec::new();
+        for line in BufReader::new(response).lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    return fail_stream(
+                        callback,
+                        ModelError::with_code(
+                            "provider_response_invalid",
+                            format!("failed to read OpenAI stream: {error}"),
+                            true,
+                        )
+                        .with_invocation(invocation),
+                    );
+                }
+            };
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
+                continue;
+            }
+            let Some(data) = line.strip_prefix("data:").map(str::trim) else {
+                continue;
+            };
+            if data == "[DONE]" {
+                break;
+            }
+
+            let chunk = match serde_json::from_str::<OpenAiChatStreamChunk>(data) {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    return fail_stream(
+                        callback,
+                        ModelError::with_code(
+                            "provider_response_invalid",
+                            format!("OpenAI stream chunk was invalid: {error}"),
+                            false,
+                        )
+                        .with_invocation(invocation),
+                    );
+                }
+            };
+
+            for choice in chunk.choices {
+                if let Some(delta) = choice.delta.content.filter(|delta| !delta.is_empty()) {
+                    deltas.push(delta.clone());
+                    if emit_stream_event(callback, ModelStreamEvent::Delta(delta), &invocation)?
+                        == ModelStreamControl::Cancel
+                    {
+                        return cancel_stream(callback, &invocation);
+                    }
+                }
+            }
+        }
+
+        if deltas.is_empty() {
+            return fail_stream(
+                callback,
+                ModelError::with_code("provider_response_empty", "OpenAI response was empty", true)
+                    .with_invocation(invocation),
+            );
+        }
+
+        let response = ModelResponse {
+            deltas,
+            invocation: invocation.clone(),
+        };
+        if emit_stream_event(
+            callback,
+            ModelStreamEvent::Completed(invocation.clone()),
+            &invocation,
+        )? == ModelStreamControl::Cancel
+        {
+            return cancel_stream(callback, &invocation);
+        }
+        Ok(response)
     }
 }
 
@@ -1096,6 +1419,57 @@ impl ModelProvider for AutoProvider {
             }
         }
     }
+
+    fn stream_chat(
+        &self,
+        request: ModelRequest<'_>,
+        callback: &mut ModelStreamCallback<'_>,
+    ) -> Result<ModelResponse, ModelError> {
+        let requested_model = request.selected_model.map(ToOwned::to_owned);
+        let primary_request =
+            ModelRequest::new(request.prompt).with_selected_model(request.selected_model);
+        let mut native_stream_started = false;
+        let stream_result = self.ollama.stream_chat(primary_request, &mut |event| {
+            match &event {
+                ModelStreamEvent::Started(_)
+                | ModelStreamEvent::Delta(_)
+                | ModelStreamEvent::Completed(_)
+                | ModelStreamEvent::Cancelled(_) => native_stream_started = true,
+                ModelStreamEvent::Failed(_) => {}
+            }
+
+            if matches!(event, ModelStreamEvent::Failed(_)) && !native_stream_started {
+                return Ok(ModelStreamControl::Continue);
+            }
+
+            callback(event)
+        });
+
+        match stream_result {
+            Ok(response) => Ok(response),
+            Err(error) if error.is_cancelled() => Err(error),
+            Err(error) if !native_stream_started => {
+                let response = format!(
+                    "CADIS runtime is online, but Ollama is not ready ({error}).\n\nI received: {}\n\nStart Ollama or set [model].provider = \"echo\" in ~/.cadis/config.toml for an explicit local fallback.",
+                    request.prompt
+                );
+                stream_response(
+                    ModelResponse {
+                        deltas: chunk_text(&response),
+                        invocation: ModelInvocation {
+                            requested_model,
+                            effective_provider: "echo".to_owned(),
+                            effective_model: ECHO_MODEL.to_owned(),
+                            fallback: true,
+                            fallback_reason: Some(format!("ollama unavailable: {error}")),
+                        },
+                    },
+                    callback,
+                )
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// Builds a provider from a provider label.
@@ -1216,6 +1590,69 @@ impl ModelProvider for RoutingModelProvider {
             _ => Err(self.unsupported_provider_error(&selection)),
         }
     }
+
+    fn stream_chat(
+        &self,
+        request: ModelRequest<'_>,
+        callback: &mut ModelStreamCallback<'_>,
+    ) -> Result<ModelResponse, ModelError> {
+        let selection = self.selection(request.selected_model);
+        let model_request = ModelRequest::new(request.prompt)
+            .with_selected_model(selection.requested_model.as_deref());
+
+        match selection.provider.as_str() {
+            "auto" => {
+                let model = selection
+                    .model
+                    .as_deref()
+                    .unwrap_or(&self.config.ollama_model);
+                AutoProvider::new(&self.config.ollama_endpoint, model).stream_chat(
+                    model_request.with_selected_model(selection.requested_model.as_deref()),
+                    callback,
+                )
+            }
+            "ollama" => {
+                let model = selection
+                    .model
+                    .as_deref()
+                    .unwrap_or(&self.config.ollama_model);
+                OllamaProvider::new(&self.config.ollama_endpoint, model)
+                    .stream_chat(model_request, callback)
+            }
+            "openai" => {
+                let model = selection
+                    .model
+                    .as_deref()
+                    .unwrap_or(&self.config.openai_model);
+                match self.config.openai_api_key.as_deref() {
+                    Some(api_key) => {
+                        OpenAiProvider::new(&self.config.openai_base_url, model, api_key)
+                            .stream_chat(model_request, callback)
+                    }
+                    None => fail_stream(callback, missing_openai_key_error(model_request, model)),
+                }
+            }
+            "codex-cli" => {
+                match CodexCliProvider::from_env_with_model(selection.model.as_deref()) {
+                    Ok(provider) => provider.stream_chat(model_request, callback),
+                    Err(error) => fail_stream(
+                        callback,
+                        error.with_invocation(ModelInvocation {
+                            requested_model: selection.requested_model,
+                            effective_provider: "codex-cli".to_owned(),
+                            effective_model: selection
+                                .model
+                                .unwrap_or_else(|| CODEX_CLI_PLAN_MODEL.to_owned()),
+                            fallback: false,
+                            fallback_reason: None,
+                        }),
+                    ),
+                }
+            }
+            "echo" => EchoProvider.stream_chat(model_request, callback),
+            _ => fail_stream(callback, self.unsupported_provider_error(&selection)),
+        }
+    }
 }
 
 /// Configuration used by the provider router.
@@ -1291,6 +1728,10 @@ fn missing_openai_key_response(
     request: ModelRequest<'_>,
     effective_model: &str,
 ) -> Result<ModelResponse, ModelError> {
+    Err(missing_openai_key_error(request, effective_model))
+}
+
+fn missing_openai_key_error(request: ModelRequest<'_>, effective_model: &str) -> ModelError {
     let invocation = ModelInvocation {
         requested_model: request.selected_model.map(ToOwned::to_owned),
         effective_provider: "openai".to_owned(),
@@ -1298,12 +1739,12 @@ fn missing_openai_key_response(
         fallback: false,
         fallback_reason: None,
     };
-    Err(ModelError::with_code(
+    ModelError::with_code(
         "model_auth_missing",
         "OpenAI provider requires OPENAI_API_KEY or CADIS_OPENAI_API_KEY",
         false,
     )
-    .with_invocation(invocation))
+    .with_invocation(invocation)
 }
 
 fn normalize_provider_id(provider: &str) -> &str {
@@ -1377,12 +1818,14 @@ struct OllamaGenerateRequest {
 struct OllamaGenerateResponse {
     response: Option<String>,
     error: Option<String>,
+    done: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
 struct OpenAiChatRequest<'a> {
     model: String,
     messages: Vec<OpenAiChatMessage<'a>>,
+    stream: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1406,9 +1849,26 @@ struct OpenAiResponseMessage {
     content: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenAiChatStreamChunk {
+    choices: Vec<OpenAiChatStreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatStreamChoice {
+    delta: OpenAiChatStreamDelta,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatStreamDelta {
+    content: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct DeterministicStreamingProvider {
@@ -1431,6 +1891,68 @@ mod tests {
                 fallback_reason: None,
             }
         }
+    }
+
+    fn start_http_response_server(
+        status: &str,
+        content_type: &str,
+        body: &str,
+    ) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test HTTP listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test HTTP listener should have an address");
+        let status = status.to_owned();
+        let content_type = content_type.to_owned();
+        let body = body.to_owned();
+        let (request_tx, request_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test HTTP client should connect");
+            let mut request = String::new();
+            let mut content_length = 0usize;
+            {
+                let mut reader = BufReader::new(
+                    stream
+                        .try_clone()
+                        .expect("test HTTP stream should clone for reading"),
+                );
+                loop {
+                    let mut line = String::new();
+                    let bytes = reader
+                        .read_line(&mut line)
+                        .expect("test HTTP header should read");
+                    if bytes == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    request.push_str(&line);
+                }
+                if content_length > 0 {
+                    let mut body_bytes = vec![0u8; content_length];
+                    reader
+                        .read_exact(&mut body_bytes)
+                        .expect("test HTTP request body should read");
+                    request.push_str(&String::from_utf8_lossy(&body_bytes));
+                }
+            }
+            request_tx
+                .send(request)
+                .expect("test HTTP request should send");
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("test HTTP response should write");
+        });
+
+        (format!("http://{addr}"), request_rx)
     }
 
     impl ModelProvider for DeterministicStreamingProvider {
@@ -1601,6 +2123,65 @@ mod tests {
     }
 
     #[test]
+    fn native_stream_failures_emit_failed_event() {
+        let provider = OllamaProvider::new("http://127.0.0.1:1", "llama3.2");
+        let mut events = Vec::new();
+
+        let error = provider
+            .stream_chat(ModelRequest::new("hello"), &mut |event| {
+                events.push(event);
+                Ok(ModelStreamControl::Continue)
+            })
+            .expect_err("closed localhost port should fail");
+
+        assert_eq!(error.code(), "provider_unavailable");
+        assert!(matches!(
+            events.last(),
+            Some(ModelStreamEvent::Failed(failure)) if failure.code == "provider_unavailable"
+        ));
+    }
+
+    #[test]
+    fn auto_stream_falls_back_only_before_native_stream_starts() {
+        let provider = AutoProvider::new("http://127.0.0.1:1", "llama3.2");
+        let mut events = Vec::new();
+
+        let response = provider
+            .stream_chat(ModelRequest::new("hello"), &mut |event| {
+                events.push(event);
+                Ok(ModelStreamControl::Continue)
+            })
+            .expect("auto should fall back when Ollama cannot connect");
+
+        assert!(response.invocation.fallback);
+        assert_eq!(response.invocation.effective_provider, "echo");
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, ModelStreamEvent::Failed(_))));
+
+        let invalid_body = "not-json\n";
+        let (endpoint, _request_rx) =
+            start_http_response_server("200 OK", "application/x-ndjson", invalid_body);
+        let provider = AutoProvider::new(endpoint, "llama3.2");
+        let mut events = Vec::new();
+
+        let error = provider
+            .stream_chat(ModelRequest::new("hello"), &mut |event| {
+                events.push(event);
+                Ok(ModelStreamControl::Continue)
+            })
+            .expect_err("auto should not mix fallback after native stream starts");
+
+        assert_eq!(error.code(), "provider_response_invalid");
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ModelStreamEvent::Started(_))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ModelStreamEvent::Failed(_))));
+    }
+
+    #[test]
     fn http_status_errors_are_structured() {
         let auth_error = provider_http_error("OpenAI", StatusCode::UNAUTHORIZED);
         assert_eq!(auth_error.code(), "model_auth_failed");
@@ -1673,6 +2254,174 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(streamed, response.deltas.join(""));
+    }
+
+    #[test]
+    fn ollama_native_stream_emits_http_deltas_in_order() {
+        let stream_body = concat!(
+            r#"{"response":"hel","done":false}"#,
+            "\n",
+            r#"{"response":"lo","done":true}"#,
+            "\n"
+        );
+        let (endpoint, request_rx) =
+            start_http_response_server("200 OK", "application/x-ndjson", stream_body);
+        let provider = OllamaProvider::new(endpoint, "llama3.2");
+        let mut events = Vec::new();
+
+        let response = provider
+            .stream_chat(
+                ModelRequest::new("hello").with_selected_model(Some("ollama/llama3.2")),
+                &mut |event| {
+                    events.push(event);
+                    Ok(ModelStreamControl::Continue)
+                },
+            )
+            .expect("Ollama native stream should succeed");
+
+        let request = request_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("test server should capture request");
+        assert!(request.contains("POST /api/generate"));
+        assert!(request.contains(r#""stream":true"#));
+        assert_eq!(response.deltas, vec!["hel", "lo"]);
+        assert_eq!(
+            response.invocation.requested_model.as_deref(),
+            Some("ollama/llama3.2")
+        );
+        assert!(matches!(events.first(), Some(ModelStreamEvent::Started(_))));
+        assert!(matches!(
+            events.last(),
+            Some(ModelStreamEvent::Completed(_))
+        ));
+        let streamed = events
+            .into_iter()
+            .filter_map(|event| match event {
+                ModelStreamEvent::Delta(delta) => Some(delta),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(streamed, vec!["hel", "lo"]);
+    }
+
+    #[test]
+    fn openai_native_stream_parses_sse_delta_content() {
+        let stream_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (base_url, request_rx) =
+            start_http_response_server("200 OK", "text/event-stream", stream_body);
+        let provider = OpenAiProvider::new(base_url, "gpt-test", "sk-test");
+        let mut events = Vec::new();
+
+        let response = provider
+            .stream_chat(
+                ModelRequest::new("hello").with_selected_model(Some("openai/gpt-test")),
+                &mut |event| {
+                    events.push(event);
+                    Ok(ModelStreamControl::Continue)
+                },
+            )
+            .expect("OpenAI native stream should succeed");
+
+        let request = request_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("test server should capture request");
+        assert!(request.contains("POST /chat/completions"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer sk-test"));
+        assert!(request.contains(r#""stream":true"#));
+        assert_eq!(response.deltas, vec!["hel", "lo"]);
+        assert_eq!(response.invocation.effective_provider, "openai");
+        let streamed = events
+            .into_iter()
+            .filter_map(|event| match event {
+                ModelStreamEvent::Delta(delta) => Some(delta),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(streamed, vec!["hel", "lo"]);
+    }
+
+    #[test]
+    fn routing_provider_uses_native_openai_stream_path() {
+        let stream_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"route\"}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (base_url, _request_rx) =
+            start_http_response_server("200 OK", "text/event-stream", stream_body);
+        let provider = provider_from_config(
+            "echo",
+            "http://127.0.0.1:11434",
+            "llama3.2",
+            &base_url,
+            "gpt-test",
+            Some("sk-test"),
+        );
+        let mut events = Vec::new();
+
+        let response = provider
+            .stream_chat(
+                ModelRequest::new("hello").with_selected_model(Some("openai/gpt-test")),
+                &mut |event| {
+                    events.push(event);
+                    Ok(ModelStreamControl::Continue)
+                },
+            )
+            .expect("router should use selected OpenAI native stream");
+
+        assert_eq!(response.deltas, vec!["route"]);
+        assert_eq!(
+            response.invocation.requested_model.as_deref(),
+            Some("openai/gpt-test")
+        );
+        assert_eq!(response.invocation.effective_provider, "openai");
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ModelStreamEvent::Delta(delta) if delta == "route")));
+    }
+
+    #[test]
+    fn native_stream_callback_cancellation_stops_ollama() {
+        let stream_body = concat!(
+            r#"{"response":"first","done":false}"#,
+            "\n",
+            r#"{"response":"second","done":true}"#,
+            "\n"
+        );
+        let (endpoint, _request_rx) =
+            start_http_response_server("200 OK", "application/x-ndjson", stream_body);
+        let provider = OllamaProvider::new(endpoint, "llama3.2");
+        let mut events = Vec::new();
+
+        let error = provider
+            .stream_chat(ModelRequest::new("hello"), &mut |event| {
+                let should_cancel = matches!(event, ModelStreamEvent::Delta(_));
+                events.push(event);
+                if should_cancel {
+                    Ok(ModelStreamControl::Cancel)
+                } else {
+                    Ok(ModelStreamControl::Continue)
+                }
+            })
+            .expect_err("callback cancellation should stop native Ollama stream");
+
+        assert_eq!(error.code(), "model_cancelled");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ModelStreamEvent::Delta(_)))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last(),
+            Some(ModelStreamEvent::Cancelled(_))
+        ));
     }
 
     #[test]

@@ -460,8 +460,10 @@ total-agent limits.
   Authenticate the CLI separately with `codex login` for ChatGPT Plus/Pro access.
   CADIS does not read, copy, or persist `~/.codex/auth.json`.
 - `openai`: sends chat requests to the OpenAI Chat Completions API. It requires
-  `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` in the daemon environment.
+  `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` in the daemon environment. OpenAI
+  responses stream through server-sent events when the provider supports them.
 - `ollama`: requires a running Ollama server and returns an error event if unavailable.
+  Ollama responses stream through native `/api/generate` NDJSON chunks.
 - `echo`: uses the credential-free local fallback.
 
 Per-agent model selections set through `agent.model.set` are routed by `cadisd`
@@ -488,6 +490,9 @@ distinguish a real provider from the local fallback. `openai` is reported as
 `ready` only when an OpenAI API key is present in the daemon environment.
 Providers that need a daemon, login, API key, or local service are otherwise
 reported as `requires_configuration` until CADIS has active provider probing.
+Ollama and OpenAI entries advertise the `streaming` capability; Codex CLI
+stream events currently follow the shared callback contract but are limited by
+the official CLI process output granularity.
 
 Provider failures are surfaced through the normal `ErrorPayload` fields on
 `session.failed` events. Clients should key off the stable `code` and

@@ -141,16 +141,17 @@
 - [x] Define `ModelProvider` trait.
 - [x] Define provider capabilities.
 - [x] Define streaming event type.
-- [ ] Add real provider streaming callback support.
+- [x] Add real provider streaming callback support for Ollama and OpenAI.
 - [x] Add provider readiness and effective model metadata.
 - [x] Apply per-agent model selection to provider routing.
 - [x] Define provider-boundary cancellation behavior.
 - [x] Define provider error mapping.
 - [x] Implement first provider.
 - [x] Add provider callback/cancellation conformance tests.
+- [x] Add deterministic mock native streaming tests for Ollama and OpenAI.
 - [ ] Add full live-provider conformance tests.
 - [x] Add provider config docs.
-- [ ] Add second provider.
+- [x] Add second provider.
 
 ## 8. Tool Runtime
 

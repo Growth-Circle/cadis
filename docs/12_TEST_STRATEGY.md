@@ -37,7 +37,8 @@ Use for:
 - approval flow
 - tool execution through policy
 - log persistence
-- provider streaming with mock server
+- provider streaming with mock servers, including native Ollama NDJSON and
+  OpenAI SSE fixtures
 
 ### Conformance Tests
 

@@ -39,7 +39,11 @@ Implemented in the first runnable baseline:
 - P1 workspace skeleton crates: `cadis-core`, `cadis-daemon`, `cadis-cli`, `cadis-store`, `cadis-policy`, and `cadis-models`.
 - P3 daemon subset: `cadisd --version`, `cadisd --check`, Unix socket transport, stdio test mode, config load, health status, session registry, and event emission.
 - P4 CLI subset: `cadis status`, `cadis doctor`, `cadis models`, `cadis chat`, JSON frame output, and `cadis daemon` launcher.
-- P5 model subset: local fallback provider plus optional Ollama, OpenAI API, and Codex CLI adapters.
+- P5 model subset: local fallback provider plus optional Ollama, OpenAI API,
+  and Codex CLI adapters. Ollama now streams native NDJSON deltas and OpenAI
+  now streams Chat Completions SSE deltas through the shared provider callback;
+  Codex CLI remains wrapped through `codex exec` output until the CLI exposes a
+  stable token stream.
 - P8 persistence subset: `~/.cadis` layout, JSONL event logs, redaction before
   persistence, and store-level atomic JSON metadata helpers under
   `~/.cadis/state`.
@@ -94,9 +98,9 @@ Still pending:
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
   memory records, scoped retrieval, provenance ledger, candidate promotion, and
   memory capsules.
-- Native provider streaming for providers that support token streams directly;
-  the current provider trait can stream normalized events, but OpenAI/Ollama
-  still use non-streaming request paths.
+- Codex CLI native token streaming; the current adapter streams normalized
+  callback events from `codex exec` output, but its granularity is limited by
+  the official CLI's stdout behavior.
 
 ## 2.2 Next Execution Plan
 
@@ -146,10 +150,13 @@ Tasks:
 - Make effective provider/model visible to clients.
 - Route agent-selected model IDs into provider selection instead of treating
   `agent.model.set` as UI-only state.
-- Add streaming callback support for providers that can stream.
+- Add streaming callback support for providers that can stream. Baseline now
+  includes native Ollama NDJSON streaming, native OpenAI Chat Completions SSE
+  streaming, and router dispatch that preserves provider-native stream paths.
 - Provider-boundary cancellation is defined as callback `Cancel` control,
-  `model.cancelled`, and a non-retryable `model_cancelled` error; native
-  upstream cancellation still needs per-provider integration.
+  `model.cancelled`, and a non-retryable `model_cancelled` error. Ollama and
+  OpenAI stop reading the upstream stream when callbacks request cancellation;
+  Codex CLI still uses the default callback wrapper around process output.
 - Keep echo provider available only as an explicit fallback state.
 
 Exit criteria:
@@ -157,6 +164,8 @@ Exit criteria:
 - HUD can show whether the active model is real, fallback, or unavailable.
 - Per-agent model selection changes which provider/model answers.
 - OpenAI/Ollama/Codex CLI errors surface as structured daemon errors.
+- Ollama and OpenAI emit live `message.delta` events from native provider
+  streams before final completion.
 
 ### Track C - Orchestrator, Agents, and Workers
 
