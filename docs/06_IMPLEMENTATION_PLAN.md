@@ -79,9 +79,11 @@ Still pending:
 - Native mutating file/shell tools.
 - Agent runtime beyond the current route-and-answer path: async cancellation,
   model-driven spawn, multi-step budgets, durable AgentSession recovery, and a
-  provider/tool-call loop remain future work.
-- Daemon startup wiring for durable session, agent, worker, and approval
-  recovery. The store-level atomic write and fail-safe recovery helpers exist.
+  provider/tool-call loop remain future work; existing `agent.spawn` is
+  client-requested, not agent-driven.
+- Daemon startup wiring for pending approval recovery. Store-level atomic write
+  and fail-safe recovery helpers exist, and the daemon now recovers durable
+  session, agent, and worker metadata.
 - Worker execution lifecycle, isolated worktrees, Telegram/mobile adapters,
   daemon-owned production voice output, and code work window.
 - Agent home manager, denied-path enforcement for all mutating tools,
@@ -535,6 +537,9 @@ Tasks:
   `state/workers/<worker-id>.json`, and
   `state/approvals/<approval-id>.json`.
 - Store session metadata.
+- Store worker metadata for the current daemon-planned worker delegation
+  baseline and recover stale non-terminal worker records as failed on daemon
+  restart.
 - Store approval metadata.
 - Implement redaction.
 - Use atomic writes for state.

@@ -134,7 +134,8 @@ Example:
 snapshot is represented as normal event frames, currently including
 `agent.list.response`, `ui.preferences.updated`, `session.updated` for known
 sessions, and worker lifecycle snapshots for workers known to the in-memory
-daemon worker registry.
+daemon worker registry or recovered durable worker metadata. Recovery diagnostics
+for corrupt or skipped durable metadata are emitted as `daemon.error` events.
 
 `worker.tail` is a one-shot request for recent daemon-owned worker log lines.
 The desktop MVP replays log lines from the in-memory worker registry as
