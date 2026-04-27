@@ -61,6 +61,10 @@ const SHELL_POLL_INTERVAL_MS: u64 = 10;
 const APPROVAL_TIMEOUT_MINUTES: i64 = 5;
 const WORKER_TAIL_DEFAULT_LINES: usize = 64;
 const WORKER_TAIL_MAX_LINES: usize = 1_000;
+const WORKER_DEFAULT_COMMAND: &str = "git status --short";
+const WORKER_COMMAND_TIMEOUT_MS: u64 = 5_000;
+const WORKER_COMMAND_LOG_LIMIT_BYTES: usize = 4 * 1024;
+const WORKER_COMMAND_SUMMARY_LIMIT_BYTES: usize = 512;
 
 /// Runtime options supplied by the daemon process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2417,6 +2421,42 @@ impl Runtime {
         status: &str,
         summary: String,
     ) -> Vec<EventEnvelope> {
+        if status == "completed" {
+            let mut events = Vec::new();
+            let command_result = self.execute_worker_command(worker_id);
+            for line in command_result.logs {
+                if let Some(event) = self.append_worker_log(worker_id, line) {
+                    events.push(event);
+                }
+            }
+            if let Some(failure) = command_result.failure {
+                events.extend(self.finish_worker(
+                    worker_id,
+                    "failed",
+                    failure.message.clone(),
+                    WorkerFinishOptions {
+                        error_code: Some(failure.code),
+                        error: Some(failure.message),
+                        cancellation_requested_at: None,
+                        write_artifacts: true,
+                    },
+                ));
+                return events;
+            }
+            events.extend(self.finish_worker(
+                worker_id,
+                status,
+                summary,
+                WorkerFinishOptions {
+                    error_code: None,
+                    error: None,
+                    cancellation_requested_at: None,
+                    write_artifacts: true,
+                },
+            ));
+            return events;
+        }
+
         self.finish_worker(
             worker_id,
             status,
@@ -2510,6 +2550,13 @@ impl Runtime {
             return Vec::new();
         };
         write_worker_artifacts(worker, status, summary)
+    }
+
+    fn execute_worker_command(&mut self, worker_id: &str) -> WorkerCommandExecution {
+        let Some(worker) = self.workers.get_mut(worker_id) else {
+            return WorkerCommandExecution::default();
+        };
+        execute_worker_command(worker)
     }
 
     fn plan_worker_terminal_cleanup(
@@ -4340,6 +4387,7 @@ struct WorkerRecord {
     artifacts: Option<WorkerArtifactLocations>,
     updated_at: Timestamp,
     log_lines: Vec<String>,
+    command_report: Option<WorkerCommandReport>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4348,6 +4396,32 @@ struct WorkerFinishOptions {
     error: Option<String>,
     cancellation_requested_at: Option<Timestamp>,
     write_artifacts: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkerCommandReport {
+    command: String,
+    cwd: String,
+    status: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct WorkerCommandExecution {
+    logs: Vec<String>,
+    failure: Option<WorkerCommandFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkerCommandFailure {
+    code: String,
+    message: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -4390,6 +4464,7 @@ impl WorkerRecord {
             artifacts: Some(worker.artifacts.clone()),
             updated_at: now_timestamp(),
             log_lines: Vec::new(),
+            command_report: None,
         }
     }
 
@@ -4455,6 +4530,7 @@ impl WorkerMetadata {
                 artifacts: self.artifacts,
                 updated_at: self.updated_at,
                 log_lines: Vec::new(),
+                command_report: None,
             },
         )
     }
@@ -7289,6 +7365,276 @@ fn create_git_worktree(
     }
 }
 
+fn execute_worker_command(record: &mut WorkerRecord) -> WorkerCommandExecution {
+    let Some(worktree) = record.worktree.clone() else {
+        return WorkerCommandExecution::default();
+    };
+    if worktree.state != WorkerWorktreeState::Active {
+        return WorkerCommandExecution::default();
+    }
+
+    let mut execution = WorkerCommandExecution::default();
+    let cwd = match worker_command_cwd(&record.worker_id, &worktree) {
+        Ok(cwd) => cwd,
+        Err(message) => {
+            let message = redact(&message);
+            record.command_report = Some(WorkerCommandReport {
+                command: WORKER_DEFAULT_COMMAND.to_owned(),
+                cwd: worktree.worktree_path,
+                status: "failed".to_owned(),
+                exit_code: None,
+                timed_out: false,
+                stdout: String::new(),
+                stderr: message.clone(),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                timeout_ms: WORKER_COMMAND_TIMEOUT_MS,
+            });
+            execution.failure = Some(WorkerCommandFailure {
+                code: "worker_command_refused".to_owned(),
+                message,
+            });
+            return execution;
+        }
+    };
+
+    let cwd_display = cwd.display().to_string();
+    record.cli = Some("cadisd-worker-command".to_owned());
+    record.cwd = Some(cwd_display.clone());
+    execution
+        .logs
+        .push(format!("command started: {WORKER_DEFAULT_COMMAND}\n"));
+
+    let report = match run_worker_validation_command(&cwd) {
+        Ok(result) => worker_command_report(&cwd_display, result),
+        Err(error) => WorkerCommandReport {
+            command: WORKER_DEFAULT_COMMAND.to_owned(),
+            cwd: cwd_display,
+            status: "failed".to_owned(),
+            exit_code: None,
+            timed_out: false,
+            stdout: String::new(),
+            stderr: redact(&error.message),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            timeout_ms: WORKER_COMMAND_TIMEOUT_MS,
+        },
+    };
+
+    execution.logs.extend(worker_command_logs(&report));
+    if report.status != "passed" {
+        execution.failure = Some(worker_command_failure(&report));
+    }
+    record.command_report = Some(report);
+    execution
+}
+
+fn worker_command_cwd(worker_id: &str, worktree: &WorkerWorktreeIntent) -> Result<PathBuf, String> {
+    let cwd = PathBuf::from(&worktree.worktree_path)
+        .canonicalize()
+        .map_err(|error| format!("worker command cwd is unavailable: {error}"))?;
+    if !cwd.is_dir() {
+        return Err(format!(
+            "worker command cwd {} is not a directory",
+            cwd.display()
+        ));
+    }
+    if cwd.file_name().and_then(|value| value.to_str()) != Some(worker_id) {
+        return Err("worker command refused: cwd is not the assigned worker directory".to_owned());
+    }
+
+    let worktree_root = PathBuf::from(&worktree.worktree_root)
+        .canonicalize()
+        .map_err(|error| format!("worker command root is unavailable: {error}"))?;
+    if !worktree_root.ends_with(Path::new(".cadis/worktrees")) {
+        return Err(
+            "worker command refused: worktree root must be project .cadis/worktrees".to_owned(),
+        );
+    }
+    if cwd.parent() != Some(worktree_root.as_path()) {
+        return Err("worker command refused: cwd is outside the worker worktree root".to_owned());
+    }
+
+    Ok(cwd)
+}
+
+fn run_worker_validation_command(cwd: &Path) -> Result<ShellRunResult, ErrorPayload> {
+    let mut command = Command::new("git");
+    command
+        .args(["status", "--short"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    run_bounded_command(command, StdDuration::from_millis(WORKER_COMMAND_TIMEOUT_MS))
+}
+
+fn worker_command_report(cwd: &str, result: ShellRunResult) -> WorkerCommandReport {
+    let stdout = redact(&String::from_utf8_lossy(&result.stdout.bytes));
+    let stderr = redact(&String::from_utf8_lossy(&result.stderr.bytes));
+    let status = if result.timed_out {
+        "timed_out"
+    } else if result.status_success {
+        "passed"
+    } else {
+        "failed"
+    };
+
+    WorkerCommandReport {
+        command: WORKER_DEFAULT_COMMAND.to_owned(),
+        cwd: cwd.to_owned(),
+        status: status.to_owned(),
+        exit_code: result.exit_code,
+        timed_out: result.timed_out,
+        stdout,
+        stderr,
+        stdout_truncated: result.stdout.truncated,
+        stderr_truncated: result.stderr.truncated,
+        timeout_ms: WORKER_COMMAND_TIMEOUT_MS,
+    }
+}
+
+fn worker_command_failure(report: &WorkerCommandReport) -> WorkerCommandFailure {
+    if report.timed_out {
+        return WorkerCommandFailure {
+            code: "worker_command_timeout".to_owned(),
+            message: format!(
+                "worker command timed out after timeout_ms={}: {}",
+                report.timeout_ms, report.command
+            ),
+        };
+    }
+
+    let detail = if !report.stderr.trim().is_empty() {
+        report.stderr.trim()
+    } else if !report.stdout.trim().is_empty() {
+        report.stdout.trim()
+    } else {
+        "command exited without output"
+    };
+    WorkerCommandFailure {
+        code: "worker_command_failed".to_owned(),
+        message: format!(
+            "worker command exited with code {:?}: {}",
+            report.exit_code,
+            truncate_redacted_text(detail, WORKER_COMMAND_SUMMARY_LIMIT_BYTES)
+        ),
+    }
+}
+
+fn worker_command_logs(report: &WorkerCommandReport) -> Vec<String> {
+    let mut logs = Vec::new();
+    if !report.stdout.is_empty() || report.stdout_truncated {
+        logs.push(bounded_worker_command_log(
+            "stdout",
+            &report.stdout,
+            report.stdout_truncated,
+        ));
+    }
+    if !report.stderr.is_empty() || report.stderr_truncated {
+        logs.push(bounded_worker_command_log(
+            "stderr",
+            &report.stderr,
+            report.stderr_truncated,
+        ));
+    }
+    logs.push(format!(
+        "command finished: status={} exit_code={:?}\n",
+        report.status, report.exit_code
+    ));
+    logs
+}
+
+fn bounded_worker_command_log(label: &str, content: &str, source_truncated: bool) -> String {
+    let header = format!("command {label}:\n");
+    let marker = format!("\n[{label} truncated]\n");
+    let redacted = redact(content);
+    let limit = WORKER_COMMAND_LOG_LIMIT_BYTES
+        .saturating_sub(header.len())
+        .saturating_sub(marker.len())
+        .max(1);
+    let (content, locally_truncated) = truncate_to_utf8_boundary(&redacted, limit);
+    let mut log = header;
+    log.push_str(content);
+    if source_truncated || locally_truncated {
+        log.push_str(&marker);
+    } else if !log.ends_with('\n') {
+        log.push('\n');
+    }
+    log
+}
+
+fn truncate_redacted_text(content: &str, limit: usize) -> String {
+    let redacted = redact(content);
+    let (content, truncated) = truncate_to_utf8_boundary(&redacted, limit);
+    if truncated {
+        format!("{content}...")
+    } else {
+        content.to_owned()
+    }
+}
+
+fn truncate_to_utf8_boundary(content: &str, limit: usize) -> (&str, bool) {
+    if content.len() <= limit {
+        return (content, false);
+    }
+
+    let mut end = limit;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&content[..end], true)
+}
+
+fn worker_command_summary_markdown(report: &WorkerCommandReport) -> String {
+    let mut content = format!(
+        "\n## Daemon Validation\n\nCommand: `{}`\n\nStatus: {}\n\nExit code: {:?}\n\n",
+        redact(&report.command),
+        report.status,
+        report.exit_code
+    );
+    if !report.stdout.is_empty() || report.stdout_truncated {
+        content.push_str("Stdout:\n\n```text\n");
+        content.push_str(&report.stdout);
+        if report.stdout_truncated {
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str("[stdout truncated]\n");
+        }
+        content.push_str("```\n\n");
+    }
+    if !report.stderr.is_empty() || report.stderr_truncated {
+        content.push_str("Stderr:\n\n```text\n");
+        content.push_str(&report.stderr);
+        if report.stderr_truncated {
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str("[stderr truncated]\n");
+        }
+        content.push_str("```\n\n");
+    }
+    content
+}
+
+fn worker_command_report_json(report: &WorkerCommandReport) -> serde_json::Value {
+    serde_json::json!({
+        "command": report.command.clone(),
+        "cwd": report.cwd.clone(),
+        "status": report.status.clone(),
+        "exit_code": report.exit_code,
+        "timed_out": report.timed_out,
+        "stdout": report.stdout.clone(),
+        "stderr": report.stderr.clone(),
+        "stdout_truncated": report.stdout_truncated,
+        "stderr_truncated": report.stderr_truncated,
+        "timeout_ms": report.timeout_ms,
+    })
+}
+
 fn write_worker_artifacts(record: &mut WorkerRecord, status: &str, summary: &str) -> Vec<String> {
     let mut logs = Vec::new();
     let Some(artifacts) = record.artifacts.clone() else {
@@ -7299,12 +7645,15 @@ fn write_worker_artifacts(record: &mut WorkerRecord, status: &str, summary: &str
         return logs;
     }
 
-    let summary_content = format!(
+    let mut summary_content = format!(
         "# Worker {}\n\nStatus: {}\n\n{}\n",
         record.worker_id,
         status,
         redact(summary)
     );
+    if let Some(command_report) = &record.command_report {
+        summary_content.push_str(&worker_command_summary_markdown(command_report));
+    }
     if let Err(error) = write_artifact(&artifacts.summary, &summary_content) {
         logs.push(format!("summary artifact failed: {error}\n"));
     }
@@ -7345,6 +7694,7 @@ fn write_worker_artifacts(record: &mut WorkerRecord, status: &str, summary: &str
         "summary": redact(summary),
         "generated_by": "cadisd",
         "generated_at": now_timestamp(),
+        "validation_command": record.command_report.as_ref().map(worker_command_report_json),
     });
     if let Err(error) = write_json_artifact(&artifacts.test_report, &test_report) {
         logs.push(format!("test-report artifact failed: {error}\n"));
@@ -7401,6 +7751,13 @@ fn run_shell_command(
     #[cfg(unix)]
     child_command.process_group(0);
 
+    run_bounded_command(child_command, timeout)
+}
+
+fn run_bounded_command(
+    mut child_command: Command,
+    timeout: StdDuration,
+) -> Result<ShellRunResult, ErrorPayload> {
     let mut child = child_command
         .spawn()
         .map_err(|error| tool_error("shell_spawn_failed", error.to_string(), false))?;
@@ -7817,6 +8174,70 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn create_workspace_session(runtime: &mut Runtime, workspace: &Path, title: &str) -> SessionId {
+        runtime
+            .handle_request(RequestEnvelope::new(
+                RequestId::from(format!("req_session_{}", slugify(title))),
+                ClientId::from("cli_1"),
+                ClientRequest::SessionCreate(SessionCreateRequest {
+                    title: Some(title.to_owned()),
+                    cwd: Some(workspace.display().to_string()),
+                }),
+            ))
+            .events
+            .into_iter()
+            .find_map(|event| match event.event {
+                CadisEvent::SessionStarted(payload) => Some(payload.session_id),
+                _ => None,
+            })
+            .expect("session.started should be emitted")
+    }
+
+    fn begin_workspace_worker_message(
+        runtime: &mut Runtime,
+        workspace: &Path,
+        request_id: &str,
+        content: &str,
+    ) -> PendingMessageGeneration {
+        let session_id = create_workspace_session(runtime, workspace, request_id);
+        match runtime.begin_message_request(RequestEnvelope::new(
+            RequestId::from(request_id),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: Some(session_id),
+                target_agent_id: None,
+                content: content.to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        )) {
+            Ok(pending) => pending,
+            Err(outcome) => panic!("worker message should begin: {:?}", outcome.response),
+        }
+    }
+
+    fn test_model_response() -> cadis_models::ModelResponse {
+        cadis_models::ModelResponse {
+            deltas: Vec::new(),
+            invocation: cadis_models::ModelInvocation {
+                requested_model: None,
+                effective_provider: "echo".to_owned(),
+                effective_model: "echo".to_owned(),
+                fallback: false,
+                fallback_reason: None,
+            },
+        }
+    }
+
+    fn worker_started_payload(events: &[EventEnvelope]) -> WorkerEventPayload {
+        events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerStarted(payload) => Some(payload.clone()),
+                _ => None,
+            })
+            .expect("worker.started should be emitted")
     }
 
     fn register_workspace(runtime: &mut Runtime, workspace_id: &str, root: &Path) {
@@ -9611,6 +10032,20 @@ mod tests {
                     if payload.delta.contains("worktree ready")
             )
         }));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerLogDelta(payload)
+                    if payload.delta == format!("command started: {WORKER_DEFAULT_COMMAND}\n")
+            )
+        }));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerLogDelta(payload)
+                    if payload.delta == "command finished: status=passed exit_code=Some(0)\n"
+            )
+        }));
 
         let completed = outcome
             .events
@@ -9634,6 +10069,30 @@ mod tests {
         assert!(Path::new(&artifacts.test_report).is_file());
         assert!(Path::new(&artifacts.changed_files).is_file());
         assert!(Path::new(&artifacts.patch).is_file());
+
+        let test_report: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&artifacts.test_report).expect("test report should read"),
+        )
+        .expect("test report should be JSON");
+        assert_eq!(
+            test_report["validation_command"]["command"],
+            WORKER_DEFAULT_COMMAND
+        );
+        assert_eq!(test_report["validation_command"]["status"], "passed");
+        let reported_cwd = test_report["validation_command"]["cwd"]
+            .as_str()
+            .expect("validation command cwd should be a string");
+        assert_eq!(
+            Path::new(reported_cwd)
+                .canonicalize()
+                .expect("reported cwd should canonicalize"),
+            Path::new(&worktree.worktree_path)
+                .canonicalize()
+                .expect("worker worktree path should canonicalize")
+        );
+        let summary = fs::read_to_string(&artifacts.summary).expect("summary should read");
+        assert!(summary.contains("## Daemon Validation"));
+        assert!(summary.contains("Status: completed"));
 
         let project_metadata = ProjectWorkspaceStore::new(&workspace)
             .load_worker_worktree_metadata("worker_000001")
@@ -9874,6 +10333,164 @@ mod tests {
             project_metadata.state,
             ProjectWorkerWorktreeState::ReviewPending
         );
+    }
+
+    #[test]
+    fn worker_command_logs_are_bounded_and_redacted() {
+        let cadis_home = test_workspace("worker-command-redaction-home");
+        let workspace = test_workspace("worker-command-redaction-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home);
+        register_workspace(&mut runtime, "worker-redaction", &workspace);
+        let pending = begin_workspace_worker_message(
+            &mut runtime,
+            &workspace,
+            "req_worker_command_redaction",
+            "/worker run focused tests",
+        );
+        let started = worker_started_payload(&pending.initial_events);
+        let worktree = started
+            .worktree
+            .as_ref()
+            .expect("worker.started should include worktree");
+        let worktree_path = PathBuf::from(&worktree.worktree_path);
+
+        fs::write(
+            worktree_path.join("000-secret=secret-value.txt"),
+            "redact me",
+        )
+        .expect("secret-looking fixture should write");
+        let long_component = "a".repeat(80);
+        for index in 0..300 {
+            fs::write(
+                worktree_path.join(format!("file-{index:03}-{long_component}.txt")),
+                "x",
+            )
+            .expect("large status fixture should write");
+        }
+
+        let events = runtime.complete_message_generation(
+            pending,
+            test_model_response(),
+            "worker done".to_owned(),
+            false,
+        );
+        let stdout_logs = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                CadisEvent::WorkerLogDelta(payload)
+                    if payload.delta.starts_with("command stdout:\n") =>
+                {
+                    Some(payload.delta.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!stdout_logs.is_empty());
+        assert!(stdout_logs
+            .iter()
+            .all(|delta| delta.len() <= WORKER_COMMAND_LOG_LIMIT_BYTES));
+
+        let joined_logs = stdout_logs.join("");
+        assert!(joined_logs.contains("secret=[REDACTED]"));
+        assert!(!joined_logs.contains("secret-value"));
+        assert!(joined_logs.contains("[stdout truncated]"));
+
+        let completed = events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("worker should complete after passing validation");
+        let artifacts = completed
+            .artifacts
+            .as_ref()
+            .expect("worker.completed should include artifacts");
+        let test_report: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&artifacts.test_report).expect("test report should read"),
+        )
+        .expect("test report should be JSON");
+        let stdout = test_report["validation_command"]["stdout"]
+            .as_str()
+            .expect("stdout should be a string");
+        assert!(!stdout.contains("secret-value"));
+        assert_eq!(test_report["validation_command"]["stdout_truncated"], true);
+    }
+
+    #[test]
+    fn worker_command_nonzero_exit_marks_worker_failed_and_updates_report() {
+        let cadis_home = test_workspace("worker-command-failure-home");
+        let workspace = test_workspace("worker-command-failure-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home);
+        register_workspace(&mut runtime, "worker-command-failure", &workspace);
+        let pending = begin_workspace_worker_message(
+            &mut runtime,
+            &workspace,
+            "req_worker_command_failure",
+            "/worker run focused tests",
+        );
+        let started = worker_started_payload(&pending.initial_events);
+        let worker_id = started.worker_id.clone();
+        let worktree = started
+            .worktree
+            .as_ref()
+            .expect("worker.started should include worktree");
+        let worktree_path = PathBuf::from(&worktree.worktree_path);
+        fs::write(
+            worktree_path.join(".git"),
+            "gitdir: /cadis/missing/gitdir\n",
+        )
+        .expect("worktree gitdir should be made invalid");
+
+        let events = runtime.complete_message_generation(
+            pending,
+            test_model_response(),
+            "worker done".to_owned(),
+            false,
+        );
+        assert!(!events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCompleted(payload) if payload.worker_id == worker_id
+            )
+        }));
+        let failed = events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerFailed(payload) if payload.worker_id == worker_id => {
+                    Some(payload)
+                }
+                _ => None,
+            })
+            .expect("worker.failed should be emitted");
+        assert_eq!(failed.status.as_deref(), Some("failed"));
+        assert_eq!(failed.error_code.as_deref(), Some("worker_command_failed"));
+        assert!(failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("worker command exited with code")));
+
+        let artifacts = failed
+            .artifacts
+            .as_ref()
+            .expect("worker.failed should include artifacts");
+        let test_report: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&artifacts.test_report).expect("test report should read"),
+        )
+        .expect("test report should be JSON");
+        assert_eq!(test_report["status"], "failed");
+        assert_eq!(test_report["validation_command"]["status"], "failed");
+        assert_ne!(
+            test_report["validation_command"]["exit_code"].as_i64(),
+            Some(0)
+        );
+        let summary = fs::read_to_string(&artifacts.summary).expect("summary should read");
+        assert!(summary.contains("Status: failed"));
+        assert!(summary.contains("## Daemon Validation"));
     }
 
     #[test]

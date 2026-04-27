@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import {
   _resetCadisActionsForTest,
@@ -12,6 +12,7 @@ import {
   sendVoicePreflight,
 } from "./cadisActions.js";
 import { useHud } from "./hudState.js";
+import { CodeWorkPanel } from "./codework/CodeWorkPanel.js";
 import { WorkerTree } from "./orbital/WorkerTree.js";
 import { mockCadisDaemonWorkerStream } from "./fixtures/mockCadisDaemonEventStream.js";
 
@@ -46,6 +47,8 @@ beforeEach(() => {
     chat: [],
     approvals: [],
     workers: [],
+    selectedWorkerId: null,
+    codeWorkPanelOpen: false,
     voiceStatus: null,
     voiceDoctor: null,
     gateway: "disconnected",
@@ -422,6 +425,7 @@ describe("cadisActions", () => {
         artifacts: {
           summary: "/home/user/.cadis/artifacts/workers/worker_mock_001/summary.md",
           testReport: "/home/user/.cadis/artifacts/workers/worker_mock_001/test-report.json",
+          testReportStatus: "passed",
         },
       },
     ]);
@@ -432,6 +436,48 @@ describe("cadisActions", () => {
     expect(screen.getByText("ags_mock_001")).toBeInTheDocument();
     expect(screen.getByText("worker_mock_001")).toBeInTheDocument();
     expect(screen.getByText(/focused HUD worker tests passed/)).toBeInTheDocument();
+  });
+
+  it("opens a code work panel from the worker tree using mock daemon worker state", () => {
+    for (const frame of mockCadisDaemonWorkerStream) {
+      handleCadisFrameForTest(frame);
+    }
+    useHud.getState().setCodeWorkPanelOpen(false);
+
+    render(
+      createElement(
+        "div",
+        null,
+        createElement(WorkerTree, { agentId: "codex" }),
+        createElement(CodeWorkPanel),
+      ),
+    );
+
+    expect(screen.queryByRole("complementary", { name: "Code work" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open code work for worker_mock_001" }));
+
+    expect(screen.getByRole("complementary", { name: "Code work" })).toBeInTheDocument();
+    expect(screen.getAllByText("worker_mock_001").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("completed: focused HUD worker tests passed").length).toBeGreaterThan(0);
+    expect(screen.getByText(".cadis/worktrees/worker_mock_001")).toBeInTheDocument();
+    expect(screen.getByText("/home/user/.cadis/artifacts/workers/worker_mock_001/patch.diff")).toBeInTheDocument();
+    expect(screen.getByText("/home/user/.cadis/artifacts/workers/worker_mock_001/test-report.json")).toBeInTheDocument();
+    expect(screen.getByText("PASSED")).toBeInTheDocument();
+    expect(screen.getByText("started: Worker Coding: run focused HUD worker tests")).toBeInTheDocument();
+  });
+
+  it("does not execute tools directly from the apply placeholder", () => {
+    for (const frame of mockCadisDaemonWorkerStream) {
+      handleCadisFrameForTest(frame);
+    }
+    invokeMock.mockClear();
+
+    render(createElement(CodeWorkPanel));
+
+    const apply = screen.getByRole("button", { name: "APPLY" });
+    expect(apply).toBeDisabled();
+    fireEvent.click(apply);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
   it("computes bounded reconnect backoff", () => {

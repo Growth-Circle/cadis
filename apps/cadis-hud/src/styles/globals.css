@@ -1732,6 +1732,7 @@ html, body, #root {
 }
 .worker-tree__toggle:hover { color: var(--accent); }
 .worker-tree__list { list-style: none; padding: 4px 0 0 14px; margin: 0; }
+.worker-tree__row { margin: 0; padding: 0; }
 .worker-tree__item {
   display: grid;
   grid-template-columns: 8px minmax(68px, auto) auto minmax(0, 1fr) 42px;
@@ -1739,6 +1740,24 @@ html, body, #root {
   align-items: center;
   padding: 2px 0;
   color: var(--dim);
+}
+.worker-tree__item--button {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.worker-tree__item--button:hover {
+  border-color: var(--border-d);
+  background: oklch(0.18 0.03 var(--hue) / 0.34);
+  color: var(--text);
+}
+.worker-tree__item--button[data-selected="true"] {
+  border-color: var(--accent-d);
+  background: oklch(0.20 0.04 var(--hue) / 0.46);
 }
 .worker-tree__dot { width: 6px; height: 6px; border-radius: 50%; }
 .worker-tree__id { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1770,6 +1789,245 @@ html, body, #root {
 @keyframes worker-progress-pulse {
   0%, 100% { opacity: 0.46; }
   50% { opacity: 0.95; }
+}
+
+/* ─── Code work panel (P14) ─── */
+
+.code-work-panel {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 8;
+  width: min(420px, calc(100% - 24px));
+  max-width: 38vw;
+  min-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background:
+    linear-gradient(180deg, oklch(0.15 0.025 var(--hue) / 0.92), oklch(0.09 0.016 var(--hue) / 0.88));
+  box-shadow:
+    0 18px 50px rgba(0, 0, 0, 0.44),
+    inset 0 0 24px oklch(0.78 0.16 var(--hue) / 0.04);
+  font-family: var(--mono);
+  overflow: hidden;
+}
+
+.code-work-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--border-d);
+}
+
+.code-work-panel__eyebrow {
+  display: block;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+}
+
+.code-work-panel__header h2 {
+  margin: 3px 0 0;
+  max-width: 300px;
+  overflow: hidden;
+  color: var(--accent);
+  font-size: 14px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-work-panel__close {
+  flex: 0 0 auto;
+  min-width: 28px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.code-work-panel__close:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.code-work-panel__statusline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.code-work-panel__status {
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 3px 7px;
+  line-height: 1;
+}
+
+.code-work-panel__status--ok { color: var(--ok); }
+.code-work-panel__status--warn { color: var(--warn); }
+.code-work-panel__status--err { color: var(--err); }
+.code-work-panel__status--dim { color: var(--faint); }
+
+.code-work-panel__section {
+  min-height: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-d);
+}
+
+.code-work-panel__section h3 {
+  margin: 0 0 7px;
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.code-work-panel__summary,
+.code-work-panel__empty {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.code-work-panel__empty {
+  color: var(--faint);
+}
+
+.code-work-panel__fields {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.code-work-panel__field {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.code-work-panel__field dt {
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.code-work-panel__field dd {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+}
+
+.code-work-panel__field code {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-work-panel__field code.code-work-panel__missing {
+  color: var(--faint);
+  font-style: italic;
+}
+
+.code-work-panel__artifact-status {
+  justify-self: start;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 2px 5px;
+  font-size: 8px;
+  letter-spacing: 0.12em;
+}
+
+.code-work-panel__artifact-status--ok { color: var(--ok); }
+.code-work-panel__artifact-status--warn { color: var(--warn); }
+.code-work-panel__artifact-status--err { color: var(--err); }
+.code-work-panel__artifact-status--dim { color: var(--faint); }
+
+.code-work-panel__log {
+  max-height: 132px;
+  margin: 0;
+  padding: 7px 8px 7px 28px;
+  overflow: auto;
+  border: 1px solid var(--border-d);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.code-work-panel__log li + li { margin-top: 3px; }
+.code-work-panel__log code { color: var(--dim); font-family: var(--mono); }
+
+.code-work-panel__actions {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-d);
+}
+
+.code-work-panel__actions p {
+  margin: 0;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.code-work-panel__actions div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.code-work-panel__actions button {
+  border: 1px solid var(--border-d);
+  border-radius: 4px;
+  background: oklch(0.12 0.02 var(--hue) / 0.5);
+  color: var(--faint);
+  padding: 5px 12px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+}
+
+.code-work-panel__actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+@media (max-width: 1120px) {
+  .code-work-panel {
+    left: 12px;
+    max-width: none;
+    min-width: 0;
+  }
 }
 
 /* ─── Theme picker (P5.6) ─── */
