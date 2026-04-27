@@ -11,6 +11,8 @@ use std::time::{Duration as StdDuration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use cadis_models::{
     provider_catalog_for_config, ModelCatalogConfig, ModelInvocation, ModelProvider, ModelRequest,
@@ -65,6 +67,9 @@ const WORKER_DEFAULT_COMMAND: &str = "git status --short";
 const WORKER_COMMAND_TIMEOUT_MS: u64 = 5_000;
 const WORKER_COMMAND_LOG_LIMIT_BYTES: usize = 4 * 1024;
 const WORKER_COMMAND_SUMMARY_LIMIT_BYTES: usize = 512;
+
+#[cfg(test)]
+static FILE_PATCH_COMMIT_FAIL_AFTER: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// Runtime options supplied by the daemon process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6795,6 +6800,18 @@ fn commit_file_patch_transaction(staged: &[StagedFilePatch]) -> Result<(), Error
                 break;
             }
             moved_backups.push((change.path.clone(), backup_path.clone()));
+
+            if let Err(error) = fs::metadata(backup_path)
+                .map(|metadata| metadata.permissions())
+                .and_then(|permissions| fs::set_permissions(&change.staged_path, permissions))
+            {
+                failed = true;
+                failure_message = format!(
+                    "could not preserve metadata for {}: {error}",
+                    change.display_path
+                );
+                break;
+            }
         }
 
         if let Err(error) = fs::rename(&change.staged_path, &change.path) {
@@ -6806,6 +6823,13 @@ fn commit_file_patch_transaction(staged: &[StagedFilePatch]) -> Result<(), Error
             break;
         }
         committed_targets.push(change.path.clone());
+
+        if should_fail_file_patch_commit(committed_targets.len()) {
+            failed = true;
+            failure_message =
+                "transactional file.patch commit failed due to injected test fault".to_owned();
+            break;
+        }
     }
 
     if failed {
@@ -6823,6 +6847,19 @@ fn commit_file_patch_transaction(staged: &[StagedFilePatch]) -> Result<(), Error
     cleanup_staged_file_patch_paths(staged);
 
     Ok(())
+}
+
+fn should_fail_file_patch_commit(committed_count: usize) -> bool {
+    #[cfg(test)]
+    {
+        let fail_after = FILE_PATCH_COMMIT_FAIL_AFTER.load(AtomicOrdering::Relaxed);
+        fail_after != usize::MAX && committed_count >= fail_after
+    }
+    #[cfg(not(test))]
+    {
+        let _ = committed_count;
+        false
+    }
 }
 
 fn rollback_file_patch_transaction(
@@ -8599,6 +8636,33 @@ mod tests {
         ))
     }
 
+    fn set_file_patch_commit_failure_after(value: Option<usize>) -> usize {
+        FILE_PATCH_COMMIT_FAIL_AFTER.swap(
+            value.unwrap_or(usize::MAX),
+            AtomicOrdering::SeqCst,
+        )
+    }
+
+    fn restore_file_patch_commit_failure_after(previous: usize) {
+        FILE_PATCH_COMMIT_FAIL_AFTER.store(previous, AtomicOrdering::SeqCst);
+    }
+
+    fn assert_no_file_patch_temp_files(root: &Path) {
+        let mut leaked = Vec::new();
+        let entries = fs::read_dir(root).expect("workspace should be readable");
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(".cadis_file_patch_") {
+                leaked.push(name);
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "temporary file.patch artifacts should be cleaned: {:?}",
+            leaked
+        );
+    }
+
     fn send_message_with_kind(
         runtime: &mut Runtime,
         content_kind: ContentKind,
@@ -9415,32 +9479,119 @@ mod tests {
             fs::read_to_string(workspace.join("README.md")).expect("file should read"),
             "hello cadis\n"
         );
+        assert_no_file_patch_temp_files(&workspace);
     }
 
     #[test]
-    fn file_patch_transaction_rolls_back_on_commit_failure() {
-        let workspace = test_workspace("file-patch-rollback");
-        let target = workspace.join("README.md");
-        fs::write(&target, "hello\n").expect("test file should write");
-        let staged_path = workspace.join(".missing_staged_file_patch");
-        let backup_path = workspace.join(".file_patch_backup");
-        let staged = vec![StagedFilePatch {
-            path: target.clone(),
-            display_path: "README.md".to_owned(),
-            action: "write",
-            staged_path,
-            backup_path: Some(backup_path.clone()),
-            had_original: true,
-        }];
+    fn file_patch_transaction_rolls_back_multi_file_daemon_flow() {
+        let workspace = test_workspace("file-patch-rollback-runtime");
+        fs::write(workspace.join("README.md"), "hello\n").expect("README should write");
+        let created_path = workspace.join("NEW.md");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "file-patch-rollback-runtime", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "file-patch-rollback-runtime",
+            vec![WorkspaceAccess::Write],
+        );
 
-        let error =
-            commit_file_patch_transaction(&staged).expect_err("transaction should fail closed");
-        assert_eq!(error.code, "file_patch_write_failed");
+        let previous = set_file_patch_commit_failure_after(Some(2));
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_file_patch_rollback_runtime"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.patch".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "file-patch-rollback-runtime",
+                    "operations": [
+                        {
+                            "op": "replace",
+                            "path": "README.md",
+                            "old": "hello\n",
+                            "new": "hello cadis\n"
+                        },
+                        {
+                            "op": "write",
+                            "path": "NEW.md",
+                            "content": "created by patch\n"
+                        }
+                    ]
+                }),
+            }),
+        ));
+        let outcome = approve(&mut runtime, approval_id_from(&request));
+        restore_file_patch_commit_failure_after(previous);
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "file.patch"
+                        && payload.error.code == "file_patch_write_failed"
+            )
+        }));
         assert_eq!(
-            fs::read_to_string(&target).expect("target should be restored"),
+            fs::read_to_string(workspace.join("README.md")).expect("README should read"),
             "hello\n"
         );
-        assert!(!backup_path.exists());
+        assert!(
+            !created_path.exists(),
+            "created file should be removed by rollback"
+        );
+        assert_no_file_patch_temp_files(&workspace);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn approved_file_patch_preserves_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = test_workspace("file-patch-permissions");
+        let target = workspace.join("script.sh");
+        fs::write(&target, "#!/bin/sh\necho cadis\n").expect("script should write");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755))
+            .expect("mode should set");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "file-patch-permissions", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "file-patch-permissions",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_file_patch_permissions"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.patch".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "file-patch-permissions",
+                    "path": "script.sh",
+                    "old": "echo cadis\n",
+                    "new": "echo preserved\n"
+                }),
+            }),
+        ));
+        let outcome = approve(&mut runtime, approval_id_from(&request));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolCompleted(payload)
+                    if payload.tool_name == "file.patch"
+            )
+        }));
+        let mode = fs::metadata(&target)
+            .expect("metadata should load")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "existing executable mode should be preserved");
+        assert_no_file_patch_temp_files(&workspace);
     }
 
     #[test]
