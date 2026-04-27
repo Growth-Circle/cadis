@@ -75,7 +75,8 @@ The repository already includes a meaningful desktop MVP foundation:
 - typed protocol events for messages, models, agents, approvals, workspaces, orchestrator routing, and workers
 - JSONL event persistence with redaction boundaries
 - profile-local agent homes, workspace registry, and grants for safe-read tools
-- optional Ollama, OpenAI API, and Codex CLI model adapters
+- optional Ollama, OpenAI API, and Codex CLI model adapters, with native
+  streaming for Ollama and OpenAI
 - official Codex CLI adapter for ChatGPT Plus/Pro login flows
 - HUD-local Edge TTS playback, `whisper-cli` voice input, and voice doctor preflight
 
@@ -83,8 +84,9 @@ Planned work still includes production-grade mutating tool execution, full
 policy coverage, richer worker isolation, Telegram/mobile clients,
 daemon-owned production voice, and code work windows. The workspace
 architecture is partially implemented; real worker worktree creation,
-checkpoint rollback, dedicated profile/agent doctor commands, and project media
-manifests remain next.
+profile-scoped worker artifacts, and review-pending worker metadata are now in
+place. Checkpoint rollback, dedicated profile/agent doctor commands, and
+project media manifests remain next.
 
 ## Core capabilities
 
@@ -160,7 +162,8 @@ The HUD resolves the daemon socket from `CADIS_HUD_SOCKET`, `CADIS_SOCKET`,
 
 Default mode is `auto`: C.A.D.I.S. tries Ollama at
 `http://127.0.0.1:11434`, then falls back to a local credential-free response
-if Ollama is unavailable.
+if Ollama is unavailable. Ollama and OpenAI responses stream through `cadisd`
+as live `message.delta` events before final completion.
 
 For OpenAI API billing, set `[model].provider = "openai"` and provide either
 `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` in the daemon environment.

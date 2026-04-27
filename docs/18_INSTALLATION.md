@@ -80,7 +80,8 @@ Whisper model path, the Node helper used for Edge TTS, and local audio players.
 
 The default provider mode is `auto`: CADIS tries Ollama at
 `http://127.0.0.1:11434` and falls back to a local credential-free response if
-Ollama is not ready.
+Ollama is not ready. When Ollama is running, CADIS streams native NDJSON deltas
+from `/api/generate` into daemon `message.delta` events.
 
 To use OpenAI, keep the API key in the daemon environment and set the provider
 in `~/.cadis/config.toml`:
@@ -96,7 +97,8 @@ openai_model = "gpt-5.2"
 openai_base_url = "https://api.openai.com/v1"
 ```
 
-Do not store the API key in `config.toml`.
+Do not store the API key in `config.toml`. OpenAI responses stream through
+Chat Completions server-sent events before the final `message.completed` event.
 
 To use a ChatGPT Plus/Pro subscription through Codex, authenticate the official
 Codex CLI first and then select the adapter provider:

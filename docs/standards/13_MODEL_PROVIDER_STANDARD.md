@@ -162,6 +162,15 @@ Required conformance tests:
 
 Live provider tests must be opt-in and skipped by default in CI.
 
+Current baseline support:
+
+- Ollama streams native `/api/generate` NDJSON chunks through the shared
+  callback interface.
+- OpenAI streams Chat Completions server-sent events through the shared
+  callback interface.
+- Codex CLI remains callback-compatible through `codex exec` output, with
+  stream granularity limited by the official CLI process output.
+
 ## 10. Custom HTTP Provider
 
 The custom HTTP provider is for advanced users and integration testing.

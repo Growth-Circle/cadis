@@ -502,6 +502,15 @@ Providers with stream callbacks cause `message.delta` events to be fanned out
 as callbacks arrive; providers without native streaming still produce the same
 typed events after their blocking response returns.
 
+Ollama and OpenAI use provider-native streams in the current baseline: Ollama
+reads `/api/generate` NDJSON chunks and OpenAI reads Chat Completions
+server-sent events. The provider router preserves these native paths for
+per-agent selections such as `ollama/llama3.2` or `openai/gpt-5.2`. Callback
+cancellation stops reading the provider stream and returns a non-retryable
+`model_cancelled` error. Codex CLI still uses the callback-compatible wrapper
+around `codex exec` output because token-level CLI streaming is not part of the
+adapter contract yet.
+
 Model provider failures use the normal `ErrorPayload` shape on `session.failed`
 events:
 
