@@ -65,8 +65,10 @@ Implemented in the first runnable baseline:
   provider response cannot later overwrite a cancelled AgentSession.
 - Track C worker baseline: in-memory daemon worker registry, route-time
   `worker.log.delta` lifecycle logs, `events.snapshot` worker lifecycle
-  snapshots, `worker.failed` / `worker.cancelled` terminal metadata, and
-  one-shot `worker.tail` replay.
+  snapshots, `worker.failed` / `worker.cancelled` terminal metadata,
+  one-shot `worker.tail` replay, and compact `worker.result` collection that
+  returns terminal worker/AgentSession summaries plus artifact paths without
+  replaying raw logs.
 - P13 HUD subset: Tauri + React `apps/cadis-hud` desktop app, orbital shell,
   chat command panel, agent cards, mention picker, config dialog, six themes,
   model controls, rename dialog, local mic debug, HUD-local voice doctor,
@@ -194,6 +196,8 @@ Tasks:
 - Add a worker registry with `worker.started`, `worker.log.delta`,
   `worker.completed`, `worker.failed`, and `worker.cancelled`.
 - Implement `worker.tail` from daemon-owned worker logs.
+- Implement `worker.result` from daemon-owned terminal worker metadata and
+  linked AgentSession result summaries, excluding raw worker logs.
 - Propagate `session.cancel` into active provider streams. Baseline now checks
   pending AgentSession cancellation inside daemon provider callbacks, returns
   `ModelStreamControl::Cancel`, and prevents cancelled generations from
@@ -209,6 +213,8 @@ Exit criteria:
   limits.
 - HUD worker tree is driven by daemon worker events.
 - Worker logs can be tailed from CLI and HUD.
+- Worker terminal result summaries and artifact paths can be collected without
+  replaying raw logs.
 - Cancelling a session stops the active provider stream at the next callback
   boundary and preserves the AgentSession as `cancelled`.
 

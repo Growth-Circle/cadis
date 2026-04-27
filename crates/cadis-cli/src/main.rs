@@ -12,10 +12,11 @@ use cadis_protocol::{
     ErrorPayload, EventId, EventSubscriptionRequest, EventsSnapshotRequest, MessageSendRequest,
     ModelsListPayload, RequestEnvelope, RequestId, ServerFrame, SessionId,
     SessionSubscriptionRequest, ToolCallRequest, VoiceDoctorPayload, VoiceDoctorRequest,
-    VoiceRuntimeState, VoiceStatusPayload, WorkerTailRequest, WorkspaceAccess,
-    WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantPayload, WorkspaceGrantRequest,
-    WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest, WorkspaceRecordPayload,
-    WorkspaceRegisterRequest, WorkspaceRevokeRequest,
+    VoiceRuntimeState, VoiceStatusPayload, WorkerArtifactLocations, WorkerEventPayload,
+    WorkerResultRequest, WorkerTailRequest, WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent,
+    WorkerWorktreeState, WorkspaceAccess, WorkspaceDoctorPayload, WorkspaceDoctorRequest,
+    WorkspaceGrantPayload, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload,
+    WorkspaceListRequest, WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
 use cadis_store::load_config;
 
@@ -333,9 +334,18 @@ fn run_worker(cli: &Cli, command: &WorkerCommand) -> Result<(), Box<dyn Error>> 
                 lines: *lines,
             }),
         )?,
+        WorkerCommand::Result { worker_id } => send_request(
+            cli,
+            ClientRequest::WorkerResult(WorkerResultRequest {
+                worker_id: worker_id.clone(),
+            }),
+        )?,
     };
 
-    render_worker_tail(&frames, cli.json)
+    match command {
+        WorkerCommand::Tail { .. } => render_worker_tail(&frames, cli.json),
+        WorkerCommand::Result { .. } => render_worker_result(&frames, cli.json),
+    }
 }
 
 fn send_request(cli: &Cli, request: ClientRequest) -> Result<Vec<ServerFrame>, Box<dyn Error>> {
@@ -820,6 +830,150 @@ fn render_worker_tail(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn 
     Ok(())
 }
 
+fn render_worker_result(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {
+    if json {
+        return print_json_frames(frames);
+    }
+
+    render_rejections(frames)?;
+    let mut worker_result = None;
+    let mut agent_session_result = None;
+
+    for frame in frames {
+        let ServerFrame::Event(event) = frame else {
+            continue;
+        };
+        match &event.event {
+            cadis_protocol::CadisEvent::WorkerCompleted(payload)
+            | cadis_protocol::CadisEvent::WorkerFailed(payload)
+            | cadis_protocol::CadisEvent::WorkerCancelled(payload) => {
+                worker_result = Some(payload);
+            }
+            cadis_protocol::CadisEvent::AgentSessionCompleted(payload)
+            | cadis_protocol::CadisEvent::AgentSessionFailed(payload)
+            | cadis_protocol::CadisEvent::AgentSessionCancelled(payload) => {
+                agent_session_result = Some(payload);
+            }
+            _ => {}
+        }
+    }
+
+    let worker =
+        worker_result.ok_or_else(|| invalid_data("daemon did not return a worker result"))?;
+    print_worker_result(worker);
+    if let Some(agent_session) = agent_session_result {
+        println!("agent_session: {}", agent_session.agent_session_id);
+        println!(
+            "agent_session_status: {}",
+            agent_session_status_label(agent_session.status)
+        );
+        if let Some(result) = &agent_session.result {
+            println!("agent_result: {result}");
+        }
+        if let Some(error_code) = &agent_session.error_code {
+            println!("agent_error_code: {error_code}");
+        }
+        if let Some(error) = &agent_session.error {
+            println!("agent_error: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn print_worker_result(worker: &WorkerEventPayload) {
+    println!("worker: {}", worker.worker_id);
+    println!("status: {}", worker.status.as_deref().unwrap_or("unknown"));
+    if let Some(agent_id) = &worker.agent_id {
+        println!("agent: {agent_id}");
+    }
+    if let Some(parent_agent_id) = &worker.parent_agent_id {
+        println!("parent_agent: {parent_agent_id}");
+    }
+    if let Some(agent_session_id) = &worker.agent_session_id {
+        println!("linked_agent_session: {agent_session_id}");
+    }
+    if let Some(summary) = &worker.summary {
+        println!("summary: {summary}");
+    }
+    if let Some(error_code) = &worker.error_code {
+        println!("error_code: {error_code}");
+    }
+    if let Some(error) = &worker.error {
+        println!("error: {error}");
+    }
+    if let Some(cancelled_at) = &worker.cancellation_requested_at {
+        println!("cancellation_requested_at: {cancelled_at}");
+    }
+    if let Some(worktree) = &worker.worktree {
+        print_worker_worktree(worktree);
+    }
+    if let Some(artifacts) = &worker.artifacts {
+        print_worker_artifacts(artifacts);
+    }
+}
+
+fn print_worker_worktree(worktree: &WorkerWorktreeIntent) {
+    if let Some(workspace_id) = &worktree.workspace_id {
+        println!("workspace: {workspace_id}");
+    }
+    if let Some(project_root) = &worktree.project_root {
+        println!("project_root: {project_root}");
+    }
+    println!("worktree_root: {}", worktree.worktree_root);
+    println!("worktree: {}", worktree.worktree_path);
+    println!("branch: {}", worktree.branch_name);
+    if let Some(base_ref) = &worktree.base_ref {
+        println!("base_ref: {base_ref}");
+    }
+    println!(
+        "worktree_state: {}",
+        worker_worktree_state_label(worktree.state)
+    );
+    println!(
+        "cleanup_policy: {}",
+        worker_cleanup_policy_label(worktree.cleanup_policy)
+    );
+}
+
+fn print_worker_artifacts(artifacts: &WorkerArtifactLocations) {
+    println!("artifact_root: {}", artifacts.root);
+    println!("summary_path: {}", artifacts.summary);
+    println!("patch_path: {}", artifacts.patch);
+    println!("test_report_path: {}", artifacts.test_report);
+    println!("changed_files_path: {}", artifacts.changed_files);
+    println!("memory_candidates_path: {}", artifacts.memory_candidates);
+}
+
+fn agent_session_status_label(status: cadis_protocol::AgentSessionStatus) -> &'static str {
+    match status {
+        cadis_protocol::AgentSessionStatus::Started => "started",
+        cadis_protocol::AgentSessionStatus::Running => "running",
+        cadis_protocol::AgentSessionStatus::Completed => "completed",
+        cadis_protocol::AgentSessionStatus::Failed => "failed",
+        cadis_protocol::AgentSessionStatus::Cancelled => "cancelled",
+        cadis_protocol::AgentSessionStatus::TimedOut => "timed_out",
+        cadis_protocol::AgentSessionStatus::BudgetExceeded => "budget_exceeded",
+    }
+}
+
+fn worker_worktree_state_label(state: WorkerWorktreeState) -> &'static str {
+    match state {
+        WorkerWorktreeState::Planned => "planned",
+        WorkerWorktreeState::Active => "active",
+        WorkerWorktreeState::ReviewPending => "review_pending",
+        WorkerWorktreeState::CleanupPending => "cleanup_pending",
+        WorkerWorktreeState::Removed => "removed",
+    }
+}
+
+fn worker_cleanup_policy_label(policy: WorkerWorktreeCleanupPolicy) -> &'static str {
+    match policy {
+        WorkerWorktreeCleanupPolicy::Explicit => "explicit",
+        WorkerWorktreeCleanupPolicy::AfterApply => "after_apply",
+        WorkerWorktreeCleanupPolicy::OnCompletion => "on_completion",
+    }
+}
+
 fn render_rejections_or_json(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {
     if json {
         return print_json_frames(frames);
@@ -1038,6 +1192,9 @@ enum WorkerCommand {
         worker_id: String,
         lines: Option<u32>,
     },
+    Result {
+        worker_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1076,6 +1233,7 @@ fn parse_worker(args: Vec<String>) -> Result<WorkerCommand, Box<dyn Error>> {
     let mut args = args.into_iter();
     match args.next().as_deref() {
         Some("tail") => parse_worker_tail(args.collect()),
+        Some("result") => parse_worker_result(args.collect()),
         Some(other) => Err(invalid_input(format!("unknown worker command: {other}")).into()),
         None => Err(invalid_input("worker requires a subcommand").into()),
     }
@@ -1109,6 +1267,24 @@ fn parse_worker_tail(args: Vec<String>) -> Result<WorkerCommand, Box<dyn Error>>
             .cloned()
             .ok_or_else(|| invalid_input("worker tail requires a worker ID"))?,
         lines,
+    })
+}
+
+fn parse_worker_result(args: Vec<String>) -> Result<WorkerCommand, Box<dyn Error>> {
+    let mut positionals = Vec::new();
+
+    for arg in args {
+        if arg.starts_with("--") {
+            return Err(invalid_input(format!("unknown worker result option: {arg}")).into());
+        }
+        positionals.push(arg);
+    }
+
+    Ok(WorkerCommand::Result {
+        worker_id: positionals
+            .first()
+            .cloned()
+            .ok_or_else(|| invalid_input("worker result requires a worker ID"))?,
     })
 }
 
@@ -1648,7 +1824,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn print_help() {
     println!(
-        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  worker <COMMAND>       Inspect daemon-owned workers\n  workspace <COMMAND>    Manage registered workspaces and grants\n  session <COMMAND>      Manage session event streams\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKER COMMANDS:\n  worker tail <ID> [--lines COUNT]\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
+        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  worker <COMMAND>       Inspect daemon-owned workers\n  workspace <COMMAND>    Manage registered workspaces and grants\n  session <COMMAND>      Manage session event streams\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKER COMMANDS:\n  worker tail <ID> [--lines COUNT]\n  worker result <ID>\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
         env!("CARGO_PKG_VERSION")
     );
 }

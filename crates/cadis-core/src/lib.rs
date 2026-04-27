@@ -30,11 +30,11 @@ use cadis_protocol::{
     ToolFailedPayload, UiPreferencesPayload, VoiceDoctorCheck, VoiceDoctorPayload,
     VoicePreferences, VoicePreflightRequest, VoicePreflightSummary, VoicePreviewRequest,
     VoiceRuntimeState, VoiceStatusPayload, WorkerArtifactLocations, WorkerCleanupRequest,
-    WorkerEventPayload, WorkerLogDeltaPayload, WorkerTailRequest, WorkerWorktreeCleanupPolicy,
-    WorkerWorktreeIntent, WorkerWorktreeState, WorkspaceAccess, WorkspaceDoctorCheck,
-    WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantId, WorkspaceGrantPayload,
-    WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest,
-    WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
+    WorkerEventPayload, WorkerLogDeltaPayload, WorkerResultRequest, WorkerTailRequest,
+    WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent, WorkerWorktreeState, WorkspaceAccess,
+    WorkspaceDoctorCheck, WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantId,
+    WorkspaceGrantPayload, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload,
+    WorkspaceListRequest, WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
 use cadis_store::{
     redact, AgentHomeDiagnostic, AgentHomeDoctorOptions, AgentHomeTemplate, ApprovalRecord,
@@ -581,6 +581,7 @@ impl Runtime {
             ClientRequest::VoicePreview(request) => self.handle_voice_preview(request_id, request),
             ClientRequest::VoiceStop(_) => self.handle_voice_stop(request_id),
             ClientRequest::WorkerTail(request) => self.worker_tail(request_id, request),
+            ClientRequest::WorkerResult(request) => self.worker_result(request_id, request),
             ClientRequest::WorkerCleanup(request) => self.worker_cleanup(request_id, request),
             ClientRequest::SessionUnsubscribe(_) => self.reject(
                 request_id,
@@ -1076,6 +1077,7 @@ impl Runtime {
         let worker = route.worker_summary.as_ref().map(|summary| {
             let worker_id = self.next_worker_id();
             WorkerDelegation {
+                agent_session_id: agent_session_id.clone(),
                 worktree: planned_worker_worktree(
                     &worker_id,
                     session_workspace.as_deref(),
@@ -1430,6 +1432,53 @@ impl Runtime {
                 )
             })
             .collect();
+
+        self.accept(request_id, events)
+    }
+
+    fn worker_result(
+        &mut self,
+        request_id: RequestId,
+        request: WorkerResultRequest,
+    ) -> RequestOutcome {
+        let Some(worker) = self.workers.get(&request.worker_id).cloned() else {
+            return self.reject(
+                request_id,
+                "worker_not_found",
+                format!("worker '{}' was not found", request.worker_id),
+                false,
+            );
+        };
+
+        if !worker.is_terminal() {
+            return self.reject(
+                request_id,
+                "worker_result_unavailable",
+                format!(
+                    "worker '{}' has not reached a terminal result",
+                    worker.worker_id
+                ),
+                true,
+            );
+        }
+
+        let mut events = Vec::new();
+        if let Some(agent_session) = worker
+            .agent_session_id
+            .as_ref()
+            .and_then(|agent_session_id| self.agent_sessions.get(agent_session_id))
+            .cloned()
+        {
+            events.push(self.session_event(
+                agent_session.session_id.clone(),
+                agent_session_lifecycle_event(agent_session.event_payload()),
+            ));
+        }
+
+        events.push(self.session_event(
+            worker.session_id.clone(),
+            worker_lifecycle_event(worker.event_payload()),
+        ));
 
         self.accept(request_id, events)
     }
@@ -4364,6 +4413,7 @@ enum ExplicitOrchestratorAction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct WorkerDelegation {
     worker_id: String,
+    agent_session_id: AgentSessionId,
     parent_agent_id: Option<AgentId>,
     summary: String,
     worktree: WorkerWorktreeIntent,
@@ -4376,6 +4426,7 @@ struct WorkerRecord {
     session_id: SessionId,
     agent_id: Option<AgentId>,
     parent_agent_id: Option<AgentId>,
+    agent_session_id: Option<AgentSessionId>,
     status: String,
     cli: Option<String>,
     cwd: Option<String>,
@@ -4430,6 +4481,7 @@ struct WorkerMetadata {
     session_id: SessionId,
     agent_id: Option<AgentId>,
     parent_agent_id: Option<AgentId>,
+    agent_session_id: Option<AgentSessionId>,
     status: String,
     cli: Option<String>,
     cwd: Option<String>,
@@ -4453,6 +4505,7 @@ impl WorkerRecord {
             session_id,
             agent_id,
             parent_agent_id: worker.parent_agent_id.clone(),
+            agent_session_id: Some(worker.agent_session_id.clone()),
             status: "running".to_owned(),
             cli: None,
             cwd: None,
@@ -4473,6 +4526,7 @@ impl WorkerRecord {
             worker_id: self.worker_id.clone(),
             agent_id: self.agent_id.clone(),
             parent_agent_id: self.parent_agent_id.clone(),
+            agent_session_id: self.agent_session_id.clone(),
             status: Some(self.status.clone()),
             cli: self.cli.clone(),
             cwd: self.cwd.clone(),
@@ -4497,6 +4551,7 @@ impl WorkerMetadata {
             session_id: record.session_id.clone(),
             agent_id: record.agent_id.clone(),
             parent_agent_id: record.parent_agent_id.clone(),
+            agent_session_id: record.agent_session_id.clone(),
             status: record.status.clone(),
             cli: record.cli.clone(),
             cwd: record.cwd.clone(),
@@ -4519,6 +4574,7 @@ impl WorkerMetadata {
                 session_id: self.session_id,
                 agent_id: self.agent_id,
                 parent_agent_id: self.parent_agent_id,
+                agent_session_id: self.agent_session_id,
                 status: self.status,
                 cli: self.cli,
                 cwd: self.cwd,
@@ -5590,6 +5646,19 @@ fn worker_status_is_terminal(status: &str) -> bool {
         status,
         "completed" | "failed" | "cancelled" | "canceled" | "expired"
     )
+}
+
+fn agent_session_lifecycle_event(payload: AgentSessionEventPayload) -> CadisEvent {
+    match payload.status {
+        AgentSessionStatus::Completed => CadisEvent::AgentSessionCompleted(payload),
+        AgentSessionStatus::Failed
+        | AgentSessionStatus::TimedOut
+        | AgentSessionStatus::BudgetExceeded => CadisEvent::AgentSessionFailed(payload),
+        AgentSessionStatus::Cancelled => CadisEvent::AgentSessionCancelled(payload),
+        AgentSessionStatus::Started | AgentSessionStatus::Running => {
+            CadisEvent::AgentSessionUpdated(payload)
+        }
+    }
 }
 
 fn worker_lifecycle_event(payload: WorkerEventPayload) -> CadisEvent {
@@ -7948,8 +8017,8 @@ mod tests {
         ClientId, ContentKind, EmptyPayload, EventSubscriptionRequest, EventsSnapshotRequest,
         MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest,
         SessionSubscriptionRequest, SessionTargetRequest, ToolCallRequest, VoiceDoctorCheck,
-        VoiceDoctorRequest, VoicePreflightRequest, WorkerTailRequest, WorkspaceAccess,
-        WorkspaceDoctorRequest, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
+        VoiceDoctorRequest, VoicePreflightRequest, WorkerResultRequest, WorkerTailRequest,
+        WorkspaceAccess, WorkspaceDoctorRequest, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
         WorkspaceRegisterRequest, WorkspaceRevokeRequest,
     };
     use std::sync::{
@@ -8375,6 +8444,16 @@ mod tests {
                 target_agent_id: None,
                 content: content.to_owned(),
                 content_kind,
+            }),
+        ))
+    }
+
+    fn collect_worker_result(runtime: &mut Runtime, worker_id: &str) -> RequestOutcome {
+        runtime.handle_request(RequestEnvelope::new(
+            RequestId::from(format!("req_result_{worker_id}")),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkerResult(WorkerResultRequest {
+                worker_id: worker_id.to_owned(),
             }),
         ))
     }
@@ -9794,6 +9873,7 @@ mod tests {
                     session_id: SessionId::from("ses_stale"),
                     agent_id: Some(AgentId::from("codex")),
                     parent_agent_id: Some(AgentId::from("main")),
+                    agent_session_id: None,
                     status: "running".to_owned(),
                     cli: None,
                     cwd: None,
@@ -10491,6 +10571,240 @@ mod tests {
         let summary = fs::read_to_string(&artifacts.summary).expect("summary should read");
         assert!(summary.contains("Status: failed"));
         assert!(summary.contains("## Daemon Validation"));
+    }
+
+    #[test]
+    fn completed_worker_result_collects_summary_and_artifact_paths_without_logs() {
+        let cadis_home = test_workspace("completed-worker-result-home");
+        let workspace = test_workspace("completed-worker-result-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home);
+        register_workspace(&mut runtime, "worker-result-git", &workspace);
+        let session_id = runtime
+            .handle_request(RequestEnvelope::new(
+                RequestId::from("req_worker_result_session"),
+                ClientId::from("cli_1"),
+                ClientRequest::SessionCreate(SessionCreateRequest {
+                    title: Some("Worker result".to_owned()),
+                    cwd: Some(workspace.display().to_string()),
+                }),
+            ))
+            .events
+            .into_iter()
+            .find_map(|event| match event.event {
+                CadisEvent::SessionStarted(payload) => Some(payload.session_id),
+                _ => None,
+            })
+            .expect("session.started should be emitted");
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_completed_worker"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: Some(session_id),
+                target_agent_id: None,
+                content: "/route @codex run focused tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+        let completed = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerCompleted(payload) => Some(payload.clone()),
+                _ => None,
+            })
+            .expect("worker.completed should be emitted");
+        let worker_id = completed.worker_id.clone();
+        let raw_log_marker = "RAW-LARGE-WORKER-LOG-SHOULD-NOT-APPEAR";
+        let _ = runtime.append_worker_log(
+            &worker_id,
+            format!("{raw_log_marker} {}\n", "x".repeat(4096)),
+        );
+
+        let result = collect_worker_result(&mut runtime, &worker_id);
+
+        assert!(matches!(
+            result.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(!result
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::WorkerLogDelta(_))));
+        let agent_session = result
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::AgentSessionCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("agent.session.completed should be replayed");
+        assert_eq!(
+            completed.agent_session_id.as_ref(),
+            Some(&agent_session.agent_session_id)
+        );
+        assert!(agent_session
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("run focused tests")));
+        let worker = result
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("worker.completed result should be replayed");
+        let artifacts = worker
+            .artifacts
+            .as_ref()
+            .expect("worker result should include artifact paths");
+        assert!(Path::new(&artifacts.summary).is_file());
+        assert!(Path::new(&artifacts.test_report).is_file());
+        assert!(artifacts.test_report.ends_with("test-report.json"));
+        let serialized = serde_json::to_string(&result.events).expect("events should serialize");
+        assert!(!serialized.contains(raw_log_marker));
+    }
+
+    #[test]
+    fn failed_worker_result_collects_agent_error_and_artifact_paths() {
+        let mut runtime = runtime();
+        let pending = runtime
+            .begin_message_request(RequestEnvelope::new(
+                RequestId::from("req_failed_worker_result"),
+                ClientId::from("hud_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "/route @codex run focused tests".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ))
+            .expect("worker route should prepare model generation");
+        let worker_id = pending
+            .context
+            .worker
+            .as_ref()
+            .expect("route should create a worker")
+            .worker_id
+            .clone();
+
+        let _ = runtime.fail_message_generation(
+            pending,
+            cadis_models::ModelError::with_code(
+                "provider_client_error",
+                "provider request failed",
+                true,
+            ),
+        );
+        let result = collect_worker_result(&mut runtime, &worker_id);
+
+        assert!(matches!(
+            result.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(!result
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::WorkerLogDelta(_))));
+        assert!(result.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionFailed(payload)
+                    if payload.error_code.as_deref() == Some("provider_client_error")
+                        && payload.error.as_deref() == Some("provider request failed")
+            )
+        }));
+        let worker = result
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerFailed(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("worker.failed result should be replayed");
+        assert_eq!(worker.status.as_deref(), Some("failed"));
+        assert_eq!(worker.error_code.as_deref(), Some("provider_client_error"));
+        let artifacts = worker
+            .artifacts
+            .as_ref()
+            .expect("failed worker result should include artifact paths");
+        assert!(Path::new(&artifacts.test_report).is_file());
+        assert!(artifacts.test_report.ends_with("test-report.json"));
+    }
+
+    #[test]
+    fn cancelled_worker_result_collects_agent_cancellation_and_artifact_paths() {
+        let mut runtime = runtime();
+        let pending = runtime
+            .begin_message_request(RequestEnvelope::new(
+                RequestId::from("req_cancelled_worker_result"),
+                ClientId::from("hud_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "/route @codex wait for cancellation".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ))
+            .expect("worker route should prepare model generation");
+        let session_id = pending.context.session_id.clone();
+        let worker_id = pending
+            .context
+            .worker
+            .as_ref()
+            .expect("route should create a worker")
+            .worker_id
+            .clone();
+
+        let _ = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_cancel_worker_result_session"),
+            ClientId::from("hud_1"),
+            ClientRequest::SessionCancel(SessionTargetRequest { session_id }),
+        ));
+        let result = collect_worker_result(&mut runtime, &worker_id);
+
+        assert!(matches!(
+            result.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(!result
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::WorkerLogDelta(_))));
+        assert!(result.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionCancelled(payload)
+                    if payload.status == AgentSessionStatus::Cancelled
+                        && payload.cancellation_requested_at.is_some()
+            )
+        }));
+        let worker = result
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerCancelled(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("worker.cancelled result should be replayed");
+        assert_eq!(worker.status.as_deref(), Some("cancelled"));
+        assert_eq!(worker.error_code.as_deref(), Some("session_cancelled"));
+        let artifacts = worker
+            .artifacts
+            .as_ref()
+            .expect("cancelled worker result should include artifact paths");
+        assert!(artifacts.test_report.ends_with("test-report.json"));
+    }
+
+    #[test]
+    fn worker_result_rejects_unknown_worker() {
+        let mut runtime = runtime();
+        let outcome = collect_worker_result(&mut runtime, "worker_missing");
+
+        assert_rejected(outcome, "worker_not_found");
     }
 
     #[test]
