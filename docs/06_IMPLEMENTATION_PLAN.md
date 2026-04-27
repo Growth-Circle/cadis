@@ -228,11 +228,46 @@ Tasks:
   tools, shell execution, and full policy-gated tool execution remain future
   work.
 
+Execution semantics for the next Track D slice:
+
+- Treat approval as authorization to attempt execution, not as execution
+  itself. After an approval is granted, `cadisd` must revalidate approval
+  expiry, workspace grant, normalized input, denied paths, secret-access policy,
+  and current session/worker state before `tool.started`.
+- `shell.run` must execute only inside a registered workspace or CADIS-owned
+  worker worktree with `exec` or `admin` access, filtered environment, bounded
+  stdout/stderr, exit-code reporting, timeout, and cancellation cleanup.
+- `file.patch` must apply only to normalized workspace-relative paths, preserve
+  unrelated user edits, fail closed on context mismatch, symlink escape, denied
+  path, or concurrent change, and write atomically where practical.
+- Secret access fails closed by default. A tool that may read a secret-bearing
+  path, environment value, config entry, or command output needs explicit policy
+  support and approval metadata before execution.
+- Timeouts must produce a terminal `tool.failed` result with timeout metadata.
+  Cancellation remains incomplete until the protocol and runtime expose a typed
+  terminal tool cancellation path and process/file-operation cleanup.
+
+Worker integration sequence:
+
+1. Track C/I creates an isolated worker worktree and profile-scoped artifacts.
+2. Worker command/test execution runs only inside the worker worktree after
+   Track D policy approval and tool execution support exist.
+3. Worker output produces a review artifact, normally `patch.diff` plus
+   `summary.md`.
+4. Applying that patch to the parent workspace is a separate Track D
+   `file.patch` or future patch-apply tool call with its own approval request.
+5. Worker cleanup is a separate approved flow and must not delete paths without
+   a CADIS-owned worker/worktree record.
+
 Exit criteria:
 
 - Risky tools fail closed without approval.
 - Approval decisions survive client reconnects.
 - Tool events are visible in CLI/HUD and redacted in JSONL logs.
+- Approved `shell.run` and `file.patch` execute only after daemon-side
+  revalidation and emit one terminal result.
+- Worker patch application cannot modify the parent checkout without a separate
+  Track D approval.
 
 ### Track E - Voice as a Daemon-Owned Capability
 
