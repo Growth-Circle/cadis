@@ -56,11 +56,14 @@ Implemented baseline:
   under `<project>/.cadis/worktrees/`, resolve worker artifact paths under
   `profiles/<profile>/artifacts/workers/`, and let `workspace doctor` report
   stale worker worktree metadata or missing artifact roots.
+- Worker execution setup now creates a git worktree for session-bound project
+  workspaces, marks project-local worker worktree metadata `ready`, and writes
+  profile-scoped worker artifacts for review.
 
 Still future:
 
-- Worker worktree creation/cleanup.
-- Worker artifact production and durable worker runtime records.
+- Worker worktree cleanup.
+- Real worker command/test execution and durable worker runtime logs.
 - Checkpoint and rollback manager.
 - Dedicated profile and agent doctor commands.
 - Workspace-local skills and project `.cadis/` metadata enforcement.
@@ -279,7 +282,8 @@ Project-local worker worktree metadata lives beside the project worktree root:
 
 `workspace doctor` treats these metadata files as diagnostics only. It warns
 when a recorded worktree path or profile artifact root is stale/missing; it does
-not create, remove, or mutate git worktrees.
+not create, remove, or mutate git worktrees. Worktree creation is owned by the
+daemon worker runtime when a session-bound worker starts.
 
 Workers receive write/exec grants only for their worktree unless the user
 explicitly approves broader access. The parent project checkout remains

@@ -231,15 +231,15 @@
 - [ ] Define worker state.
 - [x] Implement daemon worker registry.
 - [x] Implement `worker.tail`.
-- [ ] Create git worktree.
+- [x] Create git worktree for session-bound project workers.
 - [ ] Stream worker logs.
 - [ ] Add worker cancellation.
-- [ ] Generate worker diff.
+- [x] Generate worker diff artifact.
 - [ ] Run tests in worker.
 - [ ] Request patch approval.
 - [ ] Apply approved patch.
 - [ ] Cleanup worktree.
-- [ ] Add worker isolation tests.
+- [x] Add worker isolation tests for worktree creation and artifact output.
 
 ## 13. Telegram Adapter
 
@@ -325,7 +325,8 @@
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
   Baselines landed: AgentSession state/events, explicit daemon-owned spawn,
   spawn limits, worker registry, and worker tail. Remaining: implicit
-  model-driven spawn, worker failed/cancelled events, and executable workers.
+  model-driven spawn, worker failed/cancelled events, and real command/test
+  execution inside worker worktrees.
 - [ ] Track D: policy-backed tools and approval persistence.
 - [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
 - [ ] Track F: durable metadata and restart recovery for sessions, agents, AgentSessions, workers, and approvals.
@@ -336,6 +337,9 @@
 - [ ] Track G: CADIS-native Wulan avatar engine.
 - [ ] Track H: profile homes, agent homes, workspace registry, grants, and worker worktrees.
 - [x] Track H baseline: default profile layout plus persistent workspace registry/grants.
+- [x] Track I baseline: daemon worker execution setup creates git worktrees,
+  persists project-local worktree metadata, and writes profile-scoped worker
+  artifacts for review.
 
 ## 15.2 Workspace Architecture
 
@@ -355,8 +359,8 @@
 - [x] Implement project `.cadis/workspace.toml` store support.
 - [x] Add project `.cadis/worktrees/` worker path and metadata helpers.
 - [x] Add profile `artifacts/workers/` worker artifact path helpers.
-- [ ] Implement worker worktree creation under project `.cadis/worktrees/`.
-- [ ] Persist worker artifacts under profile `artifacts/workers/`.
+- [x] Implement worker worktree creation under project `.cadis/worktrees/`.
+- [x] Persist worker artifacts under profile `artifacts/workers/`.
 - [ ] Add project `.cadis/media/` manifests for generated media.
 - [x] Add workspace doctor checks for project metadata mismatch and duplicate roots.
 - [x] Add workspace doctor checks for stale worker worktree metadata and missing artifact roots.

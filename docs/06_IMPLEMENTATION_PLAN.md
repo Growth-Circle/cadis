@@ -85,8 +85,10 @@ Still pending:
 - Daemon startup wiring for pending approval recovery. Store-level atomic write
   and fail-safe recovery helpers exist, and the daemon now recovers durable
   session, agent, AgentSession, and worker metadata.
-- Worker execution lifecycle, isolated worktrees, Telegram/mobile adapters,
-  daemon-owned production voice output, and code work window.
+- Worker cancellation/cleanup, Telegram/mobile adapters, daemon-owned
+  production voice output, and code work window. The first worker execution
+  slice now creates git worktrees for session-bound project workspaces and
+  writes profile-scoped worker artifacts.
 - Denied-path enforcement for all mutating tools, checkpoint/rollback manager,
   dedicated profile/agent doctor commands, and media asset manifests.
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
@@ -302,8 +304,9 @@ Tasks:
   path/metadata helpers under project `.cadis/worktrees/` now exist.
 - Route coding workers into git worktrees and persist worker artifacts under the
   profile home. Profile-scoped worker artifact path helpers now point at
-  `profiles/<profile>/artifacts/workers/`; actual artifact production remains
-  future work.
+  `profiles/<profile>/artifacts/workers/`; the first execution slice creates
+  project-local git worktrees and writes summary, patch, changed-file, test
+  report, and memory-candidate artifact files.
 - Add doctor checks for duplicated roots, broad grants, symlink escapes, secret
   paths, stale worktrees, corrupt JSONL, and oversized memory/persona files.
   Workspace doctor now includes a baseline for missing, corrupt, and oversized
@@ -317,6 +320,31 @@ Exit criteria:
 - Coding workers edit only their worker worktree unless explicitly approved.
 - Project `.cadis/media/` manifests record generated media provenance without
   storing secrets or raw transcripts.
+
+### Track I - Worker Execution Runtime
+
+Owner: worker-runtime agents.
+
+Tasks:
+
+- Turn planned worker metadata into daemon-owned execution setup.
+- Create git worktrees under project `.cadis/worktrees/<worker-id>/` for
+  session-bound project workspaces.
+- Persist project-local worker worktree metadata with `ready` state once the
+  worktree exists.
+- Write profile-scoped worker artifacts: `summary.md`, `patch.diff`,
+  `changed-files.json`, `test-report.json`, and `memory-candidates.jsonl`.
+- Keep the parent checkout untouched; patch application remains gated by Track D
+  policy/approval work.
+- Continue surfacing worker lifecycle and log events to CLI/HUD.
+
+Exit criteria:
+
+- A routed coding worker with a git workspace receives an isolated worktree.
+- `worker.started` includes active worktree metadata, and `worker.completed`
+  moves it to review-pending state.
+- Worker artifacts are written under the profile artifact root and are redacted
+  before persistence.
 
 ## 3. P0 - Repository Foundation
 
@@ -592,10 +620,13 @@ Goal: isolate long-running and coding work.
 Tasks:
 
 - Define worker scheduler.
-- Add git worktree creation.
+- Add git worktree creation. Baseline now creates a project-local worktree for
+  session-bound git workspaces before worker execution starts.
 - Add worker log stream.
 - Add worker cleanup.
-- Add patch collection.
+- Add patch collection. Baseline now writes `patch.diff`, `changed-files.json`,
+  `test-report.json`, `summary.md`, and `memory-candidates.jsonl` artifact files
+  under the profile worker artifact root.
 - Add apply approval flow.
 
 Exit criteria:
@@ -627,6 +658,8 @@ Tasks:
   Baseline complete for registry/grants, broad-root rejection, and safe-read
   path guards.
 - W5: add worker worktree creation, artifact storage, and cleanup rules.
+  Baseline worktree creation and artifact storage now exist; cleanup remains
+  future work.
 - W6: add checkpoint/rollback before destructive or mutating operations.
 - W7: integrate workspace, grant, worker, checkpoint, and rollback events.
 - W8: add deterministic channel and cwd/project routing.

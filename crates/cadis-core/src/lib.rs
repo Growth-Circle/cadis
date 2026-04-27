@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -34,7 +35,8 @@ use cadis_protocol::{
 use cadis_store::{
     redact, AgentHomeDiagnostic, AgentHomeDoctorOptions, AgentHomeTemplate, ApprovalRecord,
     ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
-    GrantSource as StoreGrantSource, ProfileHome, ProjectWorkspaceStore, ProjectWorktreeDiagnostic,
+    GrantSource as StoreGrantSource, ProfileHome, ProjectWorkerWorktreeMetadata,
+    ProjectWorkerWorktreeState, ProjectWorkspaceStore, ProjectWorktreeDiagnostic,
     StateRecoveryDiagnostic, StateStore, WorkerArtifactPathSet,
     WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
     WorkspaceGrantRecord as StoreWorkspaceGrantRecord, WorkspaceKind as StoreWorkspaceKind,
@@ -1015,12 +1017,16 @@ impl Runtime {
         ));
 
         let session_workspace = self.session_workspace(&session_id);
+        let session_workspace_id = session_workspace
+            .as_deref()
+            .and_then(|workspace| self.workspace_id_for_root(workspace));
         let worker = route.worker_summary.as_ref().map(|summary| {
             let worker_id = self.next_worker_id();
             WorkerDelegation {
                 worktree: planned_worker_worktree(
                     &worker_id,
                     session_workspace.as_deref(),
+                    session_workspace_id.as_deref(),
                     &route.content,
                 ),
                 artifacts: worker_artifact_locations(
@@ -2243,8 +2249,9 @@ impl Runtime {
         agent_id: AgentId,
         worker: &WorkerDelegation,
     ) -> Vec<EventEnvelope> {
-        let record = WorkerRecord::from_delegation(session_id, Some(agent_id), worker);
+        let mut record = WorkerRecord::from_delegation(session_id, Some(agent_id), worker);
         let worker_id = record.worker_id.clone();
+        let preparation_logs = prepare_worker_execution(&mut record);
         let mut events = vec![self.session_event(
             record.session_id.clone(),
             CadisEvent::WorkerStarted(record.event_payload()),
@@ -2255,6 +2262,11 @@ impl Runtime {
             self.append_worker_log(&worker_id, format!("started: {}\n", worker.summary))
         {
             events.push(event);
+        }
+        for line in preparation_logs {
+            if let Some(event) = self.append_worker_log(&worker_id, line) {
+                events.push(event);
+            }
         }
         events
     }
@@ -2269,10 +2281,27 @@ impl Runtime {
         if let Some(event) = self.append_worker_log(worker_id, format!("{status}: {summary}\n")) {
             events.push(event);
         }
+        for line in self.write_worker_artifacts(worker_id, status, &summary) {
+            if let Some(event) = self.append_worker_log(worker_id, line) {
+                events.push(event);
+            }
+        }
         if let Some(event) = self.update_worker_status(worker_id, status, Some(summary)) {
             events.push(event);
         }
         events
+    }
+
+    fn write_worker_artifacts(
+        &mut self,
+        worker_id: &str,
+        status: &str,
+        summary: &str,
+    ) -> Vec<String> {
+        let Some(worker) = self.workers.get_mut(worker_id) else {
+            return Vec::new();
+        };
+        write_worker_artifacts(worker, status, summary)
     }
 
     fn append_worker_log(
@@ -2536,6 +2565,14 @@ impl Runtime {
         self.sessions
             .get(session_id)
             .and_then(|session| session._cwd.clone())
+    }
+
+    fn workspace_id_for_root(&self, root: &str) -> Option<String> {
+        let root = canonical_workspace_root(root).ok()?;
+        self.workspaces
+            .iter()
+            .find(|(_, record)| record.root == root)
+            .map(|(workspace_id, _)| workspace_id.to_string())
     }
 
     fn execute_safe_tool(
@@ -5427,6 +5464,7 @@ fn summarize_task(content: &str) -> String {
 fn planned_worker_worktree(
     worker_id: &str,
     workspace: Option<&str>,
+    workspace_id: Option<&str>,
     task: &str,
 ) -> WorkerWorktreeIntent {
     let worktree_root = workspace
@@ -5446,7 +5484,7 @@ fn planned_worker_worktree(
         .to_string();
 
     WorkerWorktreeIntent {
-        workspace_id: None,
+        workspace_id: workspace_id.map(ToOwned::to_owned),
         project_root: workspace.map(ToOwned::to_owned),
         worktree_root,
         worktree_path,
@@ -5465,6 +5503,282 @@ fn worker_artifact_locations(paths: &WorkerArtifactPathSet) -> WorkerArtifactLoc
         summary: paths.summary.display().to_string(),
         changed_files: paths.changed_files.display().to_string(),
         memory_candidates: paths.memory_candidates.display().to_string(),
+    }
+}
+
+fn prepare_worker_execution(record: &mut WorkerRecord) -> Vec<String> {
+    let mut logs = Vec::new();
+    if let Some(artifacts) = &record.artifacts {
+        if let Err(error) = fs::create_dir_all(&artifacts.root) {
+            logs.push(format!("artifact layout failed: {error}\n"));
+        }
+    }
+
+    if let Some(worktree) = &mut record.worktree {
+        logs.extend(prepare_worker_worktree(
+            &record.worker_id,
+            worktree,
+            record.artifacts.as_ref(),
+        ));
+    }
+
+    logs.into_iter().map(|line| redact(&line)).collect()
+}
+
+fn prepare_worker_worktree(
+    worker_id: &str,
+    worktree: &mut WorkerWorktreeIntent,
+    artifacts: Option<&WorkerArtifactLocations>,
+) -> Vec<String> {
+    let mut logs = Vec::new();
+    let Some(project_root) = worktree.project_root.clone() else {
+        return logs;
+    };
+    let project_root = PathBuf::from(project_root);
+    let store = ProjectWorkspaceStore::new(&project_root);
+    let metadata = store.load().ok().flatten();
+    let paths = store.worker_worktree_paths(worker_id, metadata.as_ref());
+    let artifact_root = artifacts
+        .map(|artifacts| PathBuf::from(&artifacts.root))
+        .unwrap_or_else(|| PathBuf::from(format!("artifacts/workers/{worker_id}")));
+
+    if let Err(error) = store.ensure_layout() {
+        logs.push(format!("worktree layout failed: {error}\n"));
+        return logs;
+    }
+
+    if !is_git_work_tree(&project_root) {
+        let _ = store.save_worker_worktree_metadata(&project_worker_metadata(
+            worker_id,
+            worktree,
+            &paths.worktree_path,
+            &artifact_root,
+            ProjectWorkerWorktreeState::Planned,
+        ));
+        logs.push("worktree skipped: session workspace is not a git worktree\n".to_owned());
+        return logs;
+    }
+
+    if let Some(parent) = paths.worktree_path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            logs.push(format!("worktree parent creation failed: {error}\n"));
+            return logs;
+        }
+    }
+
+    if paths.worktree_path.exists() {
+        worktree.state = WorkerWorktreeState::Active;
+        worktree.worktree_path = paths.worktree_path.display().to_string();
+        let _ = store.save_worker_worktree_metadata(&project_worker_metadata(
+            worker_id,
+            worktree,
+            &paths.worktree_path,
+            &artifact_root,
+            ProjectWorkerWorktreeState::Ready,
+        ));
+        logs.push(format!(
+            "worktree ready: {}\n",
+            paths.worktree_path.display()
+        ));
+        return logs;
+    }
+
+    let base_ref = worktree.base_ref.as_deref().unwrap_or("HEAD");
+    match create_git_worktree(
+        &project_root,
+        &paths.worktree_path,
+        &worktree.branch_name,
+        base_ref,
+    ) {
+        Ok(()) => {
+            worktree.state = WorkerWorktreeState::Active;
+            worktree.worktree_path = paths.worktree_path.display().to_string();
+            let _ = store.save_worker_worktree_metadata(&project_worker_metadata(
+                worker_id,
+                worktree,
+                &paths.worktree_path,
+                &artifact_root,
+                ProjectWorkerWorktreeState::Ready,
+            ));
+            logs.push(format!(
+                "worktree ready: {} ({})\n",
+                paths.worktree_path.display(),
+                worktree.branch_name
+            ));
+        }
+        Err(error) => {
+            let _ = store.save_worker_worktree_metadata(&project_worker_metadata(
+                worker_id,
+                worktree,
+                &paths.worktree_path,
+                &artifact_root,
+                ProjectWorkerWorktreeState::Planned,
+            ));
+            logs.push(format!("worktree creation failed: {error}\n"));
+        }
+    }
+
+    logs
+}
+
+fn project_worker_metadata(
+    worker_id: &str,
+    worktree: &WorkerWorktreeIntent,
+    worktree_path: &Path,
+    artifact_root: &Path,
+    state: ProjectWorkerWorktreeState,
+) -> ProjectWorkerWorktreeMetadata {
+    ProjectWorkerWorktreeMetadata {
+        worker_id: worker_id.to_owned(),
+        workspace_id: worktree
+            .workspace_id
+            .clone()
+            .unwrap_or_else(|| "session".to_owned()),
+        worktree_path: worktree_path.to_path_buf(),
+        branch_name: worktree.branch_name.clone(),
+        base_ref: worktree.base_ref.clone(),
+        state,
+        artifact_root: artifact_root.to_path_buf(),
+    }
+}
+
+fn is_git_work_tree(root: &Path) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn create_git_worktree(
+    project_root: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    base_ref: &str,
+) -> Result<(), String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["worktree", "add", "-b"])
+        .arg(branch_name)
+        .arg(worktree_path)
+        .arg(base_ref)
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = redact(&String::from_utf8_lossy(&output.stderr));
+        Err(if stderr.trim().is_empty() {
+            "git worktree add failed".to_owned()
+        } else {
+            stderr.trim().to_owned()
+        })
+    }
+}
+
+fn write_worker_artifacts(record: &mut WorkerRecord, status: &str, summary: &str) -> Vec<String> {
+    let mut logs = Vec::new();
+    let Some(artifacts) = record.artifacts.clone() else {
+        return logs;
+    };
+    if let Err(error) = fs::create_dir_all(&artifacts.root) {
+        logs.push(format!("artifact write failed: {error}\n"));
+        return logs;
+    }
+
+    let summary_content = format!(
+        "# Worker {}\n\nStatus: {}\n\n{}\n",
+        record.worker_id,
+        status,
+        redact(summary)
+    );
+    if let Err(error) = write_artifact(&artifacts.summary, &summary_content) {
+        logs.push(format!("summary artifact failed: {error}\n"));
+    }
+
+    let worktree_path = record
+        .worktree
+        .as_ref()
+        .filter(|worktree| worktree.state == WorkerWorktreeState::Active)
+        .map(|worktree| PathBuf::from(&worktree.worktree_path));
+
+    let patch = worktree_path
+        .as_deref()
+        .and_then(|path| git_stdout(path, ["diff", "--binary", "HEAD"]).ok())
+        .unwrap_or_default();
+    if let Err(error) = write_artifact(&artifacts.patch, &patch) {
+        logs.push(format!("patch artifact failed: {error}\n"));
+    }
+
+    let status_lines = worktree_path
+        .as_deref()
+        .and_then(|path| git_stdout(path, ["status", "--short"]).ok())
+        .unwrap_or_default()
+        .lines()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let changed_files = serde_json::json!({
+        "worker_id": record.worker_id.clone(),
+        "status": status,
+        "files": status_lines,
+    });
+    if let Err(error) = write_json_artifact(&artifacts.changed_files, &changed_files) {
+        logs.push(format!("changed-files artifact failed: {error}\n"));
+    }
+
+    let test_report = serde_json::json!({
+        "worker_id": record.worker_id.clone(),
+        "status": status,
+        "summary": redact(summary),
+        "generated_by": "cadisd",
+        "generated_at": now_timestamp(),
+    });
+    if let Err(error) = write_json_artifact(&artifacts.test_report, &test_report) {
+        logs.push(format!("test-report artifact failed: {error}\n"));
+    }
+
+    if let Err(error) = write_artifact(&artifacts.memory_candidates, "") {
+        logs.push(format!("memory-candidates artifact failed: {error}\n"));
+    }
+
+    if let Some(worktree) = &mut record.worktree {
+        if worker_status_is_terminal(status) && worktree.state == WorkerWorktreeState::Active {
+            worktree.state = WorkerWorktreeState::ReviewPending;
+        }
+    }
+
+    logs.into_iter().map(|line| redact(&line)).collect()
+}
+
+fn write_artifact(path: &str, content: &str) -> io::Result<()> {
+    let path = Path::new(path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, redact(content))
+}
+
+fn write_json_artifact(path: &str, value: &serde_json::Value) -> io::Result<()> {
+    let mut content = serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_owned());
+    content.push('\n');
+    write_artifact(path, &content)
+}
+
+fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        Ok(redact(&String::from_utf8_lossy(&output.stdout)))
+    } else {
+        Err(redact(&String::from_utf8_lossy(&output.stderr)))
     }
 }
 
@@ -5754,6 +6068,40 @@ mod tests {
         ));
         fs::create_dir_all(&path).expect("test workspace should be created");
         path
+    }
+
+    fn init_git_workspace(root: &Path) {
+        run_git(root, &["init"]);
+        fs::write(root.join("README.md"), "CADIS worker fixture\n")
+            .expect("fixture file should write");
+        run_git(root, &["add", "README.md"]);
+        run_git(
+            root,
+            &[
+                "-c",
+                "user.name=CADIS Test",
+                "-c",
+                "user.email=cadis@example.invalid",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn register_workspace(runtime: &mut Runtime, workspace_id: &str, root: &Path) {
@@ -6710,6 +7058,96 @@ mod tests {
             .expect("worker metadata should recover");
         assert_eq!(recovered.records.len(), 1);
         assert_eq!(recovered.records[0].metadata.status, "failed");
+    }
+
+    #[test]
+    fn worker_execution_creates_git_worktree_and_artifacts() {
+        let cadis_home = test_workspace("worker-execution-home");
+        let workspace = test_workspace("worker-execution-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home);
+        register_workspace(&mut runtime, "worker-git", &workspace);
+        let session_id = runtime
+            .handle_request(RequestEnvelope::new(
+                RequestId::from("req_worker_session"),
+                ClientId::from("cli_1"),
+                ClientRequest::SessionCreate(SessionCreateRequest {
+                    title: Some("Worker execution".to_owned()),
+                    cwd: Some(workspace.display().to_string()),
+                }),
+            ))
+            .events
+            .into_iter()
+            .find_map(|event| match event.event {
+                CadisEvent::SessionStarted(payload) => Some(payload.session_id),
+                _ => None,
+            })
+            .expect("session.started should be emitted");
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_execution"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: Some(session_id),
+                target_agent_id: None,
+                content: "/route @codex run focused tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        let started = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerStarted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("worker.started should be emitted");
+        let worktree = started
+            .worktree
+            .as_ref()
+            .expect("worker.started should include worktree metadata");
+        assert_eq!(worktree.workspace_id.as_deref(), Some("worker-git"));
+        assert_eq!(worktree.state, WorkerWorktreeState::Active);
+        assert!(Path::new(&worktree.worktree_path).is_dir());
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerLogDelta(payload)
+                    if payload.delta.contains("worktree ready")
+            )
+        }));
+
+        let completed = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("worker.completed should be emitted");
+        let completed_worktree = completed
+            .worktree
+            .as_ref()
+            .expect("worker.completed should include worktree metadata");
+        assert_eq!(completed_worktree.state, WorkerWorktreeState::ReviewPending);
+
+        let artifacts = completed
+            .artifacts
+            .as_ref()
+            .expect("worker.completed should include artifact paths");
+        assert!(Path::new(&artifacts.summary).is_file());
+        assert!(Path::new(&artifacts.test_report).is_file());
+        assert!(Path::new(&artifacts.changed_files).is_file());
+        assert!(Path::new(&artifacts.patch).is_file());
+
+        let project_metadata = ProjectWorkspaceStore::new(&workspace)
+            .load_worker_worktree_metadata("worker_000001")
+            .expect("worker worktree metadata should load")
+            .expect("worker worktree metadata should exist");
+        assert_eq!(project_metadata.workspace_id, "worker-git");
+        assert_eq!(project_metadata.state, ProjectWorkerWorktreeState::Ready);
     }
 
     #[test]
