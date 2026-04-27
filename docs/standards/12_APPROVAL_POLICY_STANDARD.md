@@ -114,6 +114,10 @@ Current implementation baseline:
 - `shell.run`, write tools, and mutating git/worktree placeholders require
   approval and are persisted under daemon-owned state.
 - Unknown tools are denied.
+- The policy crate exposes structured classification helpers for workspace
+  mutation, shell execution risk hints, secret access, and dangerous delete.
+  These helpers do not implement execution; unclassified workspace mutations
+  remain denied by default.
 - Approved risky placeholders still fail closed with `tool.failed` until the
   corresponding execution backend is implemented.
 - `approval.respond` uses daemon state and persisted approval records; the first
