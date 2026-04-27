@@ -52,6 +52,8 @@ beforeEach(() => {
     chat: [],
     approvals: [],
     workers: [],
+    selectedWorkerId: null,
+    codeWorkPanelOpen: false,
     avatarStyle: "orb",
     voiceState: "idle",
     voicePrefs: DEFAULT_VOICE_PREFS,

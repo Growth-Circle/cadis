@@ -52,6 +52,8 @@ function sessionBelongsTo(s: AgentSessionRecord, agentId: string): boolean {
 export function WorkerTree({ agentId, defaultOpen }: WorkerTreeProps) {
   const all = useHud(selectWorkers);
   const allSessions = useHud(selectAgentSessions);
+  const selectedWorkerId = useHud((s) => s.selectedWorkerId);
+  const selectWorker = useHud((s) => s.selectWorker);
   const workers = all.filter((w) => workerBelongsTo(w, agentId));
   const sessions = allSessions.filter((s) => sessionBelongsTo(s, agentId));
   const [open, setOpen] = useState(defaultOpen ?? true);
@@ -90,18 +92,28 @@ export function WorkerTree({ agentId, defaultOpen }: WorkerTreeProps) {
             </li>
           ))}
           {workers.map((w) => (
-            <li key={w.id} className="worker-tree__item" data-status={w.status}>
-              <span
-                className="worker-tree__dot"
-                style={{ background: STATUS_COLOR[w.status] }}
-                aria-hidden
-              />
-              <span className="worker-tree__id" title={w.id}>{compactId(w.id)}</span>
-              <span className="worker-tree__status">{w.status}</span>
-              <span className="worker-tree__text" title={workerTitle(w)}>
-                {workerText(w)}
-              </span>
-              <ProgressBar value={workerProgress(w)} indeterminate={w.status === "running"} />
+            <li key={w.id} className="worker-tree__row">
+              <button
+                type="button"
+                className="worker-tree__item worker-tree__item--button"
+                data-status={w.status}
+                data-selected={selectedWorkerId === w.id ? "true" : undefined}
+                onClick={() => selectWorker(w.id)}
+                aria-label={`Open code work for ${w.id}`}
+                aria-current={selectedWorkerId === w.id ? "true" : undefined}
+              >
+                <span
+                  className="worker-tree__dot"
+                  style={{ background: STATUS_COLOR[w.status] }}
+                  aria-hidden
+                />
+                <span className="worker-tree__id" title={w.id}>{compactId(w.id)}</span>
+                <span className="worker-tree__status">{w.status}</span>
+                <span className="worker-tree__text" title={workerTitle(w)}>
+                  {workerText(w)}
+                </span>
+                <ProgressBar value={workerProgress(w)} indeterminate={w.status === "running"} />
+              </button>
             </li>
           ))}
         </ul>
