@@ -32,6 +32,7 @@ Active repository rulesets:
 
 Required `main` status checks:
 
+- `Automated PR review`
 - `Repository hygiene`
 - `Rust workspace`
 - `HUD frontend`
@@ -40,6 +41,8 @@ Required `main` status checks:
 
 Baseline checks:
 
+- automated public-safe PR metadata/diff guardrails for committed secrets,
+  private local paths, generated artifacts, and local runtime/agent state
 - repository hygiene check
 - Markdown and documentation path check where tooling exists
 - no committed secrets
@@ -134,6 +137,7 @@ v0.x.y-rc.N
 
 Recommended workflows:
 
+- `.github/workflows/pr-autoreview.yml`
 - `.github/workflows/ci.yml`
 - `.github/workflows/platform-baseline.yml`
 - `.github/workflows/security.yml`
