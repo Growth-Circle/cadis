@@ -40,8 +40,9 @@ jobs:
             --jq '.[].filename' > "$files"
           gh pr diff "$PR_NUMBER" --repo "$REPOSITORY" --patch > "$patch"
 
-          if grep -Eiq -- '(^|/)(\.env(\.|$)|id_rsa|id_dsa|id_ecdsa|id_ed25519|.*\.(pem|p12|pfx|key))$' "$files"; then
-            add_reason "Secret-bearing files are not allowed in the repository. Remove .env, private key, certificate, or credential files from this PR."
+          active_env_files="$(grep -Ei -- '(^|/)(\.env($|\.)|\.envrc$)' "$files" | grep -Eiv -- '(^|/)\.env\.(example|sample|template|dist)$' || true)"
+          if [ -n "$active_env_files" ] || grep -Eiq -- '(^|/)(id_rsa|id_dsa|id_ecdsa|id_ed25519|.*\.(pem|p12|pfx|key))$' "$files"; then
+            add_reason "Secret-bearing files are not allowed in the repository. Remove active .env, private key, certificate, or credential files from this PR. Public templates such as .env.example, .env.sample, .env.template, and .env.dist are allowed."
           fi
 
           if grep -Eiq -- '(^|/)(target|node_modules|dist|coverage|\.cadis|\.claude|\.codex)(/|$)' "$files"; then
