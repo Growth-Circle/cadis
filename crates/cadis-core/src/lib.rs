@@ -52,6 +52,9 @@ use serde::{Deserialize, Serialize};
 const FILE_READ_LIMIT_BYTES: usize = 64 * 1024;
 const FILE_SEARCH_LIMIT_BYTES: u64 = 1024 * 1024;
 const FILE_SEARCH_DEFAULT_LIMIT: usize = 50;
+const FILE_PATCH_MAX_OPERATIONS: usize = 64;
+const FILE_PATCH_MAX_FILE_BYTES: usize = 1024 * 1024;
+const FILE_PATCH_OUTPUT_MAX_FILES: usize = 64;
 const GIT_DIFF_LIMIT_BYTES: usize = 128 * 1024;
 const SHELL_OUTPUT_LIMIT_BYTES: usize = 16 * 1024;
 const SHELL_POLL_INTERVAL_MS: u64 = 10;
@@ -701,6 +704,21 @@ impl Runtime {
                 return self.accept(request_id, events);
             }
         };
+
+        if request.tool_name == "file.patch" {
+            if let Err(error) = validate_file_patch_input(&workspace.root, &request.input) {
+                events.push(self.session_event(
+                    session_id,
+                    CadisEvent::ToolFailed(ToolFailedPayload {
+                        tool_call_id,
+                        tool_name: request.tool_name,
+                        error,
+                        risk_class: Some(risk_class),
+                    }),
+                ));
+                return self.accept(request_id, events);
+            }
+        }
 
         match policy_decision {
             PolicyDecision::Allow => {
@@ -2894,12 +2912,54 @@ impl Runtime {
     ) -> Result<ToolExecutionResult, ErrorPayload> {
         match request.tool_name.as_str() {
             "shell.run" => self.execute_shell_run(workspace, &request.input, tool_timeout_secs),
+            "file.patch" => self.execute_file_patch(workspace, &request.input),
             tool_name => Err(tool_error(
                 "tool_not_implemented",
                 format!("{tool_name} has no approved execution backend"),
                 false,
             )),
         }
+    }
+
+    fn execute_file_patch(
+        &self,
+        workspace: &Path,
+        input: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, ErrorPayload> {
+        let operations = parse_file_patch_operations(input)?;
+        let prepared = prepare_file_patch(workspace, &operations)?;
+
+        for change in &prepared {
+            fs::write(&change.path, change.content.as_bytes()).map_err(|error| {
+                tool_error(
+                    "file_patch_write_failed",
+                    format!("could not write {}: {error}", change.display_path),
+                    false,
+                )
+            })?;
+        }
+
+        let output_files = prepared
+            .iter()
+            .take(FILE_PATCH_OUTPUT_MAX_FILES)
+            .map(|change| {
+                serde_json::json!({
+                    "path": redact(&change.display_path),
+                    "action": change.action,
+                })
+            })
+            .collect::<Vec<_>>();
+        let truncated = prepared.len() > FILE_PATCH_OUTPUT_MAX_FILES;
+        let summary = format!("patched {} file{}", prepared.len(), plural(prepared.len()));
+
+        Ok(ToolExecutionResult {
+            summary,
+            output: serde_json::json!({
+                "schema": "structured_replace_write_v1",
+                "files": output_files,
+                "truncated": truncated
+            }),
+        })
     }
 
     fn execute_file_read(
@@ -4735,6 +4795,42 @@ struct ToolExecutionResult {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum FilePatchOperation {
+    Write {
+        path: String,
+        content: String,
+    },
+    Replace {
+        path: String,
+        old: String,
+        new: String,
+    },
+}
+
+impl FilePatchOperation {
+    fn path(&self) -> &str {
+        match self {
+            Self::Write { path, .. } | Self::Replace { path, .. } => path,
+        }
+    }
+
+    fn action(&self) -> &'static str {
+        match self {
+            Self::Write { .. } => "write",
+            Self::Replace { .. } => "replace",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PreparedFilePatch {
+    path: PathBuf,
+    display_path: String,
+    action: &'static str,
+    content: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct BoundedOutput {
     bytes: Vec<u8>,
     truncated: bool,
@@ -5351,6 +5447,13 @@ fn input_string(input: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn input_raw_string(input: &serde_json::Value, key: &str) -> Option<String> {
+    input
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
 fn input_usize(input: &serde_json::Value, key: &str) -> Option<usize> {
     input
         .get(key)
@@ -5885,9 +5988,420 @@ fn tool_command_summary(tool_name: &str, input: &serde_json::Value) -> Option<St
                 })
             })
         }),
+        "file.patch" => file_patch_path_summary(input),
         _ => input_string(input, "path"),
     }
     .map(|value| redact(&value))
+}
+
+fn file_patch_path_summary(input: &serde_json::Value) -> Option<String> {
+    if let Some(path) = input_string(input, "path").or_else(|| input_string(input, "target")) {
+        return Some(path);
+    }
+
+    input
+        .get("operations")
+        .and_then(serde_json::Value::as_array)
+        .map(|operations| {
+            operations
+                .iter()
+                .filter_map(|operation| {
+                    input_string(operation, "path").or_else(|| input_string(operation, "target"))
+                })
+                .take(FILE_PATCH_OUTPUT_MAX_FILES)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|summary| !summary.is_empty())
+}
+
+fn parse_file_patch_operations(
+    input: &serde_json::Value,
+) -> Result<Vec<FilePatchOperation>, ErrorPayload> {
+    let operations = if let Some(operations) = input.get("operations") {
+        let Some(items) = operations.as_array() else {
+            return Err(tool_error(
+                "invalid_tool_input",
+                "file.patch operations must be an array",
+                false,
+            ));
+        };
+        items
+            .iter()
+            .map(parse_file_patch_operation)
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        vec![parse_file_patch_operation(input)?]
+    };
+
+    if operations.is_empty() {
+        return Err(tool_error(
+            "invalid_tool_input",
+            "file.patch requires at least one operation",
+            false,
+        ));
+    }
+    if operations.len() > FILE_PATCH_MAX_OPERATIONS {
+        return Err(tool_error(
+            "invalid_tool_input",
+            format!("file.patch supports at most {FILE_PATCH_MAX_OPERATIONS} operations"),
+            false,
+        ));
+    }
+
+    Ok(operations)
+}
+
+fn parse_file_patch_operation(
+    input: &serde_json::Value,
+) -> Result<FilePatchOperation, ErrorPayload> {
+    let path = input_string(input, "path")
+        .or_else(|| input_string(input, "target"))
+        .ok_or_else(|| tool_error("invalid_tool_input", "file.patch requires path", false))?;
+    let action = input_string(input, "op")
+        .or_else(|| input_string(input, "action"))
+        .map(|value| value.to_ascii_lowercase());
+
+    match action.as_deref() {
+        Some("write") | Some("replace_file") | Some("create") => {
+            let content = input_raw_string(input, "content").ok_or_else(|| {
+                tool_error(
+                    "invalid_tool_input",
+                    "file.patch write operation requires content",
+                    false,
+                )
+            })?;
+            validate_patch_text_size("content", &content)?;
+            Ok(FilePatchOperation::Write { path, content })
+        }
+        Some("replace") => parse_file_patch_replace(path, input),
+        Some(other) => Err(tool_error(
+            "invalid_tool_input",
+            format!("unsupported file.patch operation '{other}'"),
+            false,
+        )),
+        None if input.get("content").is_some() => {
+            let content = input_raw_string(input, "content").ok_or_else(|| {
+                tool_error(
+                    "invalid_tool_input",
+                    "file.patch content must be a string",
+                    false,
+                )
+            })?;
+            validate_patch_text_size("content", &content)?;
+            Ok(FilePatchOperation::Write { path, content })
+        }
+        None => parse_file_patch_replace(path, input),
+    }
+}
+
+fn parse_file_patch_replace(
+    path: String,
+    input: &serde_json::Value,
+) -> Result<FilePatchOperation, ErrorPayload> {
+    let old = input_raw_string(input, "old").ok_or_else(|| {
+        tool_error(
+            "invalid_tool_input",
+            "file.patch replace operation requires old",
+            false,
+        )
+    })?;
+    let new = input_raw_string(input, "new").ok_or_else(|| {
+        tool_error(
+            "invalid_tool_input",
+            "file.patch replace operation requires new",
+            false,
+        )
+    })?;
+    if old.is_empty() {
+        return Err(tool_error(
+            "invalid_tool_input",
+            "file.patch replace operation old cannot be empty",
+            false,
+        ));
+    }
+    validate_patch_text_size("old", &old)?;
+    validate_patch_text_size("new", &new)?;
+    Ok(FilePatchOperation::Replace { path, old, new })
+}
+
+fn validate_patch_text_size(label: &str, value: &str) -> Result<(), ErrorPayload> {
+    if value.len() > FILE_PATCH_MAX_FILE_BYTES {
+        Err(tool_error(
+            "file_patch_too_large",
+            format!("file.patch {label} exceeds {FILE_PATCH_MAX_FILE_BYTES} bytes"),
+            false,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_file_patch_input(
+    workspace: &Path,
+    input: &serde_json::Value,
+) -> Result<(), ErrorPayload> {
+    let operations = parse_file_patch_operations(input)?;
+    for operation in &operations {
+        let target = resolve_file_patch_target(workspace, operation.path())?;
+        validate_file_patch_target(operation, &target)?;
+    }
+    Ok(())
+}
+
+fn validate_file_patch_target(
+    operation: &FilePatchOperation,
+    target: &Path,
+) -> Result<(), ErrorPayload> {
+    match operation {
+        FilePatchOperation::Write { .. } => {
+            if let Ok(metadata) = fs::metadata(target) {
+                if !metadata.is_file() {
+                    return Err(tool_error(
+                        "unsupported_file_type",
+                        "file.patch can only write regular files",
+                        false,
+                    ));
+                }
+            }
+            Ok(())
+        }
+        FilePatchOperation::Replace { .. } => {
+            let metadata = fs::metadata(target).map_err(|error| {
+                tool_error(
+                    "path_resolution_failed",
+                    format!("could not read file.patch target: {error}"),
+                    false,
+                )
+            })?;
+            if !metadata.is_file() {
+                return Err(tool_error(
+                    "unsupported_file_type",
+                    "file.patch can only replace regular files",
+                    false,
+                ));
+            }
+            if metadata.len() > FILE_PATCH_MAX_FILE_BYTES as u64 {
+                return Err(tool_error(
+                    "file_patch_too_large",
+                    format!("file.patch target exceeds {FILE_PATCH_MAX_FILE_BYTES} bytes"),
+                    false,
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn prepare_file_patch(
+    workspace: &Path,
+    operations: &[FilePatchOperation],
+) -> Result<Vec<PreparedFilePatch>, ErrorPayload> {
+    let mut staged = HashMap::<PathBuf, String>::new();
+    let mut prepared = Vec::new();
+
+    for operation in operations {
+        let path = resolve_file_patch_target(workspace, operation.path())?;
+        validate_file_patch_target(operation, &path)?;
+        let content = match operation {
+            FilePatchOperation::Write { content, .. } => content.clone(),
+            FilePatchOperation::Replace { old, new, .. } => {
+                let current = match staged.get(&path) {
+                    Some(content) => content.clone(),
+                    None => read_patch_target(&path)?,
+                };
+                replace_once(&current, old, new)?
+            }
+        };
+        validate_patch_text_size("result", &content)?;
+        staged.insert(path.clone(), content.clone());
+        prepared.push(PreparedFilePatch {
+            display_path: display_relative_path(workspace, &path),
+            path,
+            action: operation.action(),
+            content,
+        });
+    }
+
+    Ok(prepared)
+}
+
+fn read_patch_target(path: &Path) -> Result<String, ErrorPayload> {
+    fs::read_to_string(path).map_err(|error| {
+        tool_error(
+            "file_patch_read_failed",
+            format!("could not read patch target: {error}"),
+            false,
+        )
+    })
+}
+
+fn replace_once(content: &str, old: &str, new: &str) -> Result<String, ErrorPayload> {
+    let matches = content.match_indices(old).take(2).count();
+    match matches {
+        0 => Err(tool_error(
+            "file_patch_replace_mismatch",
+            "file.patch old text was not found exactly once",
+            false,
+        )),
+        1 => Ok(content.replacen(old, new, 1)),
+        _ => Err(tool_error(
+            "file_patch_replace_ambiguous",
+            "file.patch old text matched more than once",
+            false,
+        )),
+    }
+}
+
+fn resolve_file_patch_target(workspace: &Path, user_path: &str) -> Result<PathBuf, ErrorPayload> {
+    let relative = Path::new(user_path);
+    if relative.is_absolute() || path_has_parent_or_root(relative) {
+        return Err(tool_error(
+            "outside_workspace",
+            "file.patch paths must be relative to the workspace",
+            false,
+        ));
+    }
+    if relative.file_name().is_none() {
+        return Err(tool_error(
+            "invalid_tool_input",
+            "file.patch path must name a file",
+            false,
+        ));
+    }
+    validate_file_patch_relative_path(relative)?;
+
+    let workspace = workspace.canonicalize().map_err(|error| {
+        tool_error(
+            "path_resolution_failed",
+            format!("could not resolve workspace: {error}"),
+            false,
+        )
+    })?;
+    let candidate = workspace.join(relative);
+    if let Ok(resolved) = candidate.canonicalize() {
+        if !resolved.starts_with(&workspace) {
+            return Err(tool_error(
+                "outside_workspace",
+                "file.patch target resolves outside the workspace",
+                false,
+            ));
+        }
+        if resolved.is_dir() {
+            return Err(tool_error(
+                "unsupported_file_type",
+                "file.patch target must be a file",
+                false,
+            ));
+        }
+        if let Ok(resolved_relative) = resolved.strip_prefix(&workspace) {
+            validate_file_patch_relative_path(resolved_relative)?;
+        }
+        return Ok(resolved);
+    }
+
+    let parent = candidate.parent().ok_or_else(|| {
+        tool_error(
+            "invalid_tool_input",
+            "file.patch path must have a parent directory",
+            false,
+        )
+    })?;
+    let parent = parent.canonicalize().map_err(|error| {
+        tool_error(
+            "path_resolution_failed",
+            format!("could not resolve file.patch parent: {error}"),
+            false,
+        )
+    })?;
+    if !parent.starts_with(&workspace) {
+        return Err(tool_error(
+            "outside_workspace",
+            "file.patch parent resolves outside the workspace",
+            false,
+        ));
+    }
+    let file_name = candidate.file_name().ok_or_else(|| {
+        tool_error(
+            "invalid_tool_input",
+            "file.patch path must name a file",
+            false,
+        )
+    })?;
+    let resolved = parent.join(file_name);
+    if let Ok(resolved_relative) = resolved.strip_prefix(&workspace) {
+        validate_file_patch_relative_path(resolved_relative)?;
+    }
+    Ok(resolved)
+}
+
+fn validate_file_patch_relative_path(path: &Path) -> Result<(), ErrorPayload> {
+    if file_patch_path_is_protected(path) {
+        return Err(tool_error(
+            "protected_path",
+            "file.patch refuses to modify protected workspace metadata paths",
+            false,
+        ));
+    }
+    if file_patch_path_is_secret_like(path) {
+        return Err(tool_error(
+            "secret_path_rejected",
+            "file.patch refuses to modify secret-like paths",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn path_has_parent_or_root(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    })
+}
+
+fn file_patch_path_is_protected(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        Component::Normal(value) => matches!(value.to_str(), Some(".git" | ".cadis")),
+        _ => false,
+    })
+}
+
+fn file_patch_path_is_secret_like(path: &Path) -> bool {
+    path.components().any(|component| {
+        let Component::Normal(value) = component else {
+            return false;
+        };
+        let name = value.to_string_lossy().to_ascii_lowercase();
+        name == ".env"
+            || name.starts_with(".env.")
+            || matches!(
+                name.as_str(),
+                ".netrc"
+                    | ".npmrc"
+                    | ".pypirc"
+                    | ".git-credentials"
+                    | "id_rsa"
+                    | "id_dsa"
+                    | "id_ecdsa"
+                    | "id_ed25519"
+                    | ".ssh"
+                    | ".aws"
+                    | ".gnupg"
+            )
+            || name.ends_with(".pem")
+            || name.ends_with(".key")
+            || name.ends_with(".p12")
+            || name.ends_with(".pfx")
+            || name.contains("secret")
+            || name.contains("credential")
+            || name.contains("token")
+            || name.contains("api_key")
+            || name.contains("apikey")
+            || name.contains("private_key")
+    })
 }
 
 fn validate_git_pathspec(pathspec: &str) -> Result<String, ErrorPayload> {
@@ -7660,6 +8174,406 @@ mod tests {
                     if payload.error.code == "workspace_grant_required"
             )
         }));
+    }
+
+    #[test]
+    fn file_patch_requests_approval_without_execution() {
+        let workspace = test_workspace("file-patch-approval");
+        fs::write(workspace.join("README.md"), "hello\n").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "file-patch-approval", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "file-patch-approval",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_file_patch_approval"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.patch".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "file-patch-approval",
+                    "path": "README.md",
+                    "old": "hello\n",
+                    "new": "hello cadis\n"
+                }),
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalRequested(payload)
+                    if payload.tool_call_id.as_str() == "tool_000001"
+                        && payload.summary.contains("edit_workspace")
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).expect("file should read"),
+            "hello\n"
+        );
+    }
+
+    #[test]
+    fn file_patch_denial_does_not_apply_patch() {
+        let workspace = test_workspace("file-patch-denial");
+        fs::write(workspace.join("README.md"), "hello\n").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "file-patch-denial", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "file-patch-denial",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_file_patch_denial"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.patch".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "file-patch-denial",
+                    "path": "README.md",
+                    "content": "patched\n"
+                }),
+            }),
+        ));
+        let approval_id = approval_id_from(&request);
+
+        let denial = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_file_patch_deny"),
+            ClientId::from("cli_1"),
+            ClientRequest::ApprovalRespond(ApprovalResponseRequest {
+                approval_id,
+                decision: ApprovalDecision::Denied,
+                reason: Some("not this patch".to_owned()),
+            }),
+        ));
+
+        assert!(denial.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalResolved(payload)
+                    if payload.decision == ApprovalDecision::Denied
+            )
+        }));
+        assert!(denial.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "file.patch"
+                        && payload.error.code == "approval_denied"
+            )
+        }));
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).expect("file should read"),
+            "hello\n"
+        );
+    }
+
+    #[test]
+    fn approved_file_patch_applies_inside_workspace() {
+        let workspace = test_workspace("file-patch-approved");
+        fs::write(workspace.join("README.md"), "hello\n").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "file-patch-approved", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "file-patch-approved",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_file_patch_apply"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.patch".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "file-patch-approved",
+                    "operations": [
+                        {
+                            "op": "replace",
+                            "path": "README.md",
+                            "old": "hello\n",
+                            "new": "hello cadis\n"
+                        }
+                    ]
+                }),
+            }),
+        ));
+        let approved = approve(&mut runtime, approval_id_from(&request));
+
+        assert!(approved.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalResolved(payload)
+                    if payload.decision == ApprovalDecision::Approved
+            )
+        }));
+        assert!(approved
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+        assert!(approved.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolCompleted(payload)
+                    if payload.tool_name == "file.patch"
+                        && payload.summary.as_deref() == Some("patched 1 file")
+                        && payload.output.as_ref().is_some_and(|output| {
+                            output["schema"] == "structured_replace_write_v1"
+                                && output["truncated"] == false
+                        })
+            )
+        }));
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).expect("file should read"),
+            "hello cadis\n"
+        );
+    }
+
+    #[test]
+    fn file_patch_requires_workspace_write_grant() {
+        let workspace = test_workspace("file-patch-grant");
+        fs::write(workspace.join("README.md"), "hello\n").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "file-patch-grant", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "file-patch-grant",
+            vec![WorkspaceAccess::Read],
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_file_patch_grant"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.patch".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "file-patch-grant",
+                    "path": "README.md",
+                    "content": "patched\n"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "file.patch"
+                        && payload.error.code == "workspace_grant_required"
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+    }
+
+    #[test]
+    fn file_patch_rejects_outside_workspace_path() {
+        let workspace = test_workspace("file-patch-outside");
+        fs::write(workspace.join("README.md"), "hello\n").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "file-patch-outside", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "file-patch-outside",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_file_patch_outside"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.patch".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "file-patch-outside",
+                    "path": "../README.md",
+                    "content": "patched\n"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "file.patch"
+                        && payload.error.code == "outside_workspace"
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+    }
+
+    #[test]
+    fn file_patch_rejects_protected_path() {
+        let workspace = test_workspace("file-patch-protected");
+        fs::create_dir_all(workspace.join(".cadis")).expect("metadata dir should write");
+        fs::write(
+            workspace.join(".cadis/workspace.toml"),
+            "workspace_id = 'x'\n",
+        )
+        .expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "file-patch-protected", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "file-patch-protected",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_file_patch_protected"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.patch".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "file-patch-protected",
+                    "path": ".cadis/workspace.toml",
+                    "content": "patched\n"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "file.patch"
+                        && payload.error.code == "protected_path"
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+    }
+
+    #[test]
+    fn file_patch_rejects_secret_like_path() {
+        let workspace = test_workspace("file-patch-secret");
+        fs::write(workspace.join(".env"), "TOKEN=secret\n").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "file-patch-secret", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "file-patch-secret",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_file_patch_secret"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "file.patch".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "file-patch-secret",
+                    "path": ".env",
+                    "content": "TOKEN=patched\n"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "file.patch"
+                        && payload.error.code == "secret_path_rejected"
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+        assert_eq!(
+            fs::read_to_string(workspace.join(".env")).expect("file should read"),
+            "TOKEN=secret\n"
+        );
+    }
+
+    #[test]
+    fn recovered_file_patch_approval_fails_closed_on_approve() {
+        let cadis_home = test_workspace("file-patch-recovery-home");
+        let workspace = test_workspace("file-patch-recovery-workspace");
+        fs::write(workspace.join("README.md"), "hello\n").expect("test file should write");
+        let approval_id = {
+            let mut runtime = runtime_with_home(cadis_home.clone());
+            register_workspace(&mut runtime, "file-patch-recovery", &workspace);
+            grant_workspace(
+                &mut runtime,
+                "file-patch-recovery",
+                vec![WorkspaceAccess::Write],
+            );
+
+            let request = runtime.handle_request(RequestEnvelope::new(
+                RequestId::from("req_file_patch_recovery"),
+                ClientId::from("cli_1"),
+                ClientRequest::ToolCall(ToolCallRequest {
+                    session_id: None,
+                    agent_id: None,
+                    tool_name: "file.patch".to_owned(),
+                    input: serde_json::json!({
+                        "workspace_id": "file-patch-recovery",
+                        "path": "README.md",
+                        "content": "patched\n"
+                    }),
+                }),
+            ));
+            approval_id_from(&request)
+        };
+
+        let mut restarted = runtime_with_home(cadis_home);
+        let approved = approve(&mut restarted, approval_id);
+
+        assert!(approved.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalResolved(payload)
+                    if payload.decision == ApprovalDecision::Approved
+            )
+        }));
+        assert!(approved.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "file.patch"
+                        && payload.error.code == "tool_execution_unavailable"
+            )
+        }));
+        assert_eq!(
+            fs::read_to_string(workspace.join("README.md")).expect("file should read"),
+            "hello\n"
+        );
     }
 
     #[test]
