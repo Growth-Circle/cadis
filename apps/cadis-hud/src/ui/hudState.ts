@@ -80,6 +80,7 @@ export type WorkerArtifactInfo = {
   summary?: string;
   patch?: string;
   testReport?: string;
+  testReportStatus?: string;
 };
 
 export type WorkerRecord = {
@@ -139,6 +140,8 @@ export type HudStore = {
   chat: ChatMessage[];
   approvals: ApprovalRecord[];
   workers: WorkerRecord[];
+  selectedWorkerId: string | null;
+  codeWorkPanelOpen: boolean;
   theme: ThemeKey;
   avatarStyle: AvatarStyle;
   voiceState: "idle" | "listening" | "thinking" | "speaking";
@@ -179,6 +182,8 @@ export type HudStore = {
   pushApproval: (a: ApprovalRecord) => void;
   removeApproval: (id: string) => void;
   upsertAgentSession: (session: AgentSessionRecord) => void;
+  selectWorker: (id: string) => void;
+  setCodeWorkPanelOpen: (open: boolean) => void;
   upsertWorker: (w: WorkerRecord) => void;
   removeWorker: (id: string) => void;
 };
@@ -249,6 +254,8 @@ export const useHud = create<HudStore>((set) => ({
   chat: [],
   approvals: [],
   workers: [],
+  selectedWorkerId: null,
+  codeWorkPanelOpen: false,
   theme: "arc",
   avatarStyle: "orb",
   voiceState: "idle",
@@ -354,18 +361,36 @@ export const useHud = create<HudStore>((set) => ({
       next[idx] = { ...next[idx]!, ...definedSession };
       return { agentSessions: next };
     }),
+  selectWorker: (selectedWorkerId) => set({ selectedWorkerId, codeWorkPanelOpen: true }),
+  setCodeWorkPanelOpen: (codeWorkPanelOpen) => set({ codeWorkPanelOpen }),
   upsertWorker: (worker) =>
     set((s) => {
       const idx = s.workers.findIndex((candidate) => candidate.id === worker.id);
-      if (idx === -1) return { workers: [...s.workers, worker] };
+      const shouldAutoSelect = s.selectedWorkerId === null;
+      if (idx === -1) {
+        return {
+          workers: [...s.workers, worker],
+          selectedWorkerId: shouldAutoSelect ? worker.id : s.selectedWorkerId,
+          codeWorkPanelOpen: shouldAutoSelect ? true : s.codeWorkPanelOpen,
+        };
+      }
       const next = [...s.workers];
       const definedWorker = Object.fromEntries(
         Object.entries(worker).filter(([, value]) => value !== undefined),
       ) as WorkerRecord;
       next[idx] = { ...next[idx]!, ...definedWorker };
-      return { workers: next };
+      return {
+        workers: next,
+        selectedWorkerId: shouldAutoSelect ? worker.id : s.selectedWorkerId,
+        codeWorkPanelOpen: shouldAutoSelect ? true : s.codeWorkPanelOpen,
+      };
     }),
-  removeWorker: (id) => set((s) => ({ workers: s.workers.filter((w) => w.id !== id) })),
+  removeWorker: (id) =>
+    set((s) => ({
+      workers: s.workers.filter((w) => w.id !== id),
+      selectedWorkerId: s.selectedWorkerId === id ? null : s.selectedWorkerId,
+      codeWorkPanelOpen: s.selectedWorkerId === id ? false : s.codeWorkPanelOpen,
+    })),
 }));
 
 export const selectApprovals = (s: HudStore): ApprovalRecord[] => s.approvals;
