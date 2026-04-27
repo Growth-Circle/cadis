@@ -226,7 +226,7 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [ ] Prototype shows daemon connected, disconnected, and reconnecting states.
 - [ ] Prototype renders active, idle, waiting, failed, and cancelled agent states.
 - [x] Prototype renders worker lifecycle updates through `worker.*` daemon events.
-- [ ] Prototype renders worker worktree state and artifact references without
+- [x] Prototype renders worker worktree state and artifact references without
   reading arbitrary local files.
 - [ ] Prototype renders approval lifecycle from `approval.requested` to `approval.resolved`.
 - [ ] Prototype keeps approval card visible after click until daemon resolution event.
@@ -235,15 +235,15 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 
 ## 18. Code Work Artifact View
 
-- [ ] Open read-only code work window for code-heavy worker output.
-- [ ] Render worker summary artifact.
-- [ ] Render patch preview from `patch.diff` or daemon-provided patch summary.
+- [x] Open read-only code work panel for selected worker output.
+- [x] Render worker summary from daemon worker state.
+- [x] Render patch artifact reference from daemon worker artifact metadata.
 - [ ] Render changed files from `changed-files.json`.
-- [ ] Render test results from `test-report.json` and `test.result`.
-- [ ] Render bounded terminal log summaries from `worker.log.delta`.
+- [x] Render test report artifact reference/status from daemon worker metadata.
+- [x] Render bounded terminal log summaries from `worker.log.delta`.
 - [ ] Keep apply action as a daemon request that requires patch approval.
 - [ ] Keep cleanup/discard action as a daemon request that requires cleanup approval.
-- [ ] Confirm HUD/code work window never executes tools directly.
+- [x] Confirm HUD/code work panel never executes tools directly.
 - [ ] Confirm parent checkout patch apply still goes through approval-gated
   `file.patch` or a future patch-apply tool.
 
@@ -257,7 +257,7 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [ ] Approval card waits for resolved event.
 - [ ] Gateway reconnect/backoff test.
 - [ ] Protocol event mapping tests.
-- [ ] Code work artifact view reducer/render tests.
+- [x] Code work artifact view reducer/render tests.
 - [ ] Screenshot parity: 1600x1000.
 - [ ] Screenshot parity: 1920x1080.
 - [ ] No OpenClaw text/path remains in UI.

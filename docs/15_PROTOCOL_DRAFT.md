@@ -96,6 +96,8 @@ workspace.grant
 workspace.revoke
 workspace.doctor
 worker.tail
+worker.result
+worker.cleanup
 models.list
 ui.preferences.get
 ui.preferences.set
@@ -146,23 +148,43 @@ The desktop MVP replays log lines from the in-memory worker registry as
 up to 64 recent lines, capped at 1000. Unknown workers are rejected with
 `worker_not_found`.
 
+`worker.result` is a one-shot request for compact daemon-owned worker result
+collection. It returns the linked terminal `agent.session.*` event when known,
+then the terminal `worker.completed`, `worker.failed`, or `worker.cancelled`
+event. It does not replay `worker.log.delta` lines. Unknown workers are
+rejected with `worker_not_found`; workers without a terminal result are rejected
+with `worker_result_unavailable`.
+
+`worker.cleanup` is a metadata-only cleanup planning request. The daemon accepts
+only terminal workers with a project-local CADIS-owned worker worktree record
+under `<project>/.cadis/worktrees/<worker-id>/`. If a caller supplies
+`worktree_path`, it must resolve to the daemon-recorded worker path. Unknown
+workers, missing project-local metadata, missing worktree paths, removed records,
+or non-CADIS paths are rejected and do not mutate metadata. Accepted requests
+move the worker worktree to `cleanup_pending`, emit
+`worker.cleanup.requested`, and do not delete files.
+
 `worker.started`, `worker.completed`, `worker.failed`, and `worker.cancelled`
 may include worktree and artifact metadata. Failed worker events include optional
 `error_code` and redacted `error`; cancelled worker events include optional
-`cancellation_requested_at`. For session-bound project workspaces, the daemon
-worker runtime creates `<project>/.cadis/worktrees/<worker-id>/`, emits the
-active worktree path in `worker.started`, and writes profile-scoped artifacts
-before `worker.completed` or `worker.failed`. Terminal worker events move active
-worktrees to `review_pending` or `cleanup_pending` according to cleanup policy;
-patch apply and cleanup remain separate approval-gated flows.
+`cancellation_requested_at`. Worker lifecycle events include optional
+`agent_session_id` when the worker was created for a daemon-owned AgentSession.
+For session-bound project workspaces, the daemon worker runtime creates
+`<project>/.cadis/worktrees/<worker-id>/`, emits the active worktree path in
+`worker.started`, and writes profile-scoped artifacts before `worker.completed`
+or `worker.failed`. Terminal worker events move active worktrees to
+`review_pending` or `cleanup_pending` according to cleanup policy; patch apply
+and cleanup remain separate flows, and this cleanup slice records intent without
+removing files.
 
-The next worker command/test slice uses this same event shape. Commands and
-tests must be executed by `cadisd` through approval-gated `shell.run` with cwd
-inside the CADIS-owned worker worktree. HUD, Tauri, and code work window clients
-must not spawn local shells, run tests, apply patches, or delete worktrees.
-Command/test output is collected as bounded `worker.log.delta` summaries and
-profile-scoped artifacts such as `summary.md`, `patch.diff`,
-`changed-files.json`, `test-report.json`, and `memory-candidates.jsonl`.
+The worker command baseline uses this same event shape. When a worker reaches
+completion, `cadisd` runs a bounded validation command with cwd inside the
+CADIS-owned worker worktree and records the redacted command report in bounded
+`worker.log.delta` summaries plus profile-scoped artifacts such as
+`summary.md`, `patch.diff`, `changed-files.json`, `test-report.json`, and
+`memory-candidates.jsonl`. HUD, Tauri, and code work panel clients must not
+spawn local shells, run tests, apply patches, or delete worktrees. Future
+configurable worker commands/tests must stay daemon-owned and policy-gated.
 
 Example:
 
@@ -175,6 +197,20 @@ Example:
   "payload": {
     "worker_id": "worker_000001",
     "lines": 20
+  }
+}
+```
+
+Example:
+
+```json
+{
+  "protocol_version": "0.1",
+  "request_id": "req_...",
+  "client_id": "cli_...",
+  "type": "worker.result",
+  "payload": {
+    "worker_id": "worker_000001"
   }
 }
 ```
@@ -299,13 +335,15 @@ such as `.env`, key files, token files, credential files, and replace-context
 mismatches. Unified diff application is reserved for a later patch backend.
 Patch writes should be atomic where practical.
 
-Worker integration uses the same protocol flow. Worker command/test execution
-runs inside the worker worktree through daemon-owned approved `shell.run`.
-Applying a worker artifact to the parent workspace is a separate `file.patch` or
-future patch-apply tool call with its own approval; `worker.completed` alone
-does not authorize parent-checkout mutation. Cleanup/removal of a worker
-worktree is also a separate approval-gated flow and must require a CADIS-owned
-worker/worktree record.
+Worker integration uses the same protocol flow. The current worker command
+baseline runs only the daemon-owned validation command inside the active worker
+worktree and records bounded redacted output in events/artifacts. Future
+configurable worker commands/tests must use daemon-owned policy and cwd inside
+the worker worktree. Applying a worker artifact to the parent workspace is a
+separate `file.patch` or future patch-apply tool call with its own approval;
+`worker.completed` alone does not authorize parent-checkout mutation.
+Cleanup/removal of a worker worktree is also a separate approval-gated flow and
+must require a CADIS-owned worker/worktree record.
 
 `patch.created` and `test.result` are summary events for code-work presentation.
 They do not carry authority to mutate the parent checkout. `patch.created`
@@ -442,6 +480,7 @@ worker.log.delta
 worker.completed
 worker.failed
 worker.cancelled
+worker.cleanup.requested
 patch.created
 test.result
 voice.preview.started

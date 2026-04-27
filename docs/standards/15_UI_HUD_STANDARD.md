@@ -16,7 +16,7 @@ Rules:
 - The HUD may keep ephemeral render state.
 - The HUD must not execute tools.
 - The HUD must not approve actions locally.
-- The HUD and future code work window must not spawn shells, run tests, apply
+- The HUD and code work panel must not spawn shells, run tests, apply
   patches, or remove worker worktrees directly.
 - The HUD must not treat browser local storage as authoritative.
 - All config writes must route through daemon protocol.
@@ -251,6 +251,9 @@ ui.preferences.get
 ui.preferences.set
 voice.preview
 voice.stop
+worker.tail
+worker.result
+worker.cleanup
 window.preference.set
 ```
 
@@ -271,6 +274,7 @@ worker.log.delta
 worker.completed
 worker.failed
 worker.cancelled
+worker.cleanup.requested
 patch.created
 test.result
 orchestrator.route
@@ -282,23 +286,27 @@ voice.preview.failed
 
 ## 14. Code Work Artifact View
 
-The P14 code work window is a protocol client and a read-only review surface for
-the first implementation slice.
+The P14 code work panel is a protocol client and a read-only review surface.
+The merged baseline opens from the worker tree and renders worker status,
+summary, worktree/artifact references, test-report metadata, and recent daemon
+log tail.
 
 Rules:
 
 - Render worker status, worktree state, and artifact metadata from daemon
   `worker.*`, `patch.created`, and `test.result` events.
-- Show `summary.md`, `patch.diff`, `changed-files.json`, `test-report.json`,
-  and bounded terminal log previews only through daemon-sanctioned read-only
-  projections.
+- Show inline `summary.md`, `patch.diff`, `changed-files.json`,
+  `test-report.json`, and bounded terminal log previews only through
+  daemon-sanctioned read-only projections. The current HUD baseline shows
+  artifact references and log tail; rich inline artifact content remains future
+  work.
 - Do not read arbitrary local filesystem paths from the renderer.
 - Do not execute `shell.run`, run tests, edit files, apply patches, or delete
   worktrees from the UI process.
-- Apply actions must route to approval-gated `file.patch` or a future
-  patch-apply tool owned by `cadisd`.
-- Discard or cleanup actions must route to a separate approved cleanup flow that
-  verifies CADIS-owned worker/worktree metadata.
+- Apply actions, when enabled, must route to approval-gated `file.patch` or a
+  future patch-apply tool owned by `cadisd`.
+- Discard or cleanup actions, when enabled, must route to a separate approved
+  cleanup flow that verifies CADIS-owned worker/worktree metadata.
 
 ## 15. Open-Source Cleanup
 

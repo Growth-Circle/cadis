@@ -65,12 +65,17 @@ Implemented in the first runnable baseline:
   provider response cannot later overwrite a cancelled AgentSession.
 - Track C worker baseline: in-memory daemon worker registry, route-time
   `worker.log.delta` lifecycle logs, `events.snapshot` worker lifecycle
-  snapshots, `worker.failed` / `worker.cancelled` terminal metadata, and
-  one-shot `worker.tail` replay.
+  snapshots, `worker.failed` / `worker.cancelled` terminal metadata,
+  one-shot `worker.tail` replay, and compact `worker.result` collection that
+  returns terminal worker/AgentSession summaries plus artifact paths without
+  replaying raw logs. Worker completion now runs a bounded daemon-owned
+  validation command inside the active worker worktree and records the command
+  report in worker artifacts.
 - P13 HUD subset: Tauri + React `apps/cadis-hud` desktop app, orbital shell,
   chat command panel, agent cards, mention picker, config dialog, six themes,
   model controls, rename dialog, local mic debug, HUD-local voice doctor,
-  Edge TTS hooks, approval stack rendering, and optional Wulan Arc avatar.
+  Edge TTS hooks, approval stack rendering, read-only code work panel for
+  worker status/artifact metadata/log tail, and optional Wulan Arc avatar.
 - Wulan avatar subset: native engine direction in
   `docs/26_WULAN_AVATAR_ENGINE.md` plus `crates/cadis-avatar` for
   renderer-neutral avatar modes, gestures, face-tracking privacy state, renderer
@@ -98,12 +103,14 @@ Still pending:
   multi-step budgets, full tool cancellation, and a provider/tool-call loop
   remain future work; existing `agent.spawn` is client-requested, not
   agent-driven.
-- Worker command/test orchestration, actual worktree cleanup removal,
+- Configurable worker command/test orchestration, worker worktree file removal,
   Telegram/mobile adapters, daemon-owned production voice output, and code work
-  window. The first worker execution slice now creates git worktrees for
-  session-bound project workspaces, writes profile-scoped worker artifacts, and
-  moves terminal worktrees into review/cleanup planning states without parent
-  checkout patch application.
+  panel apply/cleanup actions. The current worker execution slice creates git
+  worktrees for session-bound project workspaces, runs a bounded daemon-owned
+  validation command in the worker worktree, writes profile-scoped worker
+  artifacts, exposes read-only `worker.result`, and records fail-closed cleanup
+  planning metadata without deleting worktree files or applying patches to the
+  parent checkout.
 - Denied-path enforcement for all mutating tools, checkpoint/rollback manager,
   dedicated profile/agent doctor commands, and media asset manifests.
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
@@ -196,16 +203,20 @@ Tasks:
 - Add a worker registry with `worker.started`, `worker.log.delta`,
   `worker.completed`, `worker.failed`, and `worker.cancelled`.
 - Implement `worker.tail` from daemon-owned worker logs.
+- Implement `worker.result` from daemon-owned terminal worker metadata and
+  linked AgentSession result summaries, excluding raw worker logs.
 - Propagate `session.cancel` into active provider streams. Baseline now checks
   pending AgentSession cancellation inside daemon provider callbacks, returns
   `ModelStreamControl::Cancel`, and prevents cancelled generations from
   finalizing as failed or completed after the cancel event.
 - Create worker worktrees and profile-scoped worker artifacts for explicit
   daemon-planned workers. Baseline now creates session-bound project worktrees
-  and writes review artifacts; real worker command/test orchestration, result
-  collection from those commands, cleanup removal, and parent patch application
-  remain future work. Any command/test execution must go through daemon-owned
-  approved tool execution inside the worker worktree, not HUD logic.
+  and writes review artifacts. Worker completion now runs a bounded daemon-owned
+  validation command inside the active worker worktree and stores the redacted
+  command report in `summary.md` and `test-report.json`. Configurable worker
+  commands/tests, cleanup removal, and parent patch application remain future
+  work. Any future configurable command/test execution must go through
+  daemon-owned policy and run inside the worker worktree, not HUD logic.
 
 Exit criteria:
 
@@ -213,11 +224,12 @@ Exit criteria:
   limits.
 - HUD worker tree is driven by daemon worker events.
 - Worker logs can be tailed from CLI and HUD.
+- Worker terminal result summaries and artifact paths can be collected without
+  replaying raw logs.
 - Cancelling a session stops the active provider stream at the next callback
   boundary and preserves the AgentSession as `cancelled`.
-- Worker command/test execution, when introduced, runs inside the CADIS-owned
-  worker worktree and produces review artifacts without touching the parent
-  checkout.
+- Worker command execution baseline runs inside the CADIS-owned worker worktree
+  and produces review artifacts without touching the parent checkout.
 
 ### Track D - Policy, Approval, and Tool Runtime
 
@@ -267,9 +279,11 @@ slice:
 Worker integration sequence:
 
 1. Track C/I creates an isolated worker worktree and profile-scoped artifacts.
-2. Worker command/test execution uses daemon-owned `tool.call` /
-   approval-gated `shell.run` with cwd inside the worker worktree. The HUD,
-   Tauri shell, and code work window must not run commands directly.
+2. Current worker command execution uses a bounded daemon-owned validation
+   command with cwd inside the worker worktree. Future configurable worker
+   commands/tests must use daemon-owned policy and stay inside the worker
+   worktree. The HUD, Tauri shell, and code work panel must not run commands
+   directly.
 3. Worker output is collected into review artifacts, normally `summary.md`,
    `patch.diff`, `changed-files.json`, `test-report.json`, and
    `memory-candidates.jsonl`, with long stdout/stderr kept out of the main chat.
@@ -426,11 +440,12 @@ Tasks:
   worktree exists.
 - Write profile-scoped worker artifacts: `summary.md`, `patch.diff`,
   `changed-files.json`, `test-report.json`, and `memory-candidates.jsonl`.
-- Execute worker commands and tests only through daemon-owned approved
-  `shell.run` with cwd inside the active worker worktree; do not run commands
-  from HUD, the code work window, or the parent checkout.
-- Collect command/test results into worker artifacts and summarize long output
-  for `worker.log.delta`, `test.result`, and code work window display.
+- Execute the daemon-owned worker validation command with cwd inside the active
+  worker worktree; do not run commands from HUD, the code work panel, or the
+  parent checkout.
+- Collect the worker command report into worker artifacts and summarize bounded
+  output for `worker.log.delta`, `worker.result`, and code work panel display.
+- Add future configurable worker test commands through daemon-owned policy.
 - Emit `worker.failed` and `worker.cancelled` with durable failure,
   cancellation, and cleanup-planning metadata.
 - Move terminal worktree metadata to `review_pending` or `cleanup_pending`;
@@ -448,8 +463,9 @@ Exit criteria:
   terminal cleanup state.
 - Worker artifacts are written under the profile artifact root and are redacted
   before persistence.
-- Command/test result collection can be inspected from daemon events and worker
-  artifacts without mutating the parent checkout.
+- Worker command result and read-only `worker.result` collection can be
+  inspected from daemon events and worker artifacts without mutating the parent
+  checkout.
 
 ## 3. P0 - Repository Foundation
 
@@ -728,9 +744,13 @@ Tasks:
 - Add git worktree creation. Baseline now creates a project-local worktree for
   session-bound git workspaces before worker execution starts.
 - Add worker log stream.
-- Add worker command/test execution through approved `shell.run` with cwd inside
-  the worker worktree.
-- Add worker cleanup planning; actual removal is a separate approved flow.
+- Add worker cleanup. Baseline now exposes metadata-only `worker.cleanup`
+  planning, requires CADIS-owned project worktree metadata, rejects
+  missing/unknown/non-owned paths, and leaves actual file removal for a later
+  approved cleanup executor.
+- Add worker command execution. Baseline now runs a bounded daemon-owned
+  validation command with cwd inside the worker worktree and records the result
+  in artifacts; configurable command/test execution remains future work.
 - Add patch collection. Baseline now writes `patch.diff`, `changed-files.json`,
   `test-report.json`, `summary.md`, and `memory-candidates.jsonl` artifact files
   under the profile worker artifact root.
@@ -753,8 +773,8 @@ Status: partially implemented. The current implementation initializes the
 default profile home, persists workspace registry/grants, exposes workspace
 protocol/CLI commands, gates safe-read tools behind active grants, initializes
 daemon-known agent homes, creates worker worktrees, and writes worker artifacts.
-Worker command/test execution, cleanup removal, checkpoint rollback, and full
-denied-path coverage remain future phases.
+Configurable worker test execution, cleanup removal, checkpoint rollback, and
+full denied-path coverage remain future phases.
 
 Tasks:
 
@@ -853,21 +873,26 @@ Tasks:
 
 - First slice: open a read-only artifact view for worker output from daemon
   events and profile-scoped artifact references.
-- Open/focus code work window for code-heavy tasks.
+- Open/focus code work window for code-heavy tasks. Baseline now opens a HUD
+  code work panel from worker cards.
 - Show file tree.
-- Show diff from `patch.diff` or daemon-provided patch preview.
+- Show diff from `patch.diff` or daemon-provided patch preview. Baseline shows
+  patch artifact references; inline diff content remains future work.
 - Show terminal output summaries and bounded logs from `worker.log.delta` /
-  artifact previews.
+  artifact previews. Baseline shows recent daemon log tail.
 - Show test results from `test-report.json` and `test.result` summaries.
+  Baseline shows test-report artifact metadata/status.
 - Provide apply/discard request actions that route back through daemon
   protocol; the window must not apply patches or delete worktrees directly.
+  Baseline apply/discard controls are disabled placeholders.
 - Link to external editor.
 
 Exit criteria:
 
 - Coding output does not flood main chat.
-- User can inspect diff, command summaries, and test results in a read-only
-  view.
+- User can inspect worker status, command summaries, recent log tail, and
+  artifact references in a read-only view; inline diff/test artifact content
+  remains future work.
 - Parent checkout patch application still goes through approval-gated
   `file.patch` or a future patch-apply tool.
 - The code work window does not execute tools; it is a protocol client of

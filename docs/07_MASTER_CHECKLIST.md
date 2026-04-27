@@ -244,19 +244,24 @@
 - [ ] Define worker state.
 - [x] Implement daemon worker registry.
 - [x] Implement `worker.tail`.
+- [x] Implement compact `worker.result` collection for terminal summaries and
+  artifact paths without raw log replay.
 - [x] Create git worktree for session-bound project workers.
 - [x] Add worker failed/cancelled event and metadata baseline.
 - [ ] Stream worker logs.
 - [ ] Add worker cancellation.
 - [x] Generate worker diff artifact.
 - [ ] Run tests in worker.
-- [ ] Execute worker commands through approval-gated `shell.run` with cwd inside the worker worktree.
-- [ ] Collect command stdout/stderr and test results into worker artifacts.
+- [x] Execute daemon-owned worker validation command with cwd inside the worker worktree.
+- [x] Collect worker command report into `summary.md` and `test-report.json` artifacts.
+- [ ] Add configurable worker command/test execution through daemon-owned policy.
 - [ ] Request patch approval.
 - [ ] Apply approved patch.
 - [ ] Route worker patch application through Track D `file.patch` or a future patch-apply tool.
 - [x] Plan terminal worker worktree states as `review_pending` or `cleanup_pending` without parent checkout patch application.
-- [ ] Remove worker worktrees only through an approved cleanup flow requiring CADIS-owned metadata.
+- [x] Keep worker cleanup separate from patch approval and require CADIS-owned worktree metadata.
+- [x] Add metadata-only `worker.cleanup` planning for terminal CADIS-owned worker worktrees.
+- [ ] Remove worker worktrees only through an approved cleanup executor requiring CADIS-owned metadata.
 - [ ] Cleanup worktree.
 - [x] Add worker isolation tests for worktree creation and artifact output.
 
@@ -343,9 +348,10 @@
 - [x] Track B: provider readiness, effective model metadata, selected-model routing, and provider streaming/cancellation contract.
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
   Baselines landed: AgentSession state/events, explicit daemon-owned spawn,
-  spawn limits, worker registry, worker tail, and provider-stream cancellation
-  on `session.cancel`. Remaining: implicit model-driven spawn, worker
-  command/test orchestration, result collection from real commands, and
+  spawn limits, worker registry, worker tail, worker result collection,
+  worker failed/cancelled events, daemon-owned worker validation command
+  execution, and provider-stream cancellation on `session.cancel`. Remaining:
+  implicit model-driven spawn, configurable worker command/test execution, and
   cleanup removal.
 - [ ] Track D: policy-backed tools and approval persistence.
 - [x] Track D baseline: tool contract metadata, safe-read `file.read` and
@@ -379,10 +385,16 @@
 - [x] Track I event baseline: worker failed/cancelled events carry durable
   failure, cancellation, and cleanup-planning metadata without parent checkout
   patch application.
-- [ ] Track I command/test execution: run approved worker commands in isolated
-  worktrees, collect results into artifacts, and keep parent checkout untouched.
-- [ ] Track P14 artifact view: code work window renders worker artifacts
-  read-only and routes apply/cleanup actions back through daemon approvals.
+- [x] Track I command execution baseline: daemon-owned validation command runs
+  in isolated worker worktrees, records result artifacts, and keeps parent
+  checkout untouched.
+- [x] Track I cleanup planning: `worker.cleanup` moves CADIS-owned terminal
+  worker worktree metadata to `cleanup_pending`, rejects unknown/missing/non-owned
+  paths, and does not delete files.
+- [x] Track P14 artifact view baseline: HUD code work panel renders worker
+  status, artifact references, and log tail read-only.
+- [ ] Track P14 apply/cleanup actions: route apply/discard through daemon
+  approvals instead of disabled placeholders.
 
 ## 15.2 Workspace Architecture
 
@@ -404,9 +416,11 @@
 - [x] Add profile `artifacts/workers/` worker artifact path helpers.
 - [x] Implement worker worktree creation under project `.cadis/worktrees/`.
 - [x] Persist worker artifacts under profile `artifacts/workers/`.
-- [ ] Execute worker command/test runs inside CADIS-owned worker worktrees.
-- [ ] Collect command/test result details into worker artifacts.
-- [ ] Implement approved worker worktree cleanup/removal flow.
+- [x] Execute daemon-owned worker validation command inside CADIS-owned worker worktrees.
+- [x] Collect worker command result details into worker artifacts.
+- [x] Implement metadata-only worker worktree cleanup planning flow.
+- [ ] Implement approved worker worktree cleanup/removal executor.
+- [ ] Add configurable worker command/test runs inside CADIS-owned worker worktrees.
 - [ ] Add project `.cadis/media/` manifests for generated media.
 - [x] Add workspace doctor checks for project metadata mismatch and duplicate roots.
 - [x] Add workspace doctor checks for stale worker worktree metadata and missing artifact roots.
@@ -415,18 +429,19 @@
 ## 16. Code Work Window
 
 - [ ] Detect code-heavy task.
-- [ ] Open code work window.
-- [ ] Render read-only worker artifact view from daemon events/artifact metadata.
-- [ ] Show diff viewer.
-- [ ] Show terminal logs.
-- [ ] Show test results.
-- [ ] Show changed files and worker summary artifacts.
+- [x] Open HUD code work panel from worker tree.
+- [x] Render read-only worker artifact view from daemon events/artifact metadata.
+- [ ] Show inline diff viewer.
+- [x] Show recent daemon worker log tail.
+- [x] Show test report artifact metadata/status.
+- [x] Show worker summary and patch artifact references.
+- [ ] Show changed-files artifact details.
 - [ ] Show file tree.
 - [ ] Add apply request action routed through approval-gated `file.patch` or a future patch-apply tool.
 - [ ] Add discard/cleanup request action routed through an approved cleanup flow.
 - [ ] Add external editor action.
-- [ ] Confirm code work window does not execute tools or read arbitrary filesystem paths directly.
-- [ ] Add code window routing tests.
+- [x] Confirm code work panel does not execute tools or read arbitrary filesystem paths directly.
+- [x] Add code window routing tests for worker tree opening and read-only artifact metadata.
 
 ## 17. Multi-Agent Tree
 
@@ -438,7 +453,7 @@
 - [x] Support spawn baseline.
 - [ ] Support kill.
 - [ ] Support tail.
-- [ ] Support result collection.
+- [x] Support result collection baseline through daemon `worker.result`.
 - [ ] Add fan-out tests.
 
 ## 18. Release Readiness

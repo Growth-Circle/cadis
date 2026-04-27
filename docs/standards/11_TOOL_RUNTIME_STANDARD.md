@@ -49,9 +49,10 @@ Current implementation baseline:
 - Worker orchestration may emit planned worktree and artifact metadata without
   invoking `git.worktree.create`; that event metadata is intent, not filesystem
   mutation.
-- Worker command/test execution is not complete until it runs through
-  daemon-owned approved `shell.run` inside CADIS-owned worker worktrees and
-  records result artifacts.
+- Worker command execution baseline runs a bounded daemon-owned validation
+  command inside CADIS-owned worker worktrees and records result artifacts.
+  Configurable worker command/test execution remains future work and must stay
+  daemon-owned, policy-gated, and isolated to the worker worktree.
 
 ## 3. Naming
 
@@ -191,10 +192,11 @@ temporary files where the platform supports it.
 
 Current baseline note: approved `shell.run` can execute after approval and
 daemon-side workspace/grant revalidation, captures bounded redacted output,
-reports exit code, and kills the process group on timeout. Minimal environment
-filtering and typed async cancellation remain hardening requirements, so broad
-worker command/test execution must not be considered complete until those are
-covered.
+reports exit code, and kills the process group on timeout. Worker completion
+also runs a fixed daemon-owned validation command inside the worker worktree and
+records its report in artifacts. Minimal environment filtering, typed async
+cancellation, and configurable worker command/test policy remain hardening
+requirements.
 
 ## 9. File Tools
 
