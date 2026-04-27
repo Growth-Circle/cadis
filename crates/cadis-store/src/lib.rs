@@ -669,6 +669,101 @@ impl WorkspaceRegistryStore {
     }
 }
 
+/// Project-local `.cadis/workspace.toml` metadata.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ProjectWorkspaceMetadata {
+    /// Workspace ID expected to match the profile registry entry.
+    pub workspace_id: String,
+    /// Workspace category.
+    pub kind: WorkspaceKind,
+    /// Version-control backend.
+    pub vcs: WorkspaceVcs,
+    /// Relative directory for CADIS worker worktrees.
+    pub worktree_root: PathBuf,
+    /// Relative directory for workspace-local artifacts.
+    pub artifact_root: PathBuf,
+    /// Relative directory for project-scoped media assets.
+    pub media_root: PathBuf,
+}
+
+impl Default for ProjectWorkspaceMetadata {
+    fn default() -> Self {
+        Self {
+            workspace_id: String::new(),
+            kind: WorkspaceKind::Project,
+            vcs: WorkspaceVcs::None,
+            worktree_root: PathBuf::from(".cadis/worktrees"),
+            artifact_root: PathBuf::from(".cadis/artifacts"),
+            media_root: PathBuf::from(".cadis/media"),
+        }
+    }
+}
+
+/// Project-local `.cadis/` metadata helper.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectWorkspaceStore {
+    root: PathBuf,
+}
+
+impl ProjectWorkspaceStore {
+    /// Creates a project metadata helper rooted at a project workspace.
+    pub fn new(root: impl AsRef<Path>) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+        }
+    }
+
+    /// Returns the project root.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Returns the project `.cadis` directory path.
+    pub fn cadis_dir(&self) -> PathBuf {
+        self.root.join(".cadis")
+    }
+
+    /// Returns the project `workspace.toml` path.
+    pub fn workspace_toml_path(&self) -> PathBuf {
+        self.cadis_dir().join("workspace.toml")
+    }
+
+    /// Ensures the non-secret project `.cadis` metadata skeleton exists.
+    pub fn ensure_layout(&self) -> Result<(), StoreError> {
+        fs::create_dir_all(self.cadis_dir())?;
+        for path in ["worktrees", "artifacts", "media"] {
+            fs::create_dir_all(self.cadis_dir().join(path))?;
+        }
+        write_template_file_if_missing(
+            &self.cadis_dir().join(".gitignore"),
+            project_gitignore_template(),
+        )?;
+        Ok(())
+    }
+
+    /// Loads project-local workspace metadata. Missing metadata returns `Ok(None)`.
+    pub fn load(&self) -> Result<Option<ProjectWorkspaceMetadata>, StoreError> {
+        let path = self.workspace_toml_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = fs::read_to_string(path)?;
+        Ok(Some(toml::from_str::<ProjectWorkspaceMetadata>(&content)?))
+    }
+
+    /// Writes project-local workspace metadata with redaction and atomic replace.
+    pub fn save(&self, metadata: &ProjectWorkspaceMetadata) -> Result<(), StoreError> {
+        self.ensure_layout()?;
+        let mut toml = redact(&toml::to_string_pretty(metadata)?);
+        if !toml.ends_with('\n') {
+            toml.push('\n');
+        }
+        atomic_write_private_file(&self.workspace_toml_path(), toml.as_bytes())
+    }
+}
+
 /// Workspace access level granted to an agent or worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1491,6 +1586,10 @@ fn profile_gitignore_template() -> &'static str {
     ".env\nsecrets/\nchannels/\nsessions/\nworkers/\ncheckpoints/\nsandboxes/\nlogs/\nlocks/\nrun/\n*.key\n*.pem\n*.token\n*.sqlite-wal\n*.sqlite-shm\n"
 }
 
+fn project_gitignore_template() -> &'static str {
+    "worktrees/\nartifacts/\ntmp/\nlogs/\n*.key\n*.pem\n*.token\n.env\n"
+}
+
 fn expand_home(path: &Path) -> PathBuf {
     let Some(value) = path.to_str() else {
         return path.to_path_buf();
@@ -2086,6 +2185,37 @@ mod tests {
             loaded.workspace[0].aliases[0].aliases,
             vec!["example", "demo"]
         );
+    }
+
+    #[test]
+    fn project_workspace_metadata_round_trips_and_initializes_layout() {
+        let config = test_config("project-workspace-metadata");
+        let root = config.cadis_home.join("project");
+        fs::create_dir_all(&root).expect("project root should be created");
+        let store = ProjectWorkspaceStore::new(&root);
+        let metadata = ProjectWorkspaceMetadata {
+            workspace_id: "example-project".to_owned(),
+            kind: WorkspaceKind::Project,
+            vcs: WorkspaceVcs::Git,
+            worktree_root: PathBuf::from(".cadis/worktrees"),
+            artifact_root: PathBuf::from(".cadis/artifacts"),
+            media_root: PathBuf::from(".cadis/media"),
+        };
+
+        assert_eq!(store.load().expect("missing metadata should load"), None);
+        store.save(&metadata).expect("project metadata should save");
+
+        assert!(store.workspace_toml_path().is_file());
+        assert!(root.join(".cadis/worktrees").is_dir());
+        assert!(root.join(".cadis/artifacts").is_dir());
+        assert!(root.join(".cadis/media").is_dir());
+        assert!(root.join(".cadis/.gitignore").is_file());
+
+        let loaded = store
+            .load()
+            .expect("project metadata should load")
+            .expect("project metadata should exist");
+        assert_eq!(loaded, metadata);
     }
 
     #[test]

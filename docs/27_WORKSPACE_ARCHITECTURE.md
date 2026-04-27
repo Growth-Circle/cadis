@@ -133,6 +133,11 @@ under `.cadis/` and must not contain secrets:
 worktree root, artifact root, and media root. It does not grant access by
 itself; the daemon must still resolve a workspace grant.
 
+Current baseline: `cadis-store` can load and write this project-local metadata,
+and `workspace doctor` reports missing files, registry ID mismatch, absolute
+project-local roots, and duplicate registered roots. Creation/initialization UX
+remains future work.
+
 ## 5. Media Assets Convention
 
 Project-scoped media assets generated or curated by CADIS should use:

@@ -33,8 +33,8 @@ use cadis_protocol::{
 };
 use cadis_store::{
     redact, ApprovalRecord, ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
-    GrantSource as StoreGrantSource, ProfileHome, StateRecoveryDiagnostic, StateStore,
-    WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
+    GrantSource as StoreGrantSource, ProfileHome, ProjectWorkspaceStore, StateRecoveryDiagnostic,
+    StateStore, WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
     WorkspaceGrantRecord as StoreWorkspaceGrantRecord, WorkspaceKind as StoreWorkspaceKind,
     WorkspaceMetadata, WorkspaceRegistry, WorkspaceVcs,
 };
@@ -2387,12 +2387,14 @@ impl Runtime {
                 status: "ok".to_owned(),
                 message: format!("{} workspace(s) registered", self.workspaces.len()),
             });
+            checks.extend(self.workspace_duplicate_root_checks());
         }
 
         if let Some(workspace_id) = request.workspace_id {
             match self.workspaces.get(&workspace_id) {
                 Some(workspace) => {
                     checks.push(root_check("workspace.root", &workspace.root));
+                    checks.extend(project_workspace_metadata_checks(workspace));
                     let active_grants = self
                         .workspace_grants
                         .values()
@@ -2414,7 +2416,10 @@ impl Runtime {
 
         if let Some(root) = request.root {
             match canonical_workspace_root(&root) {
-                Ok(root) => checks.push(root_check("request.root", &root)),
+                Ok(root) => {
+                    checks.push(root_check("request.root", &root));
+                    checks.extend(project_workspace_metadata_checks_for_root(&root));
+                }
                 Err(error) => checks.push(WorkspaceDoctorCheck {
                     name: "request.root".to_owned(),
                     status: "error".to_owned(),
@@ -2424,6 +2429,31 @@ impl Runtime {
         }
 
         checks
+    }
+
+    fn workspace_duplicate_root_checks(&self) -> Vec<WorkspaceDoctorCheck> {
+        let mut roots: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        for workspace in self.workspaces.values() {
+            roots
+                .entry(workspace.root.clone())
+                .or_default()
+                .push(workspace.id.to_string());
+        }
+
+        roots
+            .into_iter()
+            .filter_map(|(root, mut ids)| {
+                if ids.len() <= 1 {
+                    return None;
+                }
+                ids.sort();
+                Some(WorkspaceDoctorCheck {
+                    name: "registry.duplicate_root".to_owned(),
+                    status: "warn".to_owned(),
+                    message: format!("{} is registered by {}", root.display(), ids.join(", ")),
+                })
+            })
+            .collect()
     }
 
     fn resolve_tool_session(
@@ -4942,6 +4972,84 @@ fn root_check(name: &str, root: &Path) -> WorkspaceDoctorCheck {
     }
 }
 
+fn project_workspace_metadata_checks(workspace: &WorkspaceRecord) -> Vec<WorkspaceDoctorCheck> {
+    if workspace.kind != WorkspaceKind::Project {
+        return Vec::new();
+    }
+
+    let mut checks = project_workspace_metadata_checks_for_root(&workspace.root);
+    let Some(metadata) = ProjectWorkspaceStore::new(&workspace.root)
+        .load()
+        .ok()
+        .flatten()
+    else {
+        return checks;
+    };
+
+    if metadata.workspace_id != workspace.id.to_string() {
+        checks.push(WorkspaceDoctorCheck {
+            name: "workspace.metadata.id".to_owned(),
+            status: "error".to_owned(),
+            message: format!(
+                ".cadis/workspace.toml workspace_id '{}' does not match registry id '{}'",
+                metadata.workspace_id, workspace.id
+            ),
+        });
+    }
+
+    let metadata_kind = protocol_workspace_kind(metadata.kind);
+    if metadata_kind != workspace.kind {
+        checks.push(WorkspaceDoctorCheck {
+            name: "workspace.metadata.kind".to_owned(),
+            status: "warn".to_owned(),
+            message: format!(
+                ".cadis/workspace.toml kind {:?} differs from registry kind {:?}",
+                metadata_kind, workspace.kind
+            ),
+        });
+    }
+
+    for (name, path) in [
+        ("workspace.metadata.worktree_root", metadata.worktree_root),
+        ("workspace.metadata.artifact_root", metadata.artifact_root),
+        ("workspace.metadata.media_root", metadata.media_root),
+    ] {
+        if path.is_absolute() {
+            checks.push(WorkspaceDoctorCheck {
+                name: name.to_owned(),
+                status: "warn".to_owned(),
+                message: format!("{} should be project-relative", path.display()),
+            });
+        }
+    }
+
+    checks
+}
+
+fn project_workspace_metadata_checks_for_root(root: &Path) -> Vec<WorkspaceDoctorCheck> {
+    let store = ProjectWorkspaceStore::new(root);
+    match store.load() {
+        Ok(Some(_)) => vec![WorkspaceDoctorCheck {
+            name: "workspace.metadata".to_owned(),
+            status: "ok".to_owned(),
+            message: format!("{} exists", store.workspace_toml_path().display()),
+        }],
+        Ok(None) => vec![WorkspaceDoctorCheck {
+            name: "workspace.metadata".to_owned(),
+            status: "warn".to_owned(),
+            message: format!("{} is missing", store.workspace_toml_path().display()),
+        }],
+        Err(error) => vec![WorkspaceDoctorCheck {
+            name: "workspace.metadata".to_owned(),
+            status: "error".to_owned(),
+            message: format!(
+                "could not read {}: {error}",
+                store.workspace_toml_path().display()
+            ),
+        }],
+    }
+}
+
 fn tool_command_summary(tool_name: &str, input: &serde_json::Value) -> Option<String> {
     match tool_name {
         "shell.run" => input_string(input, "command").or_else(|| {
@@ -6107,6 +6215,69 @@ mod tests {
             DaemonResponse::RequestRejected(error)
                 if error.code == "workspace_root_too_broad"
         ));
+    }
+
+    #[test]
+    fn workspace_doctor_reports_project_metadata_mismatch_and_duplicate_roots() {
+        let workspace = test_workspace("doctor-metadata");
+        cadis_store::ProjectWorkspaceStore::new(&workspace)
+            .save(&cadis_store::ProjectWorkspaceMetadata {
+                workspace_id: "wrong-id".to_owned(),
+                kind: cadis_store::WorkspaceKind::Project,
+                vcs: cadis_store::WorkspaceVcs::Git,
+                worktree_root: PathBuf::from(".cadis/worktrees"),
+                artifact_root: PathBuf::from(".cadis/artifacts"),
+                media_root: PathBuf::from(".cadis/media"),
+            })
+            .expect("project workspace metadata should save");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "doctor-a", &workspace);
+        register_workspace(&mut runtime, "doctor-b", &workspace);
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_workspace_doctor"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceDoctor(WorkspaceDoctorRequest {
+                workspace_id: Some(WorkspaceId::from("doctor-a")),
+                root: None,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkspaceDoctorResponse(payload)
+                    if payload.checks.iter().any(|check| check.name == "registry.duplicate_root"
+                        && check.status == "warn")
+                        && payload.checks.iter().any(|check| check.name == "workspace.metadata.id"
+                            && check.status == "error")
+            )
+        }));
+    }
+
+    #[test]
+    fn workspace_doctor_warns_when_project_metadata_is_missing() {
+        let workspace = test_workspace("doctor-missing-metadata");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "doctor-missing", &workspace);
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_workspace_doctor"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceDoctor(WorkspaceDoctorRequest {
+                workspace_id: Some(WorkspaceId::from("doctor-missing")),
+                root: None,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkspaceDoctorResponse(payload)
+                    if payload.checks.iter().any(|check| check.name == "workspace.metadata"
+                        && check.status == "warn")
+            )
+        }));
     }
 
     #[test]

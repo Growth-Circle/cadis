@@ -233,6 +233,31 @@ These store helpers only persist metadata. Enforcement remains daemon/runtime
 owned: file, shell, git, and worker tools must resolve an active grant before
 using a project root.
 
+## 4.1 Project `.cadis/workspace.toml`
+
+Project-local metadata is optional but recommended for registered project
+workspaces:
+
+```text
+<project>/.cadis/workspace.toml
+```
+
+The store crate loads and writes this TOML shape:
+
+```toml
+workspace_id = "example-project"
+kind = "project"
+vcs = "git"
+worktree_root = ".cadis/worktrees"
+artifact_root = ".cadis/artifacts"
+media_root = ".cadis/media"
+```
+
+`workspace doctor` reads this file when present. It warns when the file is
+missing, errors when `workspace_id` does not match the profile registry entry,
+and warns when project-local roots are absolute instead of project-relative.
+The file is metadata only; it does not create a workspace grant.
+
 ## 5. Native Avatar Config Contract
 
 `crates/cadis-avatar` defines the Rust config contract for the future native

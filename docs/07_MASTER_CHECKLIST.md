@@ -351,11 +351,12 @@
 - [x] Implement workspace grants with expiry baseline.
 - [ ] Enforce denied paths across file, shell, git, and worker tools.
 - [x] Reject broad workspace roots and enforce safe-read workspace path guards.
-- [ ] Implement project `.cadis/workspace.toml` support.
+- [x] Implement project `.cadis/workspace.toml` store support.
 - [ ] Implement worker worktree creation under project `.cadis/worktrees/`.
 - [ ] Persist worker artifacts under profile `artifacts/workers/`.
 - [ ] Add project `.cadis/media/` manifests for generated media.
-- [ ] Add workspace/profile/agent doctor checks.
+- [x] Add workspace doctor checks for project metadata mismatch and duplicate roots.
+- [ ] Add profile/agent doctor checks.
 
 ## 16. Code Work Window
 
