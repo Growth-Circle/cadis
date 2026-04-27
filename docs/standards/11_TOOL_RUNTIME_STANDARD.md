@@ -76,13 +76,14 @@ Example classes:
 | Risk Class | Examples | Default |
 | --- | --- | --- |
 | safe-read | file reads inside workspace, git status | auto-allow |
-| bounded-write | patch inside workspace | policy decision |
-| command | shell command without obvious destructive behavior | policy decision |
+| workspace-edit | patch inside workspace | policy decision |
+| system-change | shell command or process execution | approval required |
 | secret-access | environment or config secret access | approval required |
-| outside-workspace-write | writing outside allowed roots | approval required |
+| outside-workspace | writing outside allowed roots | approval required |
 | dangerous-delete | recursive delete, destructive cleanup | approval required |
-| system-change | sudo, package manager, service mutation | approval required |
-| protected-git-write | push to protected branches, force push | approval required |
+| git-push-main | push to protected main branch | approval required |
+| git-force-push | force push | approval required |
+| sudo-system | sudo, package manager, service mutation | approval required |
 
 Risk classification must be conservative. If classification is ambiguous, choose the higher-risk class.
 
@@ -107,6 +108,9 @@ Rules:
 Every tool call must emit lifecycle events:
 
 ```text
+tool.requested
+approval.requested, when required
+approval.resolved, when required
 tool.started
 tool.output.delta
 tool.completed
@@ -126,6 +130,31 @@ Events must include:
 
 Output events must be bounded. Long stdout, stderr, diffs, and logs should be chunked, summarized, or routed to appropriate log storage.
 
+Current protocol support includes `tool.requested`, `tool.started`,
+`tool.completed`, `tool.failed`, `approval.requested`, and
+`approval.resolved`. A typed `tool.cancelled` event is the target terminal event
+for async tool cancellation, but it must not be treated as implemented until the
+protocol crate and runtime emit it.
+
+## 7.1 Approved Execution Revalidation
+
+Approval authorizes a daemon attempt; it does not bypass policy or grant a
+client permission to run the action.
+
+Before an approved risky tool starts, `cadisd` must revalidate:
+
+- approval exists, is still pending at response time, and is not expired
+- tool name still resolves to the same registered contract
+- normalized input still matches the approved action summary
+- workspace ID resolves to the same registered root
+- active workspace grant still permits the required access
+- target paths do not hit denied paths or symlink escapes
+- secret access is explicitly allowed by policy and approval metadata
+- linked session, AgentSession, and worker state still allow execution
+
+If any revalidation fails, the tool must emit `tool.failed` and must not emit
+`tool.started`.
+
 ## 8. Shell Tool
 
 `shell.run` is high risk and must be policy-gated.
@@ -144,6 +173,13 @@ Requirements:
 
 Commands that mutate system state, use `sudo`, install packages, delete files, alter protected git refs, or access secrets must require approval.
 
+Track D implementation must keep `shell.run` inside a registered workspace or
+CADIS-owned worker worktree. The environment starts from a minimal allowlist;
+provider keys, auth tokens, SSH agent details, and CADIS secrets are not passed
+unless a later explicit secret-access policy permits it. Cancellation must stop
+the child process and clean up any process group or temporary files where the
+platform supports it.
+
 ## 9. File Tools
 
 `file.read` and `file.search` should be safe by default only inside allowed workspaces and after secret policy checks.
@@ -161,8 +197,16 @@ the returned match list.
 - writes must be atomic where practical
 - generated patches must not overwrite unrelated edits
 - outside-workspace writes require approval
+- denied paths and symlink escapes must fail closed
+- secret-bearing paths require explicit secret-access policy
+- context mismatch or concurrent user edits must fail closed
 
 Patch application must preserve user changes and should fail closed on mismatched context.
+
+Worker patch application is not implicit. A worker may create `patch.diff` and
+`summary.md` artifacts, but applying that patch to the parent workspace is a
+separate `file.patch` or future patch-apply tool call with its own policy
+decision and approval.
 
 ## 10. Git Tools
 
@@ -194,6 +238,11 @@ Rules:
 - Cancellation must produce `tool.cancelled`.
 - Child processes must be cleaned up when possible.
 - The agent must receive a structured result after cancellation.
+
+Current implementation declares timeout and cancellation metadata in the tool
+registry, but approved mutating tools and async tool cancellation are not yet
+implemented. Until they are, risky approved placeholders must continue to fail
+closed.
 
 ## 12. Redaction and Logging
 

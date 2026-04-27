@@ -195,11 +195,10 @@ Example:
 a registered workspace and an active workspace grant before execution or
 approval flow proceeds. `agent_id` is optional; when present, it lets daemon tool
 execution satisfy agent-scoped workspace grants. The initial baseline supports
-safe read-only execution
-for `file.read`, `file.search`, and `git.status`; risky placeholders such as
-`shell.run`, `file.write`, and `file.patch` create an approval request after the
-workspace grant check and do not execute until a later runtime implements the
-gated action.
+safe read-only execution for `file.read`, `file.search`, `git.status`, and
+`git.diff`; risky placeholders such as `shell.run`, `file.write`, and
+`file.patch` create an approval request after the workspace grant check and fail
+closed after approval until a later runtime implements the gated action.
 
 Example:
 
@@ -220,6 +219,51 @@ Example:
   }
 }
 ```
+
+Track D approved execution target:
+
+```text
+tool.call
+validate input and resolve workspace
+classify risk and evaluate policy
+tool.requested
+approval.requested, if required
+approval.respond
+approval.resolved
+revalidate approval, grant, denied paths, secret posture, and session/worker state
+tool.started
+tool.output.delta, optional and bounded
+tool.completed, tool.failed, or future tool.cancelled
+```
+
+Approval is not a client-side execution grant. After `approval.respond` approves
+a risky tool, `cadisd` must revalidate the current daemon state before
+execution. If the approval expired, the workspace grant changed, a target path is
+denied, secret access is not explicitly authorized, the session was cancelled,
+or the execution backend is unavailable, the daemon emits `approval.resolved`
+followed by `tool.failed`.
+
+Current v0.1 behavior for approved risky placeholders is
+`tool.failed.error.code = "tool_execution_blocked"`. Denied approvals use
+`approval_denied`; expired approvals use `approval_expired`. Async tool
+cancellation is still future work; until a typed `tool.cancelled` event lands in
+the protocol crate, cancellation must not be marked complete in the checklist.
+
+`shell.run` input must resolve to a registered workspace or CADIS-owned worker
+worktree before execution. The execution backend must use an explicit cwd,
+filtered environment, bounded stdout/stderr, exit-code reporting, timeout, and
+cleanup on cancellation. It must not inject secrets implicitly.
+
+`file.patch` input must be previewable before approval and must apply only to
+daemon-normalized workspace-relative paths. The backend must fail closed on path
+traversal, symlink escape, denied path, mismatched context, or concurrent user
+edits. Patch writes should be atomic where practical.
+
+Worker integration uses the same protocol flow. Worker command/test execution
+runs inside the worker worktree only after Track D tool approval support exists.
+Applying a worker artifact to the parent workspace is a separate `file.patch` or
+future patch-apply tool call with its own approval; `worker.completed` alone
+does not authorize parent-checkout mutation.
 
 `workspace.register` adds or replaces a profile-local project workspace registry
 entry. CADIS persists the registry under
@@ -580,12 +624,19 @@ Safe-read tools emit `tool.requested`, `tool.started`, and then
 `approval.resolved` and `tool.failed` because risky execution is intentionally
 blocked in this baseline.
 
+The approved execution target keeps the same ordering, but inserts daemon-side
+revalidation after `approval.resolved` and before `tool.started`. A successful
+approved tool emits exactly one terminal event. Timeout is represented as
+`tool.failed` with timeout metadata. Future async tool cancellation should emit a
+typed terminal cancellation event once the protocol crate supports it.
+
 `tool.completed` may include a redacted structured `output` object. The current
 safe-read outputs are:
 
 - `file.read`: `path`, `content`, `truncated`
 - `file.search`: `query`, `matches[]`, `truncated`
 - `git.status`: `cwd`, `status`
+- `git.diff`: `cwd`, `pathspec`, `diff`, `truncated`
 
 ## 8. Compatibility Rules
 
