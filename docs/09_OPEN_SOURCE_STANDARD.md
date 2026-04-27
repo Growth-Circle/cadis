@@ -85,6 +85,9 @@ Recommended release stages:
 Planning baseline:
 
 - repository hygiene checks
+- automated PR review guardrails for public-safe diff policy checks, including
+  committed secrets, private local paths, generated artifacts, and local
+  runtime/agent state
 - GitHub repository rulesets for protected `main` and `v*` release tags
 
 After Rust code starts:
