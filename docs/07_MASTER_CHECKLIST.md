@@ -14,6 +14,7 @@
 - [x] Add discussion template.
 - [x] Add PR template.
 - [x] Add CI hygiene workflow.
+- [x] Add automated PR review guardrails for public-safe diff policy checks.
 - [x] Add macOS/Windows platform baseline workflow.
 - [x] Add Rust workspace placeholder.
 - [x] Add environment example.
