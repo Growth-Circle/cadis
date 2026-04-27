@@ -18,6 +18,26 @@ CI should catch correctness, formatting, security, documentation, dependency, an
 
 ## Required Pull Request Checks
 
+GitHub repository rulesets enforce the current required checks on protected
+refs. Rulesets should be changed through a reviewed branch and then updated in
+GitHub repository settings or the GitHub Rulesets API.
+
+Active repository rulesets:
+
+- `CADIS main branch protection` targets `refs/heads/main`, blocks deletion
+  and non-fast-forward updates, requires pull requests, requires resolved
+  review threads, and requires the CI status checks listed below.
+- `CADIS release tag protection` targets `refs/tags/v*` and blocks deletion
+  and non-fast-forward updates for release tags.
+
+Required `main` status checks:
+
+- `Repository hygiene`
+- `Rust workspace`
+- `HUD frontend`
+- `macOS Rust source baseline`
+- `Windows portable crate baseline`
+
 Baseline checks:
 
 - repository hygiene check

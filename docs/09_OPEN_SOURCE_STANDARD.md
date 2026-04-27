@@ -85,6 +85,7 @@ Recommended release stages:
 Planning baseline:
 
 - repository hygiene checks
+- GitHub repository rulesets for protected `main` and `v*` release tags
 
 After Rust code starts:
 
@@ -95,6 +96,10 @@ After Rust code starts:
 - macOS source-validation baseline and Windows portable-crate baseline, as
   documented in `docs/28_PLATFORM_BASELINE.md`
 - dependency license audit before releases
+
+`main` must stay protected by a GitHub ruleset that requires pull requests and
+the documented CI checks. Release tags matching `v*` must stay protected against
+deletion and non-fast-forward updates.
 
 ## 7. Security Standard
 
