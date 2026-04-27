@@ -9,7 +9,8 @@
 - Version: 0.1.0-planning
 - Date: 2026-04-26
 - Primary target: Linux desktop
-- Later targets: Windows, macOS, Android remote client
+- Later targets: Windows, macOS, Android remote client. Current
+  macOS/Windows validation status is defined in `docs/28_PLATFORM_BASELINE.md`.
 
 ## Executive Summary
 

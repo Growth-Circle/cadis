@@ -53,6 +53,7 @@ Before a public release, confirm these files are present and current:
 - `CHANGELOG.md`
 - `docs/17_DEVELOPER_SETUP.md`
 - `docs/18_INSTALLATION.md`
+- `docs/28_PLATFORM_BASELINE.md`
 - `docs/11_DECISIONS.md`
 - `docs/12_TEST_STRATEGY.md`
 - release workflow under `.github/workflows/`
@@ -70,12 +71,13 @@ Before binary releases, also confirm:
 
 Minimum checks before any release:
 
-- `cargo fmt --check`
+- `cargo fmt --all --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test`
+- `cargo test --all-targets --all-features`
 - `cd apps/cadis-hud && pnpm lint && pnpm typecheck && pnpm test && pnpm build`
 - `cargo check --manifest-path apps/cadis-hud/src-tauri/Cargo.toml --locked`
 - docs link/path spot check
+- platform support matrix review
 - license audit
 - changelog review
 - release notes review for accurate maturity claims
@@ -105,12 +107,13 @@ Additional checks before releases that include clients:
 3. Run required checks locally and in CI.
 4. Update `CHANGELOG.md`.
 5. Update installation, configuration, and known limitation docs.
-6. Confirm `NOTICE` and dependency license status.
-7. Confirm generated artifacts are reproducible and local credential files are excluded.
-8. Create the release tag.
-9. Publish artifacts through the release workflow.
-10. Publish release notes with limitations and upgrade guidance.
-11. Monitor issue reports after release.
+6. Confirm `docs/28_PLATFORM_BASELINE.md` matches the release artifacts and CI.
+7. Confirm `NOTICE` and dependency license status.
+8. Confirm generated artifacts are reproducible and local credential files are excluded.
+9. Create the release tag.
+10. Publish artifacts through the release workflow.
+11. Publish release notes with limitations and upgrade guidance.
+12. Monitor issue reports after release.
 
 ## Release Notes Requirements
 
@@ -168,6 +171,7 @@ Before beta, CADIS should have:
 - `CHANGELOG.md`
 - `docs/08_ROADMAP.md`
 - `docs/09_OPEN_SOURCE_STANDARD.md`
+- `docs/28_PLATFORM_BASELINE.md`
 - `docs/11_DECISIONS.md`
 - `docs/12_TEST_STRATEGY.md`
 - `docs/17_DEVELOPER_SETUP.md`

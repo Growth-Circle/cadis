@@ -326,6 +326,48 @@ describe("cadisActions", () => {
     });
   });
 
+  it("tracks daemon voice preview lifecycle events", () => {
+    handleCadisFrameForTest({
+      frame: "event",
+      payload: {
+        type: "voice.preview.started",
+        payload: {},
+      },
+    });
+
+    expect(useHud.getState().voiceState).toBe("speaking");
+
+    handleCadisFrameForTest({
+      frame: "event",
+      payload: {
+        type: "voice.preview.completed",
+        payload: {},
+      },
+    });
+
+    expect(useHud.getState().voiceState).toBe("idle");
+
+    handleCadisFrameForTest({
+      frame: "event",
+      payload: {
+        type: "voice.started",
+        payload: {},
+      },
+    });
+
+    expect(useHud.getState().voiceState).toBe("speaking");
+
+    handleCadisFrameForTest({
+      frame: "event",
+      payload: {
+        type: "voice.failed",
+        payload: { code: "provider_failed", message: "failed", retryable: false },
+      },
+    });
+
+    expect(useHud.getState().voiceState).toBe("idle");
+  });
+
   it("publishes HUD bridge preflight checks to the daemon", async () => {
     connect();
     await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));

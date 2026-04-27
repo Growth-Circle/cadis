@@ -606,13 +606,15 @@ Initial:
 The desktop daemon keeps an in-memory bounded replay buffer for recent runtime
 events. The baseline buffer is process-local and is not a durable event store.
 
-- Unix socket for Linux.
+- Unix socket for the Linux runtime/HUD target.
 - Stdio for tests.
 - Newline-delimited JSON frames.
 
 Later:
 
 - WebSocket for HUD and remote relay.
+- Windows and macOS runtime transport adapters are not supported yet; see
+  `docs/28_PLATFORM_BASELINE.md`.
 
 ## 10. HUD Request Drafts
 

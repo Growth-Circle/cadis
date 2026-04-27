@@ -399,6 +399,19 @@ function handleMessage(type: string, payload: unknown, sessionId?: string): void
     handleVoiceDoctor(payload);
     return;
   }
+  if (type === "voice.preview.started" || type === "voice.started") {
+    useHud.getState().setVoiceState("speaking");
+    return;
+  }
+  if (
+    type === "voice.preview.completed" ||
+    type === "voice.preview.failed" ||
+    type === "voice.completed" ||
+    type === "voice.failed"
+  ) {
+    useHud.getState().setVoiceState("idle");
+    return;
+  }
   if (type === "message.delta") {
     handleMessageDelta(payload, sessionId);
     return;

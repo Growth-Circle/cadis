@@ -33,6 +33,7 @@ The repository should maintain:
 - `docs/15_PROTOCOL_DRAFT.md` for daemon protocol concepts
 - `docs/16_CONFIG_REFERENCE.md` for user-facing configuration
 - `docs/17_DEVELOPER_SETUP.md` and `docs/18_INSTALLATION.md` for local setup
+- `docs/28_PLATFORM_BASELINE.md` for supported platform and validation claims
 - `docs/standards/` for operational standards
 - `skills/` docs for repeatable CADIS-specific workflows
 
@@ -48,6 +49,7 @@ Update documentation in the same change when code or policy changes affect:
 - configuration keys or defaults
 - persisted state, logs, or recovery behavior
 - install, build, or release steps
+- supported platform, runtime, or CI baseline claims
 - public contribution, governance, or support processes
 - security assumptions, boundaries, or mitigations
 
@@ -118,3 +120,4 @@ Recommended future automated checks:
 - `docs/11_DECISIONS.md`
 - `docs/13_GLOSSARY.md`
 - `docs/24_CONTRIBUTOR_SKILLS.md`
+- `docs/28_PLATFORM_BASELINE.md`

@@ -54,6 +54,22 @@ provider credentials, microphone access, camera access, or audio devices.
 Voice doctor behavior should be covered by deterministic unit tests where
 possible; live mic and player checks remain local smoke tests.
 
+Platform baseline checks:
+
+- macOS may run Rust workspace source validation with `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and
+  `cargo test --workspace --all-targets --all-features`.
+- Windows must check only portable crates until daemon/CLI transport, shell,
+  path, sandbox, HUD, and audio adapters exist.
+
+Current Windows portable crate commands:
+
+```text
+cargo check -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features
+cargo clippy -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features -- -D warnings
+cargo test -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features
+```
+
 Security and dependency checks once tooling is configured:
 
 ```text
@@ -98,6 +114,7 @@ v0.x.y-rc.N
 Recommended workflows:
 
 - `.github/workflows/ci.yml`
+- `.github/workflows/platform-baseline.yml`
 - `.github/workflows/security.yml`
 - `.github/workflows/docs.yml`
 - `.github/workflows/release.yml`
@@ -125,6 +142,9 @@ CI should protect daemon-first boundaries with targeted checks as the codebase g
   execution is explicitly implemented
 - native avatar crates must remain renderer/state boundaries and must not call
   tools, approvals, models, memory, or policy APIs
+- platform checks must not imply unsupported runtime coverage; Windows remains
+  portable-crate-only until transport, shell, path, sandbox, HUD, and audio
+  adapters are implemented
 
 Some of these checks may start as review checklist items and become automated as package boundaries stabilize.
 
@@ -161,6 +181,7 @@ pnpm build
 cargo check --manifest-path src-tauri/Cargo.toml --locked
 ```
 
+Platform baseline CI is documented in `docs/28_PLATFORM_BASELINE.md`.
 Additional documented commands should be added as CI expands, including docs checks, dependency checks, and package smoke tests.
 
 ## Failure Handling
@@ -179,4 +200,5 @@ When CI fails:
 - `docs/09_OPEN_SOURCE_STANDARD.md`
 - `docs/12_TEST_STRATEGY.md`
 - `docs/14_SECURITY_THREAT_MODEL.md`
+- `docs/28_PLATFORM_BASELINE.md`
 - `docs/standards/07_RELEASE_STANDARD.md`

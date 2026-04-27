@@ -35,4 +35,7 @@ Supporting documents:
 - `23_UI_DESIGN_SYSTEM.md`
 - `24_CONTRIBUTOR_SKILLS.md`
 - `25_MEMORY_CONCEPT.md`
+- `26_WULAN_AVATAR_ENGINE.md`
+- `27_WORKSPACE_ARCHITECTURE.md`
+- `28_PLATFORM_BASELINE.md`
 - `standards/`

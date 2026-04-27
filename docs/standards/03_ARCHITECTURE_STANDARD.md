@@ -150,6 +150,9 @@ Initial transport is local-only:
 - Unix domain socket for Linux MVP.
 - Stdio for tests and scripted clients.
 - WebSocket later for HUD and remote relay only after protocol behavior is stable.
+- Windows and macOS runtime transport support requires explicit adapters and
+  validation; current platform status is documented in
+  `docs/28_PLATFORM_BASELINE.md`.
 
 Rules:
 

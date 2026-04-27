@@ -106,22 +106,27 @@ The following areas require tests before the related feature is considered compl
 The default CI gate for Rust code is:
 
 ```bash
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo test --all-targets --all-features
 ```
 
 When the HUD exists, UI CI must include:
 
 ```bash
-npm test
-npm run lint
-npm run build
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
 Equivalent commands are acceptable if the final HUD toolkit is not Node-based.
 
 CI must publish clear logs for failing tests and must not upload secrets, local config, or raw event logs containing unredacted data.
+
+Platform CI must follow `docs/28_PLATFORM_BASELINE.md`: macOS is a Rust
+source-validation baseline, and Windows checks only portable crates until
+runtime transport, shell, path, sandbox, HUD, and audio adapters exist.
 
 ## 7. Performance Tests
 

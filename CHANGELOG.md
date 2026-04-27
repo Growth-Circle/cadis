@@ -20,6 +20,10 @@ The format follows Keep a Changelog style, and the project will use Semantic Ver
   paused message generation.
 - Runtime tool definitions now declare richer contract metadata (description, side effects, timeout, workspace scope, cancellation behavior, and secret/network posture), with approval summaries reflecting that contract.
 - Agent Runtime baseline with daemon-owned `AgentSession` lifecycle events, per-route timeout and step-budget metadata, cancellation metadata, and explicit `/worker` or `/spawn` orchestration through core spawn limits.
+- Native safe-read `git.diff` execution, pending approval restart recovery, and
+  daemon/HUD voice lifecycle event handling.
+- Platform baseline documentation and GitHub Actions coverage for macOS Rust
+  source validation and Windows portable-crate validation.
 
 ### Changed
 
