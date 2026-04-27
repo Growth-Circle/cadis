@@ -96,6 +96,11 @@ Every tool declares risk class, expected side effects, workspace behavior, netwo
 - Tool failures include actionable metadata after redaction.
 - Tool tests cover allow, deny, timeout, cancellation, and malformed arguments.
 
+`cadis-policy` provides structured classification primitives for workspace
+mutation, shell execution risk hints, secret access, and dangerous delete. These
+helpers classify risk only; they do not execute tools. Unclassified mutations
+must fail closed with a deny decision.
+
 ## 9. Local Protocol Security
 
 - Local-only transport is the default.
