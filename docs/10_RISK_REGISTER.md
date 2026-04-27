@@ -25,7 +25,7 @@ CADIS has high potential but also high risk because it will execute local tools,
 | R-015 | Dependency bloat slows runtime | Medium | Medium | Dependency review; optional features | Maintainer |
 | R-016 | Desktop framework choice delays core | Medium | Medium | Delay HUD until runtime is stable | UI |
 | R-017 | Users expect production readiness too early | Medium | High | Clear status labels and known limitations | Maintainer |
-| R-018 | Windows/macOS differences are underestimated | Medium | Medium | Linux-first scope; platform adapters later | Platform |
+| R-018 | Windows/macOS differences are underestimated | Medium | Medium | Linux-first scope; platform baseline matrix; adapters later | Platform |
 | R-019 | Model tool-call formats differ too much | Medium | Medium | Capability metadata; fallback protocol | Models |
 | R-020 | Tests lag behind security behavior | High | Medium | Require tests for policy, tools, store | Maintainer |
 

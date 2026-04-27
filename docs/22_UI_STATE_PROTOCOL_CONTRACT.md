@@ -558,11 +558,13 @@ Drive voice test UI.
 
 ```json
 {
-  "type": "voice.preview.completed",
-  "provider": "edge",
-  "voice_id": "id-ID-GadisNeural"
+  "type": "voice.preview.completed"
 }
 ```
+
+`voice.preview.started` and `voice.preview.completed` currently carry empty
+payloads. Provider and voice selection remain visible through
+`voice.status.updated`.
 
 ### `voice.status.updated`, `voice.doctor.response`, `voice.preflight.response`
 

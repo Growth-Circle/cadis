@@ -15,9 +15,11 @@ client request -> local protocol -> daemon session -> event bus -> model/tool st
 | Platform | Phase | Notes |
 | --- | --- | --- |
 | Linux desktop | First | Primary development and MVP target |
-| Windows | Later | Requires shell, sandbox, path, and audio adapter work |
-| macOS | Later | Requires sandbox and audio adapter work |
+| macOS | Baseline validation | Rust source validation only until sandbox, audio, packaging, and runtime support are documented |
+| Windows | Portable baseline | Portable-crate validation only until transport, shell, sandbox, path, and audio adapter work lands |
 | Android | Later | Remote controller first, not local coding runtime |
+
+The current support matrix is maintained in `docs/28_PLATFORM_BASELINE.md`.
 
 ## 3. Proposed Workspace Structure
 

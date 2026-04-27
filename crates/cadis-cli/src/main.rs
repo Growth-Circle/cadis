@@ -1618,6 +1618,10 @@ fn tool_input_from_args(tool_name: &str, args: &[String]) -> serde_json::Value {
         "git.status" => serde_json::json!({
             "path": args.first().cloned().unwrap_or_else(|| ".".to_owned())
         }),
+        "git.diff" => serde_json::json!({
+            "path": args.first().cloned().unwrap_or_else(|| ".".to_owned()),
+            "pathspec": args.get(1).cloned()
+        }),
         "shell.run" => serde_json::json!({
             "command": args.join(" ")
         }),

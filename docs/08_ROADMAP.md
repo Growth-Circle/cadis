@@ -211,6 +211,8 @@ Exit criteria:
 - Windows desktop.
 - macOS desktop.
 - Android remote controller.
+- Promote macOS/Windows beyond the baselines in `docs/28_PLATFORM_BASELINE.md`
+  only after platform adapters and CI coverage exist.
 - Daemon-owned memory runtime based on Wulan's `25_MEMORY_CONCEPT.md`.
 - Offline TTS provider.
 - Additional model providers.

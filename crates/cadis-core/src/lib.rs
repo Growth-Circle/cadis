@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
@@ -48,6 +48,7 @@ use serde::{Deserialize, Serialize};
 const FILE_READ_LIMIT_BYTES: usize = 64 * 1024;
 const FILE_SEARCH_LIMIT_BYTES: u64 = 1024 * 1024;
 const FILE_SEARCH_DEFAULT_LIMIT: usize = 50;
+const GIT_DIFF_LIMIT_BYTES: usize = 128 * 1024;
 const APPROVAL_TIMEOUT_MINUTES: i64 = 5;
 const WORKER_TAIL_DEFAULT_LINES: usize = 64;
 const WORKER_TAIL_MAX_LINES: usize = 1_000;
@@ -314,6 +315,10 @@ impl Runtime {
         diagnostics.extend(worker_recovery.diagnostics);
         let mut workers = worker_recovery.records;
         diagnostics.extend(reconcile_recovered_workers(&state_store, &mut workers));
+        let approval_recovery = recover_approval_records(&state_store);
+        diagnostics.extend(approval_recovery.diagnostics);
+        let next_approval = next_approval_counter(&approval_recovery.records);
+        let pending_approvals = pending_approval_records(approval_recovery.records);
         let next_session = next_session_counter(&sessions);
         let next_agent = next_agent_counter(&agents);
         let next_worker = next_worker_counter(&workers);
@@ -343,13 +348,13 @@ impl Runtime {
             approval_store,
             state_store,
             profile_home,
-            pending_approvals: HashMap::new(),
+            pending_approvals,
             workspaces,
             workspace_grants,
             last_voice_preflight: None,
             recovery_diagnostics: diagnostics,
             next_tool: 1,
-            next_approval: 1,
+            next_approval,
             next_workspace_grant,
         }
     }
@@ -760,17 +765,7 @@ impl Runtime {
 
                 events.push(self.session_event(
                     session_id,
-                    CadisEvent::ApprovalRequested(ApprovalRequestPayload {
-                        approval_id,
-                        session_id: record.session_id,
-                        tool_call_id,
-                        risk_class,
-                        title: record.title,
-                        summary: record.summary,
-                        command,
-                        workspace,
-                        expires_at,
-                    }),
+                    CadisEvent::ApprovalRequested(approval_request_payload(&record)),
                 ));
                 self.accept(request_id, events)
             }
@@ -2003,6 +1998,17 @@ impl Runtime {
         records
     }
 
+    fn pending_approval_records_sorted(&self) -> Vec<ApprovalRecord> {
+        let mut records = self
+            .pending_approvals
+            .values()
+            .map(|pending| pending.record.clone())
+            .filter(|record| !approval_is_expired(record))
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| left.approval_id.cmp(&right.approval_id));
+        records
+    }
+
     fn snapshot_events(&mut self) -> Vec<EventEnvelope> {
         let agents = self
             .agent_records_sorted()
@@ -2076,6 +2082,13 @@ impl Runtime {
                 CadisEvent::WorkerStarted(payload)
             };
             events.push(self.session_event(session_id, event));
+        }
+
+        for record in self.pending_approval_records_sorted() {
+            events.push(self.session_event(
+                record.session_id.clone(),
+                CadisEvent::ApprovalRequested(approval_request_payload(&record)),
+            ));
         }
 
         events
@@ -2604,6 +2617,7 @@ impl Runtime {
                 "file.read" => self.execute_file_read(workspace, &request.input),
                 "file.search" => self.execute_file_search(workspace, &request.input),
                 "git.status" => self.execute_git_status(workspace, &request.input),
+                "git.diff" => self.execute_git_diff(workspace, &request.input),
                 _ => Err(tool_error(
                     "tool_not_implemented",
                     format!("{tool_name} has no native execution backend"),
@@ -2745,6 +2759,69 @@ impl Runtime {
             output: serde_json::json!({
                 "cwd": display_relative_path(workspace, &cwd),
                 "status": stdout
+            }),
+        })
+    }
+
+    fn execute_git_diff(
+        &self,
+        workspace: &Path,
+        input: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, ErrorPayload> {
+        let cwd = input_string(input, "path")
+            .or_else(|| input_string(input, "cwd"))
+            .unwrap_or_else(|| ".".to_owned());
+        let cwd = resolve_inside_workspace(workspace, &cwd)?;
+        let pathspec = input_string(input, "pathspec")
+            .or_else(|| input_string(input, "target"))
+            .map(|value| validate_git_pathspec(&value))
+            .transpose()?;
+
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&cwd)
+            .args(["diff", "--no-ext-diff", "--no-color", "--"]);
+        if let Some(pathspec) = &pathspec {
+            command.arg(pathspec);
+        }
+
+        let output = command
+            .output()
+            .map_err(|error| tool_error("git_diff_failed", error.to_string(), false))?;
+        if !output.status.success() {
+            let stderr = redact(&String::from_utf8_lossy(&output.stderr));
+            return Err(tool_error(
+                "git_diff_failed",
+                if stderr.trim().is_empty() {
+                    "git diff failed".to_owned()
+                } else {
+                    stderr
+                },
+                false,
+            ));
+        }
+
+        let truncated = output.stdout.len() > GIT_DIFF_LIMIT_BYTES;
+        let visible = if truncated {
+            &output.stdout[..GIT_DIFF_LIMIT_BYTES]
+        } else {
+            &output.stdout
+        };
+        let diff = redact(&String::from_utf8_lossy(visible));
+        let summary = if diff.trim().is_empty() {
+            "no diff".to_owned()
+        } else {
+            diff.clone()
+        };
+
+        Ok(ToolExecutionResult {
+            summary,
+            output: serde_json::json!({
+                "cwd": display_relative_path(workspace, &cwd),
+                "pathspec": pathspec,
+                "diff": diff,
+                "truncated": truncated
             }),
         })
     }
@@ -4055,17 +4132,13 @@ impl ToolRegistry {
                 false,
                 false,
             ),
-            ToolDefinition::approval_placeholder(
+            ToolDefinition::safe_read(
                 "git.diff",
                 "Read git diff output for an approved workspace",
-                cadis_protocol::RiskClass::WorkspaceEdit,
-                ToolInputSchema::GitMutation,
+                ToolInputSchema::GitDiff,
                 &[ToolSideEffect::ReadGitDiff],
                 20,
-                ToolCancellationBehavior::NotSupported,
                 ToolWorkspaceBehavior::PathScoped,
-                false,
-                false,
             ),
             ToolDefinition::approval_placeholder(
                 "git.worktree.create",
@@ -4231,6 +4304,7 @@ enum ToolInputSchema {
     FileRead,
     FileSearch,
     GitStatus,
+    GitDiff,
     ShellRun,
     WorkspaceMutation,
     GitMutation,
@@ -4401,6 +4475,40 @@ fn recover_worker_records(state_store: &StateStore) -> RuntimeRecovery<String, W
             )],
         },
     }
+}
+
+fn recover_approval_records(
+    state_store: &StateStore,
+) -> RuntimeRecovery<ApprovalId, ApprovalRecord> {
+    match state_store.recover_approval_metadata::<ApprovalRecord>() {
+        Ok(recovery) => RuntimeRecovery {
+            records: recovery
+                .records
+                .into_iter()
+                .map(|record| (record.metadata.approval_id.clone(), record.metadata))
+                .collect(),
+            diagnostics: recovery_diagnostics("approval", recovery.diagnostics),
+        },
+        Err(error) => RuntimeRecovery {
+            records: HashMap::new(),
+            diagnostics: vec![recovery_error(
+                "approval_recovery_failed",
+                error.to_string(),
+                true,
+            )],
+        },
+    }
+}
+
+fn pending_approval_records(
+    records: HashMap<ApprovalId, ApprovalRecord>,
+) -> HashMap<ApprovalId, PendingApproval> {
+    records
+        .into_iter()
+        .filter(|(_, record)| record.state == ApprovalState::Pending)
+        .filter(|(_, record)| !approval_is_expired(record))
+        .map(|(approval_id, record)| (approval_id, PendingApproval { record }))
+        .collect()
 }
 
 fn reconcile_recovered_workers(
@@ -4580,6 +4688,16 @@ fn next_worker_counter(workers: &HashMap<String, WorkerRecord>) -> u64 {
     workers
         .keys()
         .filter_map(|worker_id| worker_id.strip_prefix("worker_"))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn next_approval_counter(approvals: &HashMap<ApprovalId, ApprovalRecord>) -> u64 {
+    approvals
+        .keys()
+        .filter_map(|approval_id| approval_id.as_str().strip_prefix("apr_"))
         .filter_map(|suffix| suffix.parse::<u64>().ok())
         .max()
         .unwrap_or(0)
@@ -4770,6 +4888,20 @@ fn approval_is_expired(record: &ApprovalRecord) -> bool {
     DateTime::parse_from_rfc3339(record.expires_at.as_str())
         .map(|expires_at| expires_at.with_timezone(&Utc) <= Utc::now())
         .unwrap_or(true)
+}
+
+fn approval_request_payload(record: &ApprovalRecord) -> ApprovalRequestPayload {
+    ApprovalRequestPayload {
+        approval_id: record.approval_id.clone(),
+        session_id: record.session_id.clone(),
+        tool_call_id: record.tool_call_id.clone(),
+        risk_class: record.risk_class,
+        title: record.title.clone(),
+        summary: record.summary.clone(),
+        command: record.command.clone(),
+        workspace: record.workspace.clone(),
+        expires_at: record.expires_at.clone(),
+    }
 }
 
 fn input_string(input: &serde_json::Value, key: &str) -> Option<String> {
@@ -5198,6 +5330,42 @@ fn tool_command_summary(tool_name: &str, input: &serde_json::Value) -> Option<St
         _ => input_string(input, "path"),
     }
     .map(|value| redact(&value))
+}
+
+fn validate_git_pathspec(pathspec: &str) -> Result<String, ErrorPayload> {
+    let trimmed = pathspec.trim();
+    if trimmed.is_empty() {
+        return Err(tool_error(
+            "invalid_tool_input",
+            "git.diff pathspec cannot be empty",
+            false,
+        ));
+    }
+    if trimmed.starts_with(':') {
+        return Err(tool_error(
+            "invalid_tool_input",
+            "git.diff pathspec magic is not supported",
+            false,
+        ));
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(tool_error(
+            "outside_workspace",
+            "git.diff pathspec must be relative to the workspace",
+            false,
+        ));
+    }
+
+    Ok(trimmed.to_owned())
 }
 
 fn resolve_inside_workspace(workspace: &Path, user_path: &str) -> Result<PathBuf, ErrorPayload> {
@@ -6295,6 +6463,35 @@ mod tests {
     }
 
     #[test]
+    fn voice_status_reports_daemon_visible_preferences() {
+        let mut runtime = runtime_with_voice(true, true, 420);
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_voice_status"),
+            ClientId::from("hud_1"),
+            ClientRequest::VoiceStatus(EmptyPayload::default()),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        let status = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::VoiceStatusUpdated(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("voice status should be emitted");
+        assert!(status.enabled);
+        assert_eq!(status.provider, "stub");
+        assert_eq!(status.voice_id, "id-ID-GadisNeural");
+        assert_eq!(status.stt_language, "auto");
+        assert_eq!(status.max_spoken_chars, 420);
+        assert_eq!(status.bridge, "hud-local");
+    }
+
+    #[test]
     fn voice_preview_uses_daemon_provider_stub() {
         let mut runtime = runtime_with_voice(false, false, 800);
         let outcome = runtime.handle_request(RequestEnvelope::new(
@@ -6319,6 +6516,55 @@ mod tests {
             .events
             .iter()
             .any(|event| matches!(event.event, CadisEvent::VoicePreviewStarted(_))));
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoicePreviewCompleted(_))));
+    }
+
+    #[test]
+    fn voice_preview_blocks_unspeakable_text_by_policy() {
+        let mut runtime = runtime_with_voice(false, false, 800);
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_voice_preview_empty"),
+            ClientId::from("hud_1"),
+            ClientRequest::VoicePreview(VoicePreviewRequest {
+                text: "   ".to_owned(),
+                prefs: None,
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::VoicePreviewFailed(error)
+                    if error.code == "empty_text"
+                        && error.message.contains("not speakable")
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoicePreviewStarted(_))));
+    }
+
+    #[test]
+    fn voice_stop_uses_daemon_provider_stop_contract() {
+        let mut runtime = runtime_with_voice(true, true, 800);
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_voice_stop"),
+            ClientId::from("hud_1"),
+            ClientRequest::VoiceStop(EmptyPayload::default()),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
         assert!(outcome
             .events
             .iter()
@@ -6413,6 +6659,7 @@ mod tests {
         assert!(registry.is_auto_executable_safe_read("file.read"));
         assert!(registry.is_auto_executable_safe_read("file.search"));
         assert!(registry.is_auto_executable_safe_read("git.status"));
+        assert!(registry.is_auto_executable_safe_read("git.diff"));
         assert!(!registry.is_auto_executable_safe_read("shell.run"));
 
         let shell = registry.get("shell.run").expect("shell tool exists");
@@ -6570,6 +6817,96 @@ mod tests {
             .events
             .iter()
             .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+    }
+
+    #[test]
+    fn safe_git_diff_tool_runs_without_approval() {
+        let workspace = test_workspace("git-diff");
+        init_git_workspace(&workspace);
+        fs::write(
+            workspace.join("README.md"),
+            "CADIS worker fixture\nupdated line\n",
+        )
+        .expect("tracked file should update");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "git-diff", &workspace);
+        grant_workspace(&mut runtime, "git-diff", vec![WorkspaceAccess::Read]);
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_git_diff"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "git.diff".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "git-diff",
+                    "path": ".",
+                    "pathspec": "README.md"
+                }),
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolCompleted(payload)
+                    if payload.tool_name == "git.diff"
+                        && payload.summary.as_deref().is_some_and(|summary| {
+                            summary.contains("+updated line")
+                                && summary.contains("diff --git")
+                        })
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+    }
+
+    #[test]
+    fn git_diff_rejects_parent_pathspec() {
+        let workspace = test_workspace("git-diff-pathspec");
+        init_git_workspace(&workspace);
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "git-diff-pathspec", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "git-diff-pathspec",
+            vec![WorkspaceAccess::Read],
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_git_diff_pathspec"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "git.diff".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "git-diff-pathspec",
+                    "path": ".",
+                    "pathspec": "../README.md"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "git.diff"
+                        && payload.error.code == "outside_workspace"
+            )
+        }));
     }
 
     #[test]
@@ -7445,6 +7782,125 @@ mod tests {
                     if payload.error.code == "approval_denied"
             )
         }));
+    }
+
+    #[test]
+    fn pending_approval_survives_runtime_restart_snapshot_and_denial() {
+        let cadis_home = test_workspace("approval-recovery-home");
+        let workspace = test_workspace("approval-recovery-workspace");
+        let approval_id = {
+            let mut runtime = runtime_with_home(cadis_home.clone());
+            register_workspace(&mut runtime, "approval-recovery", &workspace);
+            grant_workspace(
+                &mut runtime,
+                "approval-recovery",
+                vec![WorkspaceAccess::Exec],
+            );
+
+            let outcome = runtime.handle_request(RequestEnvelope::new(
+                RequestId::from("req_shell_approval"),
+                ClientId::from("cli_1"),
+                ClientRequest::ToolCall(ToolCallRequest {
+                    session_id: None,
+                    agent_id: None,
+                    tool_name: "shell.run".to_owned(),
+                    input: serde_json::json!({
+                        "workspace_id": "approval-recovery",
+                        "command": "echo hello"
+                    }),
+                }),
+            ));
+
+            outcome
+                .events
+                .iter()
+                .find_map(|event| match &event.event {
+                    CadisEvent::ApprovalRequested(payload) => Some(payload.approval_id.clone()),
+                    _ => None,
+                })
+                .expect("approval.requested should be emitted")
+        };
+
+        let mut runtime = runtime_with_home(cadis_home.clone());
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_approval_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalRequested(payload)
+                    if payload.approval_id == approval_id
+                        && payload.tool_call_id.as_str() == "tool_000001"
+                        && payload.summary.contains("run_subprocess")
+            )
+        }));
+
+        let next = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_second_shell_approval"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "shell.run".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "approval-recovery",
+                    "command": "echo next"
+                }),
+            }),
+        ));
+        assert!(next.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalRequested(payload)
+                    if payload.approval_id.as_str() == "apr_000002"
+            )
+        }));
+
+        let deny = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_deny_recovered"),
+            ClientId::from("cli_1"),
+            ClientRequest::ApprovalRespond(ApprovalResponseRequest {
+                approval_id: approval_id.clone(),
+                decision: ApprovalDecision::Denied,
+                reason: Some("not needed".to_owned()),
+            }),
+        ));
+
+        assert!(deny.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalResolved(payload)
+                    if payload.approval_id == approval_id
+                        && payload.decision == ApprovalDecision::Denied
+            )
+        }));
+        assert!(deny.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.error.code == "approval_denied"
+            )
+        }));
+
+        let mut restarted = runtime_with_home(cadis_home);
+        let repeated = restarted.handle_request(RequestEnvelope::new(
+            RequestId::from("req_deny_recovered_again"),
+            ClientId::from("cli_1"),
+            ClientRequest::ApprovalRespond(ApprovalResponseRequest {
+                approval_id,
+                decision: ApprovalDecision::Denied,
+                reason: Some("again".to_owned()),
+            }),
+        ));
+
+        assert!(matches!(
+            repeated.response.response,
+            DaemonResponse::RequestRejected(error)
+                if error.code == "approval_already_resolved"
+        ));
     }
 
     #[test]

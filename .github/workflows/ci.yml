@@ -20,6 +20,7 @@ jobs:
           test -f docs/01_PRD.md
           test -f docs/06_IMPLEMENTATION_PLAN.md
           test -f docs/07_MASTER_CHECKLIST.md
+          test -f docs/28_PLATFORM_BASELINE.md
           test -f docs/standards/00_STANDARD_INDEX.md
 
   rust:

@@ -50,8 +50,9 @@ Possible future distribution paths:
 
 - GitHub releases with static binaries.
 - Linux packages.
-- Homebrew for macOS later.
-- Windows installer later.
+- Homebrew for macOS after runtime validation.
+- Windows installer after transport, shell, path, sandbox, HUD, and audio
+  adapters are implemented.
 - Optional hosted relay or team features later.
 
 The core daemon should remain useful without paid infrastructure.
@@ -115,6 +116,7 @@ No monetization is required for the first release. Future options must not compr
 
 - Rust is acceptable for the entire core.
 - Linux desktop is the right first platform.
+- macOS and Windows support claims must follow `docs/28_PLATFORM_BASELINE.md`.
 - Users value local control more than browser-first convenience.
 - A daemon-first architecture will outperform UI-first assistant shells.
 - Open-source credibility requires docs and governance before hype.
@@ -132,4 +134,3 @@ No monetization is required for the first release. Future options must not compr
 - Product, business, functional, technical, architecture, roadmap, checklist, risk, and decision docs exist.
 - Open-source files exist.
 - The first implementation sprint is explicit enough to start without redesign.
-

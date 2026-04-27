@@ -354,11 +354,15 @@ Security-sensitive behavior is centralized:
 
 No adapter may bypass policy by executing tools directly.
 
-## 14. Future Cross-Platform Notes
+## 14. Platform Baseline And Future Cross-Platform Notes
 
-Linux starts with Unix sockets, POSIX shell behavior, and Linux-friendly desktop assumptions.
+Linux starts with Unix sockets, POSIX shell behavior, and Linux-friendly desktop
+assumptions. It remains the primary runtime and HUD target for the current MVP.
+The current validation matrix is documented in `docs/28_PLATFORM_BASELINE.md`.
 
-Windows and macOS need separate adapters for:
+macOS is a Rust source-validation baseline only. Windows is a portable-crate
+validation baseline only. Runtime support on either platform needs separate
+adapters for:
 
 - shell execution
 - path normalization

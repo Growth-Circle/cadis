@@ -86,7 +86,8 @@ The repository already includes a meaningful desktop MVP foundation:
 - optional Ollama, OpenAI API, and Codex CLI model adapters, with native
   streaming for Ollama and OpenAI
 - official Codex CLI adapter for ChatGPT Plus/Pro login flows
-- HUD-local Edge TTS playback, `whisper-cli` voice input, and voice doctor preflight
+- daemon-visible voice status/doctor/preflight with HUD-local Edge TTS
+  playback and `whisper-cli` voice input bridges
 
 Planned work still includes production-grade mutating tool execution, full
 policy coverage, richer worker isolation, Telegram/mobile clients,
@@ -95,6 +96,16 @@ architecture is partially implemented; real worker worktree creation,
 profile-scoped worker artifacts, and review-pending worker metadata are now in
 place. Checkpoint rollback, dedicated profile/agent doctor commands, and
 project media manifests remain next.
+
+## Platform support
+
+Linux desktop is the primary runtime and HUD target for the current MVP.
+macOS is covered as a Rust source-validation baseline. Windows is limited to
+portable-crate validation until daemon/CLI transport, shell, path, sandbox, HUD,
+and audio adapters exist.
+
+See the [Platform Baseline](docs/28_PLATFORM_BASELINE.md) for the support
+matrix and the exact macOS/Windows CI commands.
 
 ## Core capabilities
 
@@ -217,6 +228,8 @@ for C.A.D.I.S. in system settings and retry from the HUD.
 The HUD Settings -> Voice tab includes a local voice doctor that checks renderer
 mic status, WebAudio analyser/PCM fallback telemetry, `whisper-cli`, the
 configured Whisper model, Node helper execution, and available audio players.
+The daemon protocol also exposes voice status, doctor, and preflight results;
+HUD/Tauri remains the local capture and playback bridge for now.
 
 ## Repository layout
 
@@ -252,6 +265,7 @@ cadis/
 - [Memory Concept](docs/25_MEMORY_CONCEPT.md)
 - [Wulan Avatar Engine](docs/26_WULAN_AVATAR_ENGINE.md)
 - [Workspace Architecture](docs/27_WORKSPACE_ARCHITECTURE.md)
+- [Platform Baseline](docs/28_PLATFORM_BASELINE.md)
 
 ## Contributing
 

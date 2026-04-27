@@ -87,6 +87,8 @@ The external baseline is adapted to CADIS constraints:
 - Model providers are replaceable.
 - RamaClaw is the canonical HUD reference.
 - Code-heavy work is visual, not spoken.
+- Linux is the primary runtime/HUD target; macOS and Windows validation status
+  is defined in `docs/28_PLATFORM_BASELINE.md`.
 
 ## How To Use This Folder
 
@@ -97,4 +99,3 @@ When a task touches a standard area:
 3. Make the change.
 4. Update checklist and docs if behavior changes.
 5. Run the relevant validation.
-

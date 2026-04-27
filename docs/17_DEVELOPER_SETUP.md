@@ -20,13 +20,16 @@ CADIS now has a desktop MVP runtime:
   helper, and audio player checks.
 - `cadis-avatar` renderer-neutral Wulan avatar state crate.
 
-Tools, approval-gated execution, live event fan-out, worker execution,
-Telegram, production daemon-owned voice output, and full HUD parity are still
-planned work.
+Native mutating tools, risky tool execution after approval, real worker
+command/test execution, worker cleanup, Telegram, production daemon-owned voice
+provider execution, and full HUD parity are still planned work. The current
+baseline already includes live event fan-out, safe-read tools including
+`git.diff`, worker registry/tail replay, worker worktree setup, and
+daemon-visible voice status/preflight.
 
-The durable state helper baseline exists in `cadis-store`; full daemon startup
-recovery and runtime writes for sessions, agents, workers, and approvals remain
-pending core/runtime integration.
+The durable state helper baseline exists in `cadis-store`; daemon startup
+recovery now covers sessions, agents, AgentSessions, workers, and pending
+approval state.
 
 ## 2. Requirements
 
@@ -34,7 +37,9 @@ pending core/runtime integration.
 - Git.
 - Node.js 20 or newer with Corepack for the Tauri HUD frontend.
 - pnpm 10.x; the HUD package pins the exact version through `packageManager`.
-- Linux desktop for the first target.
+- Linux desktop for the primary runtime/HUD target.
+- macOS for source-validation baseline work only.
+- Windows for portable-crate validation only until runtime adapters exist.
 - Tauri Linux development packages for HUD native checks: WebKitGTK 4.1,
   Ayatana AppIndicator, librsvg, and patchelf.
 - Optional Ollama for real local model responses.
@@ -43,6 +48,8 @@ pending core/runtime integration.
 
 Cloud provider credentials are not required unless `[model].provider = "openai"`.
 ChatGPT-plan auth is handled by the official Codex CLI, not by CADIS.
+
+See `docs/28_PLATFORM_BASELINE.md` for the platform support matrix.
 
 ## 3. Clone
 
@@ -76,6 +83,24 @@ pnpm typecheck
 pnpm test
 pnpm build
 cargo check --manifest-path src-tauri/Cargo.toml --locked
+```
+
+## 4.1 Platform Baseline Checks
+
+The project-standard macOS source baseline runs:
+
+```bash
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar -p cadis-core --all-targets --all-features
+```
+
+The project-standard Windows baseline is limited to portable crates:
+
+```bash
+cargo check -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features
+cargo clippy -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features -- -D warnings
+cargo test -p cadis-protocol -p cadis-policy -p cadis-models -p cadis-avatar --all-targets --all-features
 ```
 
 ## 5. Daemon Commands
@@ -151,8 +176,9 @@ export CADIS_WHISPER_MODEL="$HOME/.local/share/cadis/whisper-models/ggml-base.bi
 export CADIS_WHISPER_LANGUAGE="id"
 ```
 
-This is a HUD-local preflight today. Daemon-owned voice provider execution and
-daemon-visible voice status are still planned.
+This is still a HUD-local capture/playback preflight. The HUD publishes the
+preflight into daemon-visible voice status, while production daemon-owned TTS
+provider execution remains planned.
 
 ## 9. Optional Ollama Setup
 

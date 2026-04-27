@@ -89,9 +89,12 @@ A contribution is done when:
 
 Required checks for Rust changes:
 
-- `cargo fmt --check`
+- `cargo fmt --all --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test`
+- `cargo test --all-targets --all-features`
+
+Platform baseline status and commands are documented in
+`docs/28_PLATFORM_BASELINE.md`.
 
 Required checks for docs-only changes:
 

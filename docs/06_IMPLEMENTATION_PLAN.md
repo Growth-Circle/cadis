@@ -50,6 +50,10 @@ Implemented in the first runnable baseline:
 - Workspace architecture docs: accepted target design for profile homes, agent
   homes, project workspaces, worker worktrees, workspace grants, denied paths,
   and project `.cadis/media/` assets in `docs/27_WORKSPACE_ARCHITECTURE.md`.
+- Platform baseline docs and CI: Linux remains the primary runtime/HUD target,
+  macOS is Rust source validation, and Windows validates only portable crates
+  until transport, shell, path, sandbox, HUD, and audio adapters exist. See
+  `docs/28_PLATFORM_BASELINE.md`.
 - Orchestrator baseline: daemon-owned `@agent` routing, `orchestrator.route`
   events, route-time `agent.status.changed` events, request-driven
   `agent.spawn`, and spawn limits.
@@ -89,9 +93,9 @@ Still pending:
   multi-step budgets, full tool cancellation, and a provider/tool-call loop
   remain future work; existing `agent.spawn` is client-requested, not
   agent-driven.
-- Daemon startup wiring for pending approval recovery. Store-level atomic write
-  and fail-safe recovery helpers exist, and the daemon now recovers durable
-  session, agent, AgentSession, and worker metadata.
+- Risky tool execution after approval. Approval records now persist and pending
+  approvals are replayed after daemon restart, but approved mutating/shell tools
+  still fail closed until native execution backends are implemented.
 - Worker cancellation/cleanup, Telegram/mobile adapters, daemon-owned
   production voice output, and code work window. The first worker execution
   slice now creates git worktrees for session-bound project workspaces and
@@ -192,6 +196,10 @@ Tasks:
   pending AgentSession cancellation inside daemon provider callbacks, returns
   `ModelStreamControl::Cancel`, and prevents cancelled generations from
   finalizing as failed or completed after the cancel event.
+- Create worker worktrees and profile-scoped worker artifacts for explicit
+  daemon-planned workers. Baseline now creates session-bound project worktrees
+  and writes review artifacts; real command/test execution, cleanup, and patch
+  application remain future work.
 
 Exit criteria:
 
@@ -213,6 +221,11 @@ Tasks:
 - Add first native tools: `file.search`, `file.read`, `shell.run`, `git.status`,
   `git.diff`.
 - Add timeouts, cancellation, and redaction boundaries.
+- Baseline now includes tool contract metadata, safe-read `file.read` and
+  `file.search`, `git.status`, `git.diff`, workspace grants, approval
+  summaries, approval persistence/recovery, and redaction boundaries. Mutating
+  tools, shell execution, and full policy-gated tool execution remain future
+  work.
 
 Exit criteria:
 
@@ -243,6 +256,9 @@ Tasks:
   `edge`, `openai`, and `system`, and speech policy that blocks code, diffs,
   terminal logs, and long raw tool/test output before provider dispatch.
 - Handle daemon voice events in HUD.
+- Baseline now exposes daemon-visible voice status/doctor/preflight, keeps the
+  HUD/Tauri bridge for local capture and playback, separates STT language from
+  TTS voice selection, and applies speech policy before TTS provider dispatch.
 
 Exit criteria:
 
@@ -408,9 +424,9 @@ Tasks:
 Exit criteria:
 
 ```bash
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo test --all-targets --all-features
 ```
 
 ## 5. P2 - Protocol and Events
@@ -782,6 +798,9 @@ Tasks:
 - Add release checks.
 - Add install docs.
 - Add provider setup docs.
+- Add platform support matrix and macOS/Windows baseline CI. Baseline now lives
+  in `docs/28_PLATFORM_BASELINE.md` and
+  `.github/workflows/platform-baseline.yml`.
 - Add security review checklist.
 - Add dependency license audit.
 - Add crash recovery tests.

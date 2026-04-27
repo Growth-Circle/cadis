@@ -14,6 +14,7 @@
 - [x] Add discussion template.
 - [x] Add PR template.
 - [x] Add CI hygiene workflow.
+- [x] Add macOS/Windows platform baseline workflow.
 - [x] Add Rust workspace placeholder.
 - [x] Add environment example.
 - [x] Add AGENT.md.
@@ -50,6 +51,7 @@
 - [x] Contributor skills guide.
 - [x] Wulan avatar engine plan.
 - [x] Workspace architecture plan.
+- [x] Platform baseline/support matrix.
 - [x] Large open-source project standards index.
 - [x] Contribution standard.
 - [x] Code standard.
@@ -130,8 +132,8 @@
 - [x] Add `cadis status`.
 - [x] Add `cadis chat`.
 - [x] Add `cadis run`.
-- [ ] Add `cadis approve`.
-- [ ] Add `cadis deny`.
+- [x] Add `cadis approve`.
+- [x] Add `cadis deny`.
 - [x] Add `cadis doctor`.
 - [x] Add JSON output mode.
 - [ ] Add CLI integration tests.
@@ -164,7 +166,7 @@
 - [ ] Implement `file.patch`.
 - [ ] Implement `shell.run`.
 - [x] Implement `git.status`.
-- [ ] Implement `git.diff`.
+- [x] Implement `git.diff`.
 - [ ] Add timeouts.
 - [ ] Add cancellation.
 - [x] Add tests for success and failure.
@@ -173,16 +175,16 @@
 
 - [ ] Define policy config.
 - [x] Define default risk rules.
-- [ ] Add approval request type.
-- [ ] Add approval resolution type.
-- [ ] Implement first-response-wins.
-- [ ] Implement approval expiry.
-- [ ] Gate shell execution.
+- [x] Add approval request type.
+- [x] Add approval resolution type.
+- [x] Implement first-response-wins.
+- [x] Implement approval expiry.
+- [x] Gate shell execution.
 - [ ] Gate outside-workspace writes.
 - [ ] Gate secret access.
 - [ ] Gate dangerous delete.
 - [ ] Add race condition tests.
-- [ ] Add denial tests.
+- [x] Add denial tests.
 
 ## 10. Persistence and Logs
 
@@ -193,7 +195,7 @@
 - [x] Write worker metadata for daemon-planned worker delegations.
 - [x] Write AgentSession metadata.
 - [x] Write JSONL event logs.
-- [ ] Write approval state.
+- [x] Write approval state.
 - [x] Add store-level atomic JSON state helpers under `~/.cadis/state`.
 - [x] Implement atomic writes for store-level JSON metadata.
 - [x] Implement redaction.
@@ -204,6 +206,7 @@
 - [x] Add daemon persistence integration tests for session/agent restart recovery.
 - [x] Add daemon persistence integration tests for worker restart recovery.
 - [x] Add daemon persistence integration tests for AgentSession restart snapshot recovery.
+- [x] Add daemon persistence integration tests for pending approval restart recovery.
 - [x] Add corrupt/partial AgentSession state fail-safe tests.
 
 ## 11. Agent Runtime
@@ -267,7 +270,7 @@
 - [x] Add HUD-local voice doctor/preflight.
 - [x] Add WebAudio PCM fallback for WebKit MediaRecorder zero-chunk mic capture.
 - [x] Promote voice doctor/preflight into daemon-visible status.
-- [ ] Handle daemon voice events in HUD.
+- [x] Handle daemon voice events in HUD.
 - [x] Add provider stub.
 - [ ] Implement first provider.
 - [x] Speak short normal answers.
@@ -331,12 +334,21 @@
   failed/cancelled events, and real command/test execution inside worker
   worktrees.
 - [ ] Track D: policy-backed tools and approval persistence.
+- [x] Track D baseline: tool contract metadata, safe-read `file.read` and
+  `file.search`, `git.status`, `git.diff`, workspace grants, approval
+  summaries, approval persistence/recovery, and redaction boundaries.
 - [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
+- [x] Track E baseline: daemon-visible voice status/doctor/preflight, separated
+  STT language and TTS voice settings, TTS provider stubs, and speech policy
+  blocking for code, diffs, logs, and long tool/test output.
 - [ ] Track F: durable metadata and restart recovery for sessions, agents, AgentSessions, workers, and approvals.
 - [x] Track F store baseline: atomic JSON helpers and fail-safe metadata recovery.
 - [x] Track F daemon baseline: session/agent metadata survives runtime restart and cancelled sessions are removed.
 - [x] Track F daemon worker baseline: worker metadata survives runtime restart and stale running workers recover as failed.
 - [x] Track F AgentSession baseline: per-route AgentSession metadata survives runtime restart, snapshots replay recovered records, and corrupt final JSON reports daemon diagnostics while partial temp files are ignored.
+- [x] Track F approval baseline: pending approval metadata survives runtime
+  restart, snapshots replay active pending approvals, and repeated responses
+  fail closed.
 - [ ] Track G: CADIS-native Wulan avatar engine.
 - [ ] Track H: profile homes, agent homes, workspace registry, grants, and worker worktrees.
 - [x] Track H baseline: default profile layout plus persistent workspace registry/grants.

@@ -88,10 +88,12 @@ Planning baseline:
 
 After Rust code starts:
 
-- `cargo fmt --check`
+- `cargo fmt --all --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test`
+- `cargo test --all-targets --all-features`
 - docs link check if practical
+- macOS source-validation baseline and Windows portable-crate baseline, as
+  documented in `docs/28_PLATFORM_BASELINE.md`
 - dependency license audit before releases
 
 ## 7. Security Standard
@@ -193,4 +195,3 @@ Do not claim production readiness before:
 - secret redaction is tested
 - install and recovery docs exist
 - known limitations are published
-

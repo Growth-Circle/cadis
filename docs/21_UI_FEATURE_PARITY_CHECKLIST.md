@@ -22,7 +22,9 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [ ] Decide HUD toolkit: Tauri + React for fastest parity or Dioxus for Rust-first UI.
 - [ ] Record toolkit decision in `docs/11_DECISIONS.md`.
 - [ ] Define `cadis-hud.v1` protocol subset or reuse CADIS protocol directly.
-- [ ] Decide whether voice preview is daemon-owned or HUD-owned.
+- [x] Decide voice ownership: daemon owns status, doctor, preview protocol,
+  stop protocol, and speech policy; HUD remains the local capture/playback
+  bridge where desktop APIs require it.
 - [ ] Decide how first-run wizard writes config.
 
 ## 4. Shell and Desktop Window

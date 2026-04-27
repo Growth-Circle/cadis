@@ -3,7 +3,10 @@
 ## Status
 
 CADIS has no packaged release yet. The desktop MVP can be built and run from
-source on Linux.
+source on Linux. macOS is currently a Rust source-validation baseline only, and
+Windows is limited to portable-crate validation until runtime transport, shell,
+path, sandbox, HUD, and audio adapters exist. See
+`docs/28_PLATFORM_BASELINE.md`.
 
 ## From Source
 
@@ -77,6 +80,8 @@ directly.
 Voice dependencies are optional unless you use HUD speech or mic input. The HUD
 Voice settings include a local doctor that checks mic status, `whisper-cli`, the
 Whisper model path, the Node helper used for Edge TTS, and local audio players.
+The daemon exposes voice status, doctor, and preflight state, but the HUD/Tauri
+bridge still owns local capture and playback mechanics.
 
 The default provider mode is `auto`: CADIS tries Ollama at
 `http://127.0.0.1:11434` and falls back to a local credential-free response if
@@ -163,11 +168,20 @@ target/release/cadis chat "hello"
 ## Known Limitations
 
 - No packaged installer yet.
-- No native file/shell tool runtime yet.
-- Approval commands exist in the CLI protocol surface but approval storage and tool gating are not implemented yet.
+- Linux is the only current source-built runtime/HUD target.
+- macOS has CI source validation but no packaged runtime or HUD support claim.
+- Windows CI checks portable crates only; daemon, CLI transport, HUD, shell,
+  and audio runtime paths are not supported yet.
+- Native file/git safe-read tools exist, including `file.read`, `file.search`,
+  `git.status`, and `git.diff`; mutating file tools and shell execution are not
+  implemented yet.
+- Approval commands, persistence, expiry, and restart recovery exist; approved
+  risky tool execution still fails closed until the native execution backends
+  are implemented.
 - Protocol types exist for orchestrator route, `session.subscribe`, and worker
   events. Live event fan-out exists for daemon-wide and session-filtered
-  streams, but worker execution is not implemented yet.
+  streams. Worker worktree setup and artifact output exist; worker command/test
+  execution and cleanup are not implemented yet.
 - Telegram, production daemon-owned voice output, full HUD parity, and code work window are not implemented yet.
 - The Tauri HUD is source-built for now; packaged desktop artifacts are not published yet.
 
@@ -176,5 +190,6 @@ target/release/cadis chat "hello"
 - Linux tarball.
 - Debian package.
 - AppImage or similar desktop package.
-- Homebrew formula for macOS later.
-- Windows installer later.
+- Homebrew formula for macOS after runtime adapters are validated.
+- Windows installer after transport, shell, path, sandbox, HUD, and audio
+  adapters are implemented and tested.

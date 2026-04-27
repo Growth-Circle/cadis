@@ -58,7 +58,11 @@ Desktop behavior:
 - close
 - background opacity preference
 
-Linux is the initial target. Toolkit selection may be Tauri + React for fastest parity or a Rust-first toolkit if it preserves the interaction contract.
+Linux is the initial HUD target. macOS has source-validation coverage only, and
+Windows HUD runtime support is blocked on transport, shell, path, sandbox, and
+audio adapters. See `docs/28_PLATFORM_BASELINE.md`. Toolkit selection may be
+Tauri + React for fastest parity or a Rust-first toolkit if it preserves the
+interaction contract.
 
 ## 5. Orbital HUD
 
