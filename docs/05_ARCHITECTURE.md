@@ -101,6 +101,7 @@ sequenceDiagram
   D->>B: SessionStarted
   B->>C: SessionStarted
   B->>L: append event
+  D->>B: OrchestratorRoute / AgentStatusChanged
   D->>M: stream response
   M-->>D: delta
   D->>B: MessageDelta
@@ -109,6 +110,11 @@ sequenceDiagram
   M-->>D: complete
   D->>B: MessageCompleted
 ```
+
+`cadisd` prepares message routing and session state under the runtime mutex, but
+model provider generation runs outside that mutex. The daemon reacquires the
+runtime only to create authoritative event envelopes, so unrelated status and
+agent-list requests can proceed while a slow provider is generating.
 
 ## 5. Approval Flow
 
@@ -247,6 +253,17 @@ max_global_agents = 12
 default_timeout_sec = 900
 allow_recursive_spawn = false
 ```
+
+The desktop MVP now wraps each routed task in an in-memory daemon-owned
+`AgentSession`. The record carries the route ID, task summary, result/error
+summary, timeout deadline, step budget, cancellation timestamp, target agent,
+and parent agent. Clients observe it through `agent.session.started`,
+`agent.session.updated`, and terminal `agent.session.completed`,
+`agent.session.failed`, or `agent.session.cancelled` events. AgentSession
+metadata is also written atomically under `~/.cadis/state/agent-sessions/` and
+loaded on daemon start so `events.snapshot` can replay recovered records.
+Provider/tool-loop execution and implicit model-driven spawning remain later
+work.
 
 ## 10. Model Provider Layer
 

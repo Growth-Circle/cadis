@@ -111,6 +111,25 @@ Sent when the HUD needs a one-shot daemon-owned state snapshot.
 The current desktop MVP snapshot is encoded as event frames, including
 `agent.list.response`, `ui.preferences.updated`, and `session.updated`.
 
+### `session.subscribe`
+
+Sent when a client wants only one session's events rather than the daemon-wide
+event stream.
+
+```json
+{
+  "type": "session.subscribe",
+  "session_id": "ses_...",
+  "replay_limit": 128,
+  "include_snapshot": true
+}
+```
+
+The daemon responds with `request.accepted`, then sends the current
+`session.updated` event, bounded replay, and live events whose envelope
+`session_id` matches the request. The HUD may use this for focused session panes
+while keeping daemon-wide `events.subscribe` as the main state feed.
+
 ### `message.send`
 
 Sent when the user submits text in the chat panel.
@@ -228,6 +247,37 @@ Sent when user clicks stop during preview or speech.
 }
 ```
 
+### `voice.status`, `voice.doctor`, and `voice.preflight`
+
+Sent by the HUD to read daemon-visible voice state and to publish local bridge
+preflight results. The HUD still owns platform capture/playback mechanics; it
+does not become authoritative for durable voice preferences, speech policy, or
+agent routing.
+
+```json
+{
+  "type": "voice.preflight",
+  "surface": "cadis-hud",
+  "summary": "ready",
+  "checks": [
+    {
+      "name": "microphone",
+      "status": "ok",
+      "message": "1 input visible"
+    },
+    {
+      "name": "MediaRecorder",
+      "status": "warn",
+      "message": "recorder available; WebAudio PCM fallback remains armed"
+    }
+  ]
+}
+```
+
+The local bridge preflight must include microphone permission/API state,
+`MediaRecorder`, analyser, WebAudio PCM fallback, whisper binary/model,
+Node helper, and audio player checks when available.
+
 ## 6. Events
 
 ### `daemon.status`
@@ -240,6 +290,18 @@ Drives connection and status bar.
   "state": "connected",
   "latency_ms": 3,
   "version": "0.1.0"
+}
+```
+
+### `session.started`
+
+Creates a visible session progress row before model output arrives.
+
+```json
+{
+  "type": "session.started",
+  "session_id": "ses_123",
+  "title": "Fix auth test"
 }
 ```
 
@@ -322,6 +384,32 @@ cancelled
 The optional `task` field on `agent.status.changed` drives the current task
 summary. A separate `agent.task.changed` event is reserved for a later protocol
 version.
+
+### `agent.session.started` / `agent.session.updated` / terminal events
+
+Tracks daemon-owned per-route agent runtime state. HUD may display these as
+task details under the agent card, but it must treat `cadisd` as authoritative
+for timeout, budget, cancellation, result, and parent-child metadata.
+
+```json
+{
+  "type": "agent.session.started",
+  "agent_session_id": "ags_000001",
+  "session_id": "ses_123",
+  "route_id": "route_000001",
+  "agent_id": "coder",
+  "parent_agent_id": "main",
+  "task": "run focused tests",
+  "status": "running",
+  "timeout_at": "2026-04-26T00:15:00Z",
+  "budget_steps": 1,
+  "steps_used": 0
+}
+```
+
+Terminal events are `agent.session.completed`, `agent.session.failed`, and
+`agent.session.cancelled`. Status values are `started`, `running`, `completed`,
+`failed`, `cancelled`, `timed_out`, and `budget_exceeded`.
 
 ### `agent.renamed`
 
@@ -415,7 +503,16 @@ Updates worker tree and optional transient worker card.
 
 `worker.log.delta` carries `worker_id`, `delta`, and optional `agent_id` /
 `parent_agent_id`. `worker.completed` carries the same metadata plus optional
-`summary`.
+`summary`. `worker.failed` and `worker.cancelled`, when emitted by later daemon
+phases, must flow through the same reducer. `worker.tail` returns recent
+daemon-owned log lines as `worker.log.delta` events for an existing worker;
+clients should apply those events through the same worker reducer used for live
+updates.
+
+HUD worker progress is derived from daemon events only. The worker tree may
+combine `agent.session.*` progress (`steps_used` / `budget_steps`) with
+`worker.*` status, log tail, worktree metadata, and artifact paths, but it must
+not create, execute, cancel, or approve workers locally.
 
 ### `orchestrator.route`
 
@@ -460,6 +557,32 @@ Drive voice test UI.
   "voice_id": "id-ID-GadisNeural"
 }
 ```
+
+### `voice.status.updated`, `voice.doctor.response`, `voice.preflight.response`
+
+Drive the voice status and doctor rows in the HUD config dialog.
+
+```json
+{
+  "type": "voice.status.updated",
+  "enabled": false,
+  "state": "disabled",
+  "provider": "edge",
+  "voice_id": "id-ID-GadisNeural",
+  "stt_language": "auto",
+  "max_spoken_chars": 800,
+  "bridge": "hud-local"
+}
+```
+
+`voice.doctor.response` and `voice.preflight.response` wrap the same status with
+`checks[]`, each containing `name`, `status`, and `message`. The HUD maps
+daemon `ok`, `warn`, and `error` statuses to its existing pass/warn/fail doctor
+presentation.
+
+Daemon-visible TTS provider IDs are `edge`, `openai`, and `system`; `stub` is
+reserved for deterministic tests. Current daemon providers are local stubs that
+validate speech policy and emit lifecycle events without external API calls.
 
 ## 7. RamaClaw Topic Mapping
 
@@ -521,11 +644,21 @@ The HUD must speak only speakable content:
 | terminal_log | no |
 | test_result | short summary only |
 
+`cadisd` applies this policy before provider dispatch. Auto-speak waits for the
+final `message.completed` event and may then emit `voice.started` and
+`voice.completed` for short speakable content. Code, diffs, terminal logs, and
+long raw tool or test output must not emit voice playback events.
+
 ## 10. Validation
 
 Protocol adaptation is valid when:
 
 - HUD can render from a mock CADIS event stream.
+- HUD shows `session.started`, `orchestrator.route`,
+  `agent.status.changed`, and `message.delta` progress before
+  `message.completed`.
+- HUD worker progress renders from the mock daemon worker stream fixture without
+  a running agent runtime.
 - All RamaClaw UI features have CADIS request/event equivalents.
 - UI preferences persist through daemon config, not localStorage.
 - Approval card lifecycle is server-confirmed.

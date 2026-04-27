@@ -19,6 +19,19 @@ first run:
 |       |-- profile.toml
 |       |-- .gitignore
 |       |-- agents/
+|       |   `-- <agent>/
+|       |       |-- AGENT.toml
+|       |       |-- PERSONA.md
+|       |       |-- INSTRUCTIONS.md
+|       |       |-- USER.md
+|       |       |-- MEMORY.md
+|       |       |-- TOOLS.md
+|       |       |-- POLICY.toml
+|       |       |-- SKILL_POLICY.toml
+|       |       |-- skills/
+|       |       |-- memory/
+|       |       |-- prompts/
+|       |       `-- sessions/
 |       |-- memory/
 |       |-- skills/
 |       |-- workspaces/
@@ -28,6 +41,7 @@ first run:
 |       |-- workers/
 |       |-- sessions/
 |       |-- artifacts/
+|       |   `-- workers/
 |       |-- checkpoints/
 |       |-- sandboxes/
 |       |-- eventlog/
@@ -44,6 +58,8 @@ first run:
 |   |   `-- <session-id>.json
 |   |-- agents/
 |   |   `-- <agent-id>.json
+|   |-- agent-sessions/
+|   |   `-- <agent-session-id>.json
 |   |-- workers/
 |   |   `-- <worker-id>.json
 |   `-- approvals/
@@ -67,6 +83,10 @@ workspace registry metadata, worker records, session records, artifacts,
 checkpoints, event logs, channels, and secrets. The store crate keeps creating
 the existing top-level paths so current daemon/core/CLI code continues to work
 while profile-aware runtime pieces are added.
+
+When `cadisd` starts, daemon-known agents get non-destructive agent-home
+templates under `profiles/<profile>/agents/<agent>/`. Existing files are not
+overwritten.
 
 ## 2. Desktop MVP Config
 
@@ -105,17 +125,28 @@ always_on_top = false
 
 [voice]
 enabled = false
+# Supported visible providers: "edge", "openai", "system".
+# "stub" is reserved for deterministic tests. Current provider implementations
+# are daemon-local stubs and do not call external APIs.
+provider = "edge"
 voice_id = "id-ID-GadisNeural"
+stt_language = "auto"
 rate = 0
 pitch = 0
 volume = 0
 auto_speak = false
+max_spoken_chars = 800
 
 [agent_spawn]
 # Applies to client-requested agent.spawn and explicit orchestrator /worker actions.
 max_depth = 2
 max_children_per_parent = 4
 max_total_agents = 32
+
+[agent_runtime]
+# Applies to daemon-owned per-route AgentSession records.
+default_timeout_sec = 900
+max_steps_per_session = 1
 
 [orchestrator]
 # Enables explicit /worker, /spawn, /route, and /delegate message actions.
@@ -124,6 +155,12 @@ default_worker_role = "Worker"
 ```
 
 An example file is available at `config/cadis.example.toml`.
+
+Voice preferences are interpreted by `cadisd`. The speech policy respects
+`enabled`, `auto_speak`, and `max_spoken_chars` before dispatching text to a
+provider. The daemon blocks code, diffs, terminal logs, and long raw tool or
+test output from speech. HUD/Tauri remains the local microphone and playback
+bridge where platform APIs require it.
 
 ## 3. Profile Home Layout
 
@@ -144,6 +181,7 @@ profile state:
 |-- workers/
 |-- sessions/
 |-- artifacts/
+|   `-- workers/
 |-- checkpoints/
 |-- sandboxes/
 |-- eventlog/
@@ -162,6 +200,98 @@ initialization is non-destructive: existing profile files are not overwritten.
 The profile home is not an execution workspace and is not a sandbox. Project
 roots must be registered separately in the workspace registry before
 profile-aware tool/runtime code grants file, shell, git, or worker access.
+
+## 3.1 Agent Home Layout
+
+The store crate provides an `AgentHome` helper. The daemon initializes homes for
+agents it knows about:
+
+```text
+~/.cadis/profiles/<profile>/agents/<agent>/
+|-- AGENT.toml
+|-- PERSONA.md
+|-- INSTRUCTIONS.md
+|-- USER.md
+|-- MEMORY.md
+|-- TOOLS.md
+|-- POLICY.toml
+|-- SKILL_POLICY.toml
+|-- skills/
+|-- memory/
+|   |-- daily/
+|   |-- decisions.md
+|   `-- delegation.md
+|-- prompts/
+|-- sessions/
+`-- README.md
+```
+
+`AGENT.toml` records stable identity and conventional file names:
+
+```toml
+[agent]
+id = "main"
+display_name = "CADIS"
+role = "Orchestrator"
+model = "auto"
+
+[files]
+persona = "PERSONA.md"
+instructions = "INSTRUCTIONS.md"
+user = "USER.md"
+memory = "MEMORY.md"
+tools = "TOOLS.md"
+policy = "POLICY.toml"
+skill_policy = "SKILL_POLICY.toml"
+```
+
+`POLICY.toml` has a machine-readable structure that doctor checks parse as
+typed TOML:
+
+```toml
+[policy]
+version = 1
+default_workspace_access = ["read"]
+allow_network = false
+allow_secret_access = false
+allow_system_change = false
+approval_required = true
+
+[sandbox]
+default = "workspace"
+denied_paths = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gcloud", "/etc", "/dev", "/proc", "/sys"]
+
+[limits]
+max_agent_toml_bytes = 65536
+max_policy_toml_bytes = 65536
+max_text_file_bytes = 131072
+max_memory_file_bytes = 1048576
+```
+
+This file is policy metadata for the agent home. Runtime authorization remains
+daemon and policy-engine owned; Track D owns enforcement across mutating tool
+execution.
+
+`workspace doctor` currently includes profile/agent-home diagnostics for
+missing, invalid TOML, and oversized agent files. Dedicated `profile doctor` and
+`agent doctor` commands remain future work.
+
+## 3.2 Worker Artifact Paths
+
+Worker output artifacts are profile-scoped, not project-scoped:
+
+```text
+~/.cadis/profiles/<profile>/artifacts/workers/<worker-id>/
+|-- patch.diff
+|-- test-report.json
+|-- summary.md
+|-- changed-files.json
+`-- memory-candidates.jsonl
+```
+
+The store crate exposes path helpers for this layout. The current runtime can
+include these planned locations in worker events; producing the files is still
+part of the future worker runtime.
 
 ## 4. Workspace Registry
 
@@ -214,6 +344,48 @@ These store helpers only persist metadata. Enforcement remains daemon/runtime
 owned: file, shell, git, and worker tools must resolve an active grant before
 using a project root.
 
+## 4.1 Project `.cadis/workspace.toml`
+
+Project-local metadata is optional but recommended for registered project
+workspaces:
+
+```text
+<project>/.cadis/workspace.toml
+```
+
+The store crate loads and writes this TOML shape:
+
+```toml
+workspace_id = "example-project"
+kind = "project"
+vcs = "git"
+worktree_root = ".cadis/worktrees"
+artifact_root = ".cadis/artifacts"
+media_root = ".cadis/media"
+```
+
+`workspace doctor` reads this file when present. It warns when the file is
+missing, errors when `workspace_id` does not match the profile registry entry,
+and warns when project-local roots are absolute instead of project-relative.
+The file is metadata only; it does not create a workspace grant.
+
+## 4.2 Project Worker Worktree Metadata
+
+Worker worktree metadata is stored below the project worktree root:
+
+```text
+<project>/.cadis/worktrees/
+|-- <worker-id>/
+`-- .metadata/
+    `-- <worker-id>.toml
+```
+
+Each worker metadata file records the worker ID, workspace ID, planned or actual
+worktree path, branch name, optional base ref, lifecycle state, and profile
+artifact root. `workspace doctor` reports invalid TOML, stale/missing worktree
+paths, and stale/missing artifact roots. These checks are diagnostics only and
+do not run `git worktree` commands.
+
 ## 5. Native Avatar Config Contract
 
 `crates/cadis-avatar` defines the Rust config contract for the future native
@@ -223,6 +395,7 @@ read by the desktop MVP config loader:
 ```toml
 [avatar]
 renderer = "wgpu_native" # "headless", "wgpu_native", "bevy_scene"
+renderer_fallback = "orb" # "orb", "static_wulan_texture"
 reduced_motion = false
 max_delta_ms = 250
 
@@ -244,6 +417,11 @@ allow_face_identity = false
 Rules:
 
 - Face tracking is off by default.
+- The current `wgpu-renderer` crate feature is a native adapter spike that builds
+  render plans from `AvatarFrame`; the desktop MVP config loader does not yet
+  instantiate a GPU surface from these keys.
+- Native Wulan renderer failure falls back to the CADIS orb by default and must
+  not block HUD launch.
 - Enabling face tracking requires explicit permission, a visible camera-active
   indicator, and a one-click disable action.
 - Face tracking data must stay local and must not be persisted by default.
@@ -303,11 +481,22 @@ that model where the provider supports model overrides. Message events include
 the effective provider and model used for the response.
 
 The `models.list` protocol response exposes conservative readiness metadata for
-clients. `readiness = "fallback"` and `fallback = true` identify entries such as
-`echo` or fallback-capable `auto` behavior so clients can distinguish a real
-provider from the local fallback. Providers that need a daemon, login, API key,
-or local service are reported as `requires_configuration` until CADIS has active
-provider probing.
+clients and uses the configured `ollama_model` and `openai_model` as
+provider/model IDs. `readiness = "fallback"` and `fallback = true` identify
+entries such as `echo` or fallback-capable `auto` behavior so clients can
+distinguish a real provider from the local fallback. `openai` is reported as
+`ready` only when an OpenAI API key is present in the daemon environment.
+Providers that need a daemon, login, API key, or local service are otherwise
+reported as `requires_configuration` until CADIS has active provider probing.
+
+Provider failures are surfaced through the normal `ErrorPayload` fields on
+`session.failed` events. Clients should key off the stable `code` and
+`retryable` fields instead of parsing the display message. Current provider
+codes include `model_auth_missing`, `model_auth_failed`,
+`provider_client_error`, `provider_unavailable`, `provider_rate_limited`,
+`provider_http_error`, `model_not_found`, `model_request_rejected`,
+`provider_response_invalid`, `provider_response_empty`, and `codex_cli_*`.
+Messages are redacted for client display and must not include provider keys.
 
 The OpenAI API key is not a config key. Do not put API keys, bearer tokens, or
 auth headers in `~/.cadis/config.toml`, examples, or logs.
@@ -348,6 +537,12 @@ under `$XDG_RUNTIME_DIR/cadis/cadisd.sock`. `VITE_CADIS_SOCKET_PATH` is a
 development-only renderer seed for the browser preview; daemon state remains
 authoritative.
 
+Daemon-owned voice preferences read `[voice].provider`, `[voice].voice_id`,
+`[voice].stt_language`, and `[voice].max_spoken_chars` for status, doctor, and
+preflight reporting. The current green slice supports `edge`, `openai`, and
+`system` provider labels at the protocol/config layer; HUD/Tauri still performs
+local capture and playback.
+
 HUD voice input reads `CADIS_WHISPER_CLI`, `WHISPER_CLI`,
 `CADIS_WHISPER_MODEL`, `WHISPER_MODEL`, `CADIS_WHISPER_LANGUAGE`, and
 `WHISPER_LANGUAGE`. `CADIS_HUD_NODE` can point the Tauri side at a specific
@@ -377,6 +572,7 @@ The store crate provides atomic JSON helpers for these exact durable files:
 ```text
 ~/.cadis/state/sessions/<session-id>.json
 ~/.cadis/state/agents/<agent-id>.json
+~/.cadis/state/agent-sessions/<agent-session-id>.json
 ~/.cadis/state/workers/<worker-id>.json
 ~/.cadis/state/approvals/<approval-id>.json
 ```
@@ -395,3 +591,9 @@ The store writes redacted pretty JSON, syncs the temporary file, renames it over
 the target `.json`, and syncs the parent directory. Recovery only reads final
 `.json` files. Partial temp files are ignored, and corrupt final JSON files are
 skipped with diagnostics instead of becoming trusted runtime state.
+
+The daemon persists per-route `AgentSession` records in
+`state/agent-sessions/` on lifecycle transitions. On restart, valid records are
+replayed through `events.snapshot` as `agent.session.*` events. Corrupt final
+AgentSession JSON is skipped and surfaced as a redacted `daemon.error`
+diagnostic; partial `.tmp` files are ignored.

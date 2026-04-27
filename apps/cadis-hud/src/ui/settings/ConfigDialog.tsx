@@ -6,6 +6,8 @@ import {
   type AvatarStyle,
   type ConfigTab,
   type ThemeKey,
+  type VoiceDiagnosticCheck,
+  type VoiceDoctorReport,
 } from "../hudState.js";
 import { VOICES } from "../../lib/voice/voices.js";
 import { stopSpeaking, testAudio } from "../../lib/voice/tts.js";
@@ -15,6 +17,8 @@ import {
   persistChatPreferences,
   persistThemePreference,
   persistVoicePreferences,
+  requestVoiceDoctor,
+  sendVoicePreflight,
   sendAgentModelUpdate,
 } from "../cadisActions.js";
 
@@ -29,17 +33,6 @@ const AVATAR_STYLES: { id: AvatarStyle; label: string; detail: string }[] = [
   { id: "orb", label: "CADIS Orb", detail: "Current RamaClaw-style core" },
   { id: "wulan_arc", label: "Wulan Arc", detail: "Hologram avatar contribution" },
 ];
-
-type VoiceDoctorCheck = {
-  name: string;
-  status: "pass" | "warn" | "fail";
-  detail: string;
-};
-
-type VoiceDoctorReport = {
-  summary: string;
-  checks: VoiceDoctorCheck[];
-};
 
 export function ConfigDialog() {
   const open = useHud((s) => s.configOpen);
@@ -100,6 +93,8 @@ export function ConfigDialog() {
 
 function VoiceTab() {
   const prefs = useHud((s) => s.voicePrefs);
+  const daemonStatus = useHud((s) => s.voiceStatus);
+  const daemonDoctor = useHud((s) => s.voiceDoctor);
   const update = useHud((s) => s.updateVoicePrefs);
   const setVoiceState = useHud((s) => s.setVoiceState);
   const mainName = useHud((s) => s.agents.find((a) => a.spec.id === "main")?.spec.name ?? "CADIS");
@@ -118,10 +113,12 @@ function VoiceTab() {
   const runDoctor = async () => {
     setDoctorBusy(true);
     setDoctorError(null);
+    requestVoiceDoctor();
     try {
       const rendererMic = await rendererMicCheck();
       const report = await invoke<VoiceDoctorReport>("voice_doctor_preflight", { rendererMic });
       setDoctor(report);
+      sendVoicePreflight(report);
     } catch (e) {
       setDoctorError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -158,6 +155,13 @@ function VoiceTab() {
     setTesting(false);
     setVoiceState("idle");
   };
+  const displayedDoctor = doctor ?? daemonDoctor;
+  const displayedChecks = [
+    ...(daemonStatus
+      ? [voiceStatusCheck(daemonStatus.state, daemonStatus.provider, daemonStatus.bridge)]
+      : []),
+    ...(displayedDoctor?.checks ?? [rendererMicPendingCheck()]),
+  ];
 
   return (
     <>
@@ -218,20 +222,28 @@ function VoiceTab() {
       <section className="voice-config__row">
         <label className="voice-config__label">
           Engine
-          <span className="voice-config__value">edge-tts-universal</span>
+          <span className="voice-config__value">
+            {daemonStatus?.provider ?? "edge"} · local bridge
+          </span>
         </label>
+        {daemonStatus?.lastPreflight && (
+          <div className="voice-config__hint">
+            last preflight: {daemonStatus.lastPreflight.status} ·{" "}
+            {daemonStatus.lastPreflight.summary}
+          </div>
+        )}
       </section>
 
       <section className="voice-config__row voice-doctor">
         <label className="voice-config__label">
           Voice doctor
           <span className="voice-config__value">
-            {doctorBusy ? "checking" : doctor?.summary ?? "not run"}
+            {doctorBusy ? "checking" : displayedDoctor?.summary ?? daemonStatus?.state ?? "not run"}
           </span>
         </label>
         {doctorError && <div className="voice-config__error">{doctorError}</div>}
         <div className="voice-doctor__grid">
-          {(doctor?.checks ?? [rendererMicPendingCheck()]).map((check) => (
+          {displayedChecks.map((check) => (
             <div key={check.name} className="voice-doctor__item">
               <span className={`voice-doctor__dot voice-doctor__dot--${check.status}`} />
               <span className="voice-doctor__name">{check.name}</span>
@@ -452,7 +464,7 @@ function WindowTab() {
   );
 }
 
-function rendererMicPendingCheck(): VoiceDoctorCheck {
+function rendererMicPendingCheck(): VoiceDiagnosticCheck {
   return {
     name: "microphone",
     status: "warn",
@@ -460,7 +472,7 @@ function rendererMicPendingCheck(): VoiceDoctorCheck {
   };
 }
 
-async function rendererMicCheck(): Promise<VoiceDoctorCheck> {
+async function rendererMicCheck(): Promise<VoiceDiagnosticCheck> {
   if (typeof navigator === "undefined") {
     return {
       name: "microphone",
@@ -517,6 +529,23 @@ async function rendererMicCheck(): Promise<VoiceDoctorCheck> {
     name: "microphone",
     status: "warn",
     detail: "capture APIs exist; no audio input visible before permission",
+  };
+}
+
+function voiceStatusCheck(
+  state: string,
+  provider: string,
+  bridge: string,
+): VoiceDiagnosticCheck {
+  return {
+    name: "daemon voice",
+    status:
+      state === "blocked"
+        ? "fail"
+        : state === "ready" || state === "disabled"
+          ? "pass"
+          : "warn",
+    detail: `${state} · ${provider} · ${bridge}`,
   };
 }
 

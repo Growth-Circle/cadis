@@ -13,6 +13,8 @@ CADIS now has a desktop MVP runtime:
 - Ollama optional model adapter with local fallback.
 - OpenAI optional model adapter using env-only API keys.
 - Official Codex CLI optional adapter using `codex exec`.
+- In-memory worker registry and `worker.tail` replay for route-time worker
+  delegation logs.
 - Tauri `cadis-hud` desktop prototype under `apps/cadis-hud`.
 - HUD-local voice doctor preflight for mic, `whisper-cli`, Whisper model, Node
   helper, and audio player checks.
@@ -217,9 +219,10 @@ message completed, and agent status events as follow-up frames for a request.
 It also supports request-driven `agent.spawn` with configured depth, child, and
 total-agent limits.
 
-The `session.subscribe` and worker-tail protocol surfaces exist, but live
-multi-client event fan-out, persistent subscriptions, and daemon worker
-execution are not implemented yet.
+`events.subscribe` streams daemon-wide events. `session.subscribe` streams the
+current session snapshot, bounded replay, and live events filtered to one
+session ID. `worker.tail` can replay recent in-memory daemon worker logs.
+Persistent worker recovery and daemon worker execution are not implemented yet.
 
 ## 13. Durable State Notes
 
@@ -228,6 +231,7 @@ The store crate owns the durable metadata path contract:
 ```text
 ~/.cadis/state/sessions/<session-id>.json
 ~/.cadis/state/agents/<agent-id>.json
+~/.cadis/state/agent-sessions/<agent-session-id>.json
 ~/.cadis/state/workers/<worker-id>.json
 ~/.cadis/state/approvals/<approval-id>.json
 ```
@@ -235,6 +239,10 @@ The store crate owns the durable metadata path contract:
 Use `StateStore` for new metadata writes. It sanitizes IDs for paths, writes
 redacted JSON through temp-file-plus-rename, ignores partial temp files during
 recovery, and reports corrupt final JSON as diagnostics.
+`cadis-core` currently reloads session, agent, and AgentSession metadata on
+runtime startup. Recovered AgentSession records are replayed in
+`events.snapshot`; corrupt final AgentSession JSON is reported as a redacted
+`daemon.error` diagnostic.
 
 ## 14. Development Rules
 

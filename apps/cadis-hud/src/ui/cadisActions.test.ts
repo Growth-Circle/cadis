@@ -1,4 +1,7 @@
+import "@testing-library/jest-dom/vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { createElement } from "react";
 import {
   _resetCadisActionsForTest,
   _emitCadisSubscriptionFrameForTest,
@@ -6,8 +9,11 @@ import {
   connect,
   handleCadisFrameForTest,
   sendUserMessage,
+  sendVoicePreflight,
 } from "./cadisActions.js";
 import { useHud } from "./hudState.js";
+import { WorkerTree } from "./orbital/WorkerTree.js";
+import { mockCadisDaemonWorkerStream } from "./fixtures/mockCadisDaemonEventStream.js";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const listenMock = vi.hoisted(() => vi.fn());
@@ -36,9 +42,12 @@ beforeEach(() => {
     agentModels: INITIAL_AGENT_MODELS,
     availableModels: INITIAL_AVAILABLE_MODELS,
     defaultModel: INITIAL_DEFAULT_MODEL,
+    agentSessions: [],
     chat: [],
     approvals: [],
     workers: [],
+    voiceStatus: null,
+    voiceDoctor: null,
     gateway: "disconnected",
   });
 });
@@ -102,7 +111,7 @@ describe("cadisActions", () => {
       },
     });
     connect();
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
     invokeMock.mockClear();
 
     expect(sendUserMessage("@Builder run tests")).toBe(true);
@@ -118,7 +127,7 @@ describe("cadisActions", () => {
 
   it("resolves leading @mentions by agent role before sending target_agent_id", async () => {
     connect();
-    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
     useHud.setState({
       agents: [
         ...useHud.getState().agents,
@@ -267,8 +276,120 @@ describe("cadisActions", () => {
         status: "completed",
         lastText: "tests passed",
         summary: "tests passed",
+        logLineCount: 1,
+        logTail: ["running tests"],
       },
     ]);
+  });
+
+  it("records daemon-visible voice status and doctor checks", () => {
+    handleCadisFrameForTest({
+      frame: "event",
+      payload: {
+        type: "voice.doctor.response",
+        payload: {
+          status: {
+            enabled: true,
+            state: "degraded",
+            provider: "edge",
+            voice_id: "id-ID-GadisNeural",
+            stt_language: "auto",
+            max_spoken_chars: 800,
+            bridge: "hud-local",
+            last_preflight: {
+              surface: "cadis-hud",
+              status: "warn",
+              summary: "1 warning",
+              checked_at: "2026-04-26T00:00:00Z",
+            },
+          },
+          checks: [
+            { name: "voice.provider", status: "ok", message: "configured provider edge" },
+            { name: "microphone", status: "warn", message: "permission pending" },
+          ],
+        },
+      },
+    });
+
+    expect(useHud.getState().voiceStatus).toMatchObject({
+      enabled: true,
+      state: "degraded",
+      provider: "edge",
+      lastPreflight: { surface: "cadis-hud", summary: "1 warning" },
+    });
+    expect(useHud.getState().voiceDoctor).toMatchObject({
+      summary: "1 warning",
+      checks: [
+        { name: "voice.provider", status: "pass", detail: "configured provider edge" },
+        { name: "microphone", status: "warn", detail: "permission pending" },
+      ],
+    });
+  });
+
+  it("publishes HUD bridge preflight checks to the daemon", async () => {
+    connect();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
+    invokeMock.mockClear();
+
+    expect(
+      sendVoicePreflight({
+        summary: "ready",
+        checks: [{ name: "microphone", status: "pass", detail: "1 input visible" }],
+      }),
+    ).toBe(true);
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(sentRequest()).toMatchObject({
+      type: "voice.preflight",
+      payload: {
+        surface: "cadis-hud",
+        summary: "ready",
+        checks: [{ name: "microphone", status: "ok", message: "1 input visible" }],
+      },
+    });
+  });
+
+  it("renders worker progress from a mock daemon event stream", () => {
+    for (const frame of mockCadisDaemonWorkerStream) {
+      handleCadisFrameForTest(frame);
+    }
+
+    const state = useHud.getState();
+    expect(state.agentSessions).toMatchObject([
+      {
+        id: "ags_mock_001",
+        agentId: "codex",
+        status: "completed",
+        stepsUsed: 3,
+        budgetSteps: 3,
+        result: "focused HUD worker tests passed",
+      },
+    ]);
+    expect(state.workers).toMatchObject([
+      {
+        id: "worker_mock_001",
+        agentId: "codex",
+        parentAgentId: "main",
+        status: "completed",
+        summary: "completed: focused HUD worker tests passed",
+        logLineCount: 1,
+        worktree: {
+          state: "planned",
+          branchName: "cadis/worker_mock_001/hud-worker-progress",
+        },
+        artifacts: {
+          summary: "/home/user/.cadis/artifacts/workers/worker_mock_001/summary.md",
+          testReport: "/home/user/.cadis/artifacts/workers/worker_mock_001/test-report.json",
+        },
+      },
+    ]);
+
+    render(createElement(WorkerTree, { agentId: "codex" }));
+
+    expect(screen.getByText(/workers · 1/)).toBeInTheDocument();
+    expect(screen.getByText("ags_mock_001")).toBeInTheDocument();
+    expect(screen.getByText("worker_mock_001")).toBeInTheDocument();
+    expect(screen.getByText(/focused HUD worker tests passed/)).toBeInTheDocument();
   });
 
   it("computes bounded reconnect backoff", () => {

@@ -75,8 +75,8 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [ ] Show current task target.
 - [ ] Show current task detail.
 - [ ] Show model detail when idle.
-- [ ] Show worker count when workers exist.
-- [ ] Show nested workers.
+- [x] Show worker count when workers exist.
+- [x] Show nested workers.
 - [ ] Support transient worker cards if desired.
 
 ## 8. Agent Rename
@@ -207,7 +207,7 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [ ] Handle agent task.
 - [ ] Handle streaming messages.
 - [ ] Handle approvals.
-- [ ] Handle worker lifecycle.
+- [x] Handle worker lifecycle.
 - [ ] Handle route log.
 - [ ] Send message through `message.send`.
 - [ ] Send model update.
@@ -216,12 +216,12 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 
 ## 17. Prototype Validation
 
-- [ ] HUD prototype can run against mock CADIS events without a full agent runtime.
+- [x] HUD prototype can run against mock CADIS events without a full agent runtime for worker progress.
 - [ ] Prototype view model contains only ephemeral UI state plus event-derived snapshots.
 - [ ] Prototype does not use localStorage, browser storage, or UI files as authoritative durable state.
 - [ ] Prototype shows daemon connected, disconnected, and reconnecting states.
 - [ ] Prototype renders active, idle, waiting, failed, and cancelled agent states.
-- [ ] Prototype renders worker lifecycle updates through `worker.event`.
+- [x] Prototype renders worker lifecycle updates through `worker.event` / `worker.*` daemon events.
 - [ ] Prototype renders approval lifecycle from `approval.requested` to `approval.resolved`.
 - [ ] Prototype keeps approval card visible after click until daemon resolution event.
 - [ ] Prototype confirms rename and model changes only after daemon events/responses.

@@ -71,7 +71,8 @@ Required elements:
 - dashed spokes from orb to agents
 - 12 non-overlapping perimeter slots
 - agent satellite cards
-- nested worker tree under each agent
+- nested worker tree under each agent, derived from daemon `agent.session.*` and
+  `worker.*` events
 - model, context, mode, and voice readouts around the orb
 - state-driven orb animation
 
@@ -97,8 +98,8 @@ Rules:
 - The current Three.js Wulan Arc implementation is a HUD prototype and migration
   reference, not the long-term native engine boundary.
 - `crates/cadis-avatar` owns the renderer-independent state engine and exposes
-  `AvatarFrame`, `BodyGestureState`, `AvatarPrivacy`, and direct-wgpu uniform
-  contract data without depending on `wgpu` or Bevy.
+  `AvatarFrame`, `BodyGestureState`, `AvatarPrivacy`, fallback state, and
+  direct-wgpu uniform contract data without depending on `wgpu` or Bevy.
 - The preferred native renderer is a focused Rust/wgpu engine. The renderer
   adapter should consume `WgpuAvatarUniforms` and `WgpuRendererContract`
   directly once the heavy renderer dependency is introduced.

@@ -109,15 +109,19 @@
 - [x] Add daemon config loader.
 - [x] Add daemon health status.
 - [x] Add local transport listener.
-- [ ] Add event bus.
-- [ ] Add event fan-out to multiple clients.
+- [x] Add event bus.
+- [x] Add event fan-out to multiple clients.
 - [x] Add `session.subscribe` protocol/request baseline.
-- [ ] Add live persistent `session.subscribe` stream.
-- [ ] Avoid blocking daemon mutex during model generation.
+- [x] Add live persistent `session.subscribe` stream.
+- [x] Avoid blocking daemon mutex during model generation.
+- [x] Publish daemon-owned route/status progress before model completion.
+- [x] Publish `message.delta` events from provider stream callbacks.
 - [x] Add session registry.
 - [ ] Add shutdown handling.
 - [x] Add structured logging.
-- [ ] Add daemon integration test.
+- [x] Add focused daemon runtime mutex regression test.
+- [x] Add full daemon socket integration test for two session subscribers and
+  non-blocked status/agent-list requests during in-flight generation.
 
 ## 6. CLI
 
@@ -135,15 +139,16 @@
 ## 7. Model Provider Layer
 
 - [x] Define `ModelProvider` trait.
-- [ ] Define provider capabilities.
+- [x] Define provider capabilities.
 - [x] Define streaming event type.
 - [ ] Add real provider streaming callback support.
-- [ ] Add provider readiness and effective model metadata.
-- [ ] Apply per-agent model selection to provider routing.
-- [ ] Define cancellation behavior.
+- [x] Add provider readiness and effective model metadata.
+- [x] Apply per-agent model selection to provider routing.
+- [x] Define provider-boundary cancellation behavior.
 - [x] Define provider error mapping.
 - [x] Implement first provider.
-- [ ] Add provider conformance tests.
+- [x] Add provider callback/cancellation conformance tests.
+- [ ] Add full live-provider conformance tests.
 - [x] Add provider config docs.
 - [ ] Add second provider.
 
@@ -184,32 +189,39 @@
 - [x] Load `config.toml`.
 - [x] Write session metadata.
 - [x] Write agent metadata.
-- [ ] Write worker metadata.
+- [x] Write worker metadata for daemon-planned worker delegations.
+- [x] Write AgentSession metadata.
 - [x] Write JSONL event logs.
 - [ ] Write approval state.
 - [x] Add store-level atomic JSON state helpers under `~/.cadis/state`.
 - [x] Implement atomic writes for store-level JSON metadata.
 - [x] Implement redaction.
 - [x] Add crash recovery metadata for daemon session/agent metadata.
+- [x] Add daemon recovery for stale non-terminal worker metadata.
 - [x] Add redaction tests.
 - [x] Add store-level recovery tests for partial and corrupt metadata files.
 - [x] Add daemon persistence integration tests for session/agent restart recovery.
+- [x] Add daemon persistence integration tests for worker restart recovery.
+- [x] Add daemon persistence integration tests for AgentSession restart snapshot recovery.
+- [x] Add corrupt/partial AgentSession state fail-safe tests.
 
 ## 11. Agent Runtime
 
-- [ ] Define `AgentSession`.
+- [x] Define `AgentSession`.
 - [ ] Define agent roles.
-- [ ] Define agent lifecycle.
+- [x] Define AgentSession lifecycle event baseline.
 - [ ] Implement main agent.
 - [x] Implement daemon-owned `@agent` routing baseline.
 - [x] Implement client-driven `agent.spawn` baseline.
-- [ ] Add agent-driven spawn through daemon-approved action.
+- [x] Add daemon-owned explicit `/worker` and `/spawn` orchestration through the core spawn path.
+- [ ] Add implicit model-driven spawn through daemon-approved action.
 - [x] Add request-driven spawn max depth, max children, and global cap.
 - [x] Add route-time agent status events baseline.
 - [ ] Add full lifecycle agent status events.
-- [ ] Add budget limits.
-- [ ] Add timeout limits.
-- [ ] Add cancellation.
+- [x] Add per-route AgentSession step budget baseline.
+- [x] Add per-route AgentSession timeout deadline baseline.
+- [x] Add session-cancel AgentSession cancellation baseline.
+- [ ] Add async provider/tool cancellation.
 - [ ] Add tool-call loop.
 - [ ] Add model fallback behavior.
 
@@ -217,8 +229,8 @@
 
 - [ ] Define worker scheduler.
 - [ ] Define worker state.
-- [ ] Implement daemon worker registry.
-- [ ] Implement `worker.tail`.
+- [x] Implement daemon worker registry.
+- [x] Implement `worker.tail`.
 - [ ] Create git worktree.
 - [ ] Stream worker logs.
 - [ ] Add worker cancellation.
@@ -245,22 +257,22 @@
 
 ## 14. Voice Output
 
-- [ ] Define TTS provider trait.
-- [ ] Define speech policy.
-- [ ] Add voice on/off config.
-- [ ] Add explicit TTS provider config (`edge`, `openai`, `system`).
+- [x] Define TTS provider trait.
+- [x] Define speech policy.
+- [x] Add voice on/off config.
+- [x] Add explicit TTS provider config (`edge`, `openai`, `system`).
 - [x] Separate HUD STT language from TTS voice.
 - [x] Add HUD-local voice doctor/preflight.
 - [x] Add WebAudio PCM fallback for WebKit MediaRecorder zero-chunk mic capture.
-- [ ] Promote voice doctor/preflight into daemon-visible status.
+- [x] Promote voice doctor/preflight into daemon-visible status.
 - [ ] Handle daemon voice events in HUD.
-- [ ] Add provider stub.
+- [x] Add provider stub.
 - [ ] Implement first provider.
-- [ ] Speak short normal answers.
+- [x] Speak short normal answers.
 - [ ] Summarize long answers.
-- [ ] Block code/diff/log speech.
+- [x] Block code/diff/log speech.
 - [ ] Speak approval risk summary.
-- [ ] Add speech routing tests.
+- [x] Add speech routing tests.
 
 ## 15. HUD
 
@@ -270,7 +282,7 @@
 - [x] Show chat stream.
 - [x] Show agent tree.
 - [x] Add `@agent` mention picker baseline.
-- [ ] Show worker progress.
+- [x] Show worker progress from daemon `agent.session.*` and `worker.*` events.
 - [x] Show approval cards.
 - [x] Add voice controls.
 - [x] Add local mic debug telemetry.
@@ -281,7 +293,8 @@
 - [x] Add status bar.
 - [x] Add desktop packaging notes.
 - [ ] Validate HUD prototype against RamaClaw adaptation contract.
-- [ ] Render HUD from a mock CADIS daemon event stream.
+- [x] Render HUD from a mock CADIS daemon event stream.
+- [x] Render HUD worker progress from a mock CADIS daemon event stream fixture.
 - [x] Confirm HUD is protocol-client only and does not execute tools directly.
 - [ ] Confirm durable HUD preferences are daemon-backed, not browser/local UI storage.
 - [x] Confirm disconnected state references CADIS daemon, not OpenClaw.
@@ -293,26 +306,33 @@
 - [x] Confirm avatar style changes route through `ui.preferences.set`.
 - [x] Define renderer-neutral Wulan avatar render state.
 - [ ] Connect native Wulan renderer to `cadis-avatar` frames.
-- [ ] Spike focused Rust/wgpu Wulan renderer.
+- [x] Spike focused Rust/wgpu Wulan renderer contract as feature-gated render plans.
 - [ ] Reconsider Bevy only through a decision record if wgpu is insufficient.
 - [ ] Port Wulan portrait shader, particles, reticles, eye overlay, and mouth overlay from the Three.js prototype.
 - [ ] Add Wulan body gesture set: idle breath, listening lean, nod, gaze shift, approval hand cue, speaking emphasis, coding focus, thinking scan, and error recoil.
-- [ ] Add reduced-motion behavior for Wulan gestures.
+- [x] Add reduced-motion behavior for Wulan gestures and wgpu render plans.
 - [ ] Keep optional face tracking off by default, local-only, permission-gated, and visibly indicated when active.
-- [ ] Confirm Wulan native renderer failure falls back to the CADIS orb.
+- [x] Confirm Wulan native renderer failure falls back to the CADIS orb in avatar crate tests.
 - [ ] Capture HUD screenshot parity at 1200x760, 1600x1000, and 1920x1080.
 - [ ] Confirm no overlapping cards, status text, chat panel, approval stack, or central orb text.
 
 ## 15.1 Next Multi-Agent Execution Tracks
 
-- [ ] Track A: daemon event bus and live session subscription.
-- [ ] Track B: provider readiness, effective model metadata, and provider streaming.
+- [x] Track A: daemon event bus, live session subscription, and non-blocking generation path.
+- [x] Track A HUD acceptance: live session, route, agent status, delta, and
+  completion frames render visible progress before model completion.
+- [x] Track B: provider readiness, effective model metadata, selected-model routing, and provider streaming/cancellation contract.
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
+  Baselines landed: AgentSession state/events, explicit daemon-owned spawn,
+  spawn limits, worker registry, and worker tail. Remaining: implicit
+  model-driven spawn, worker failed/cancelled events, and executable workers.
 - [ ] Track D: policy-backed tools and approval persistence.
 - [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
-- [ ] Track F: durable metadata and restart recovery for sessions, agents, workers, and approvals.
+- [ ] Track F: durable metadata and restart recovery for sessions, agents, AgentSessions, workers, and approvals.
 - [x] Track F store baseline: atomic JSON helpers and fail-safe metadata recovery.
 - [x] Track F daemon baseline: session/agent metadata survives runtime restart and cancelled sessions are removed.
+- [x] Track F daemon worker baseline: worker metadata survives runtime restart and stale running workers recover as failed.
+- [x] Track F AgentSession baseline: per-route AgentSession metadata survives runtime restart, snapshots replay recovered records, and corrupt final JSON reports daemon diagnostics while partial temp files are ignored.
 - [ ] Track G: CADIS-native Wulan avatar engine.
 - [ ] Track H: profile homes, agent homes, workspace registry, grants, and worker worktrees.
 - [x] Track H baseline: default profile layout plus persistent workspace registry/grants.
@@ -326,17 +346,21 @@
 - [x] Document project `.cadis/media/` asset convention.
 - [x] Define workspace protocol/types.
 - [x] Implement `CADIS_HOME` and default `CADIS_PROFILE_HOME` resolver.
-- [ ] Implement profile home manager.
-- [ ] Implement agent home manager and templates.
+- [x] Implement profile home manager baseline.
+- [x] Implement agent home manager and templates.
 - [x] Implement workspace registry and aliases baseline.
 - [x] Implement workspace grants with expiry baseline.
 - [ ] Enforce denied paths across file, shell, git, and worker tools.
 - [x] Reject broad workspace roots and enforce safe-read workspace path guards.
-- [ ] Implement project `.cadis/workspace.toml` support.
+- [x] Implement project `.cadis/workspace.toml` store support.
+- [x] Add project `.cadis/worktrees/` worker path and metadata helpers.
+- [x] Add profile `artifacts/workers/` worker artifact path helpers.
 - [ ] Implement worker worktree creation under project `.cadis/worktrees/`.
 - [ ] Persist worker artifacts under profile `artifacts/workers/`.
 - [ ] Add project `.cadis/media/` manifests for generated media.
-- [ ] Add workspace/profile/agent doctor checks.
+- [x] Add workspace doctor checks for project metadata mismatch and duplicate roots.
+- [x] Add workspace doctor checks for stale worker worktree metadata and missing artifact roots.
+- [x] Add profile/agent doctor checks for missing, corrupt, and oversized agent-home files.
 
 ## 16. Code Work Window
 
@@ -354,11 +378,11 @@
 ## 17. Multi-Agent Tree
 
 - [ ] Define tree data model.
-- [ ] Enforce max depth.
-- [ ] Enforce max children.
-- [ ] Enforce max global agents.
-- [ ] Enforce budget.
-- [ ] Support spawn.
+- [x] Enforce max depth.
+- [x] Enforce max children.
+- [x] Enforce max global agents.
+- [x] Enforce budget baseline.
+- [x] Support spawn baseline.
 - [ ] Support kill.
 - [ ] Support tail.
 - [ ] Support result collection.

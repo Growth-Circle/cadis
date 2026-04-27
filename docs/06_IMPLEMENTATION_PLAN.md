@@ -49,6 +49,13 @@ Implemented in the first runnable baseline:
 - Orchestrator baseline: daemon-owned `@agent` routing, `orchestrator.route`
   events, route-time `agent.status.changed` events, request-driven
   `agent.spawn`, and spawn limits.
+- Agent Runtime baseline: durable per-route `AgentSession` records with route,
+  task, result, timeout deadline, step budget, cancellation, and parent-child
+  metadata exposed through `agent.session.*` lifecycle events and replayed in
+  snapshot responses after daemon restart.
+- Track C worker baseline: in-memory daemon worker registry, route-time
+  `worker.log.delta` lifecycle logs, `events.snapshot` worker lifecycle
+  snapshots, and one-shot `worker.tail` replay.
 - P13 HUD subset: Tauri + React `apps/cadis-hud` desktop app, orbital shell,
   chat command panel, agent cards, mention picker, config dialog, six themes,
   model controls, rename dialog, local mic debug, HUD-local voice doctor,
@@ -58,26 +65,36 @@ Implemented in the first runnable baseline:
   renderer-neutral avatar modes, gestures, face-tracking privacy state, renderer
   backend intent, and renderable frame contracts.
 - Workspace architecture baseline: profile layout initialization, persistent
-  workspace registry/grants, workspace protocol/CLI commands, workspace doctor,
-  agent-scoped `tool.call` grants, and safe-read tool execution behind active
-  grants.
+  daemon-known agent home initialization, persistent workspace registry/grants,
+  workspace protocol/CLI commands, workspace doctor with profile/agent file
+  diagnostics, agent-scoped `tool.call` grants, and safe-read tool execution
+  behind active grants.
 - Voice debug baseline: HUD-local mic doctor, WebAudio analyser telemetry, and
   WebAudio PCM fallback when WebKit `MediaRecorder` produces zero audio chunks.
+- Model readiness/routing baseline: `models.list` exposes configured
+  provider/model IDs, conservative readiness, effective provider/model metadata,
+  and fallback flags; `agent.model.set` selections are used by daemon provider
+  routing for message generation instead of remaining HUD-only state.
 
 Still pending:
 
 - Native mutating file/shell tools.
-- Agent runtime beyond the current route-and-answer path; existing
-  `agent.spawn` is client-requested, not agent-driven.
-- Daemon startup wiring for durable session, agent, worker, and approval
-  recovery. The store-level atomic write and fail-safe recovery helpers exist.
-- Worker lifecycle, isolated worktrees, Telegram/mobile adapters, daemon-owned
-  production voice output, and code work window.
-- Agent home manager, denied-path enforcement for all mutating tools,
-  checkpoint/rollback manager, and media asset manifests.
+- Agent runtime beyond the current route-and-answer path: async cancellation,
+  model-driven spawn, multi-step budgets, and a provider/tool-call loop remain
+  future work; existing `agent.spawn` is client-requested, not agent-driven.
+- Daemon startup wiring for pending approval recovery. Store-level atomic write
+  and fail-safe recovery helpers exist, and the daemon now recovers durable
+  session, agent, AgentSession, and worker metadata.
+- Worker execution lifecycle, isolated worktrees, Telegram/mobile adapters,
+  daemon-owned production voice output, and code work window.
+- Denied-path enforcement for all mutating tools, checkpoint/rollback manager,
+  dedicated profile/agent doctor commands, and media asset manifests.
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
   memory records, scoped retrieval, provenance ledger, candidate promotion, and
   memory capsules.
+- Native provider streaming for providers that support token streams directly;
+  the current provider trait can stream normalized events, but OpenAI/Ollama
+  still use non-streaming request paths.
 
 ## 2.2 Next Execution Plan
 
@@ -92,14 +109,28 @@ Tasks:
 
 - Add a daemon event bus with fan-out to connected clients.
 - Add a persistent `session.subscribe` stream for HUD and CLI clients.
+  Baseline now supports session-filtered replay and live fan-out over the
+  daemon socket. The daemon now publishes route/status progress before provider
+  generation returns and fans out model deltas as provider callbacks arrive.
 - Stop holding the runtime mutex while model providers are generating.
+  Baseline now prepares daemon-owned message generation under the runtime mutex,
+  releases it for provider work, and reacquires it only to mint authoritative
+  event envelopes.
 - Emit `session.started`, `orchestrator.route`, `agent.status.changed`,
   `message.delta`, and `message.completed` as they happen.
 - Add integration tests for two clients receiving the same session events.
+  Baseline now includes a real Unix socket integration test with two
+  `session.subscribe` clients receiving the same route/status/message events
+  while a separate client receives `daemon.status` and `agent.list` responses
+  during a deliberately paused provider generation.
 
 Exit criteria:
 
 - HUD receives visible progress before model completion.
+  Completed by the HUD live-progress acceptance fixture, which renders live
+  `session.started`, `orchestrator.route`, `agent.status.changed`,
+  `message.delta`, and `message.completed` frames through the React HUD before
+  final completion.
 - CLI can subscribe to a live session.
 - One slow request does not block unrelated status or agent list requests.
 
@@ -114,6 +145,9 @@ Tasks:
 - Route agent-selected model IDs into provider selection instead of treating
   `agent.model.set` as UI-only state.
 - Add streaming callback support for providers that can stream.
+- Provider-boundary cancellation is defined as callback `Cancel` control,
+  `model.cancelled`, and a non-retryable `model_cancelled` error; native
+  upstream cancellation still needs per-provider integration.
 - Keep echo provider available only as an explicit fallback state.
 
 Exit criteria:
@@ -129,17 +163,21 @@ Owner: agent-runtime and worker agents.
 Tasks:
 
 - Introduce an `AgentSession` state machine with route, task, result, timeout,
-  budget, cancellation, and parent-child metadata.
+  budget, cancellation, and parent-child metadata. Initial baseline is
+  in-memory and wraps the existing synchronous route-and-answer path.
 - Extend the current request-driven spawn limits into agent-driven spawn:
   max depth, max children per agent, and global agent cap.
 - Implement agent-driven spawn as a daemon-authorized action, not HUD logic.
+  The current safe slice supports explicit daemon-owned `/worker` and `/spawn`
+  orchestration through the same core spawn path; implicit model-driven spawn is
+  still reserved for later runtime work.
 - Add a worker registry with `worker.started`, `worker.log.delta`,
   `worker.completed`, `worker.failed`, and `worker.cancelled`.
 - Implement `worker.tail` from daemon-owned worker logs.
 
 Exit criteria:
 
-- An agent can request a subagent through the orchestrator and the daemon enforces
+- An explicit orchestrator action can request a subagent and the daemon enforces
   limits.
 - HUD worker tree is driven by daemon worker events.
 - Worker logs can be tailed from CLI and HUD.
@@ -178,6 +216,12 @@ Tasks:
   `MediaRecorder` emits zero chunks even though analyser input is live.
 - Promote the current HUD-local voice doctor results into daemon-visible status
   once voice becomes daemon-owned.
+- Green slice: expose `voice.status`, `voice.doctor`, and `voice.preflight`
+  so CLI/HUD can see daemon-owned voice status while HUD/Tauri remains the
+  local capture/playback bridge.
+- Green slice: define the daemon TTS provider trait, local provider stubs for
+  `edge`, `openai`, and `system`, and speech policy that blocks code, diffs,
+  terminal logs, and long raw tool/test output before provider dispatch.
 - Handle daemon voice events in HUD.
 
 Exit criteria:
@@ -193,12 +237,14 @@ Owner: store/recovery agents.
 
 Tasks:
 
-- Store session metadata, agent metadata, worker metadata, and approval metadata
-  with atomic writes. Store-level helpers are implemented under
-  `~/.cadis/state`; daemon runtime integration remains pending.
-- Load durable state on daemon start.
+- Store session metadata, agent metadata, AgentSession metadata, worker
+  metadata, and approval metadata with atomic writes. Store-level helpers are
+  implemented under `~/.cadis/state`; AgentSession records use
+  `state/agent-sessions/<agent-session-id>.json`.
+- Load durable session, agent, and AgentSession state on daemon start.
 - Keep append-only JSONL as audit log, not the only runtime state.
-- Add recovery tests for partial writes and stale worker/session records.
+- Add recovery tests for partial writes, corrupt AgentSession files, and stale
+  worker/session records.
 
 Exit criteria:
 
@@ -246,15 +292,23 @@ Tasks:
   layout in `27_WORKSPACE_ARCHITECTURE.md`. Baseline profile home initialization
   now exists for the default profile.
 - Add agent homes with `AGENT.toml`, persona/instruction/memory files, and
-  machine-enforced `POLICY.toml`.
+  machine-enforced `POLICY.toml`. Baseline templates and typed policy metadata
+  now exist for daemon-known agents.
 - Extend the implemented workspace registry/grants with full alias management,
   richer expiry UX, and denied-path checks for mutating tools.
 - Add project `.cadis/workspace.toml`, `.cadis/worktrees/`, `.cadis/artifacts/`,
-  and `.cadis/media/` conventions.
+  and `.cadis/media/` conventions. Store-level `.cadis/workspace.toml` support
+  and doctor checks for metadata mismatch now exist. Store-level worker worktree
+  path/metadata helpers under project `.cadis/worktrees/` now exist.
 - Route coding workers into git worktrees and persist worker artifacts under the
-  profile home.
+  profile home. Profile-scoped worker artifact path helpers now point at
+  `profiles/<profile>/artifacts/workers/`; actual artifact production remains
+  future work.
 - Add doctor checks for duplicated roots, broad grants, symlink escapes, secret
   paths, stale worktrees, corrupt JSONL, and oversized memory/persona files.
+  Workspace doctor now includes a baseline for missing, corrupt, and oversized
+  agent-home files plus stale project worker worktree metadata and missing
+  artifact roots.
 
 Exit criteria:
 
@@ -491,9 +545,14 @@ Tasks:
 - Append JSONL event logs.
 - Provide store-level durable metadata files:
   `state/sessions/<session-id>.json`, `state/agents/<agent-id>.json`,
+  `state/agent-sessions/<agent-session-id>.json`,
   `state/workers/<worker-id>.json`, and
   `state/approvals/<approval-id>.json`.
 - Store session metadata.
+- Store worker metadata for the current daemon-planned worker delegation
+  baseline and recover stale non-terminal worker records as failed on daemon
+  restart.
+- Store AgentSession metadata.
 - Store approval metadata.
 - Implement redaction.
 - Use atomic writes for state.
@@ -501,6 +560,7 @@ Tasks:
 Exit criteria:
 
 - Session events survive daemon restart as logs.
+- AgentSession snapshots survive daemon restart as durable state.
 - Secret redaction tests pass.
 - Store-level partial and corrupt state recovery tests pass.
 
@@ -514,8 +574,8 @@ Tasks:
 - Define agent roles.
 - Define task input and result.
 - Add lifecycle events.
-- Add budget and timeout.
-- Add cancellation.
+- Add budget and timeout metadata.
+- Add cancellation metadata.
 - Add basic tool-call loop if provider supports tool calls.
 - Add text protocol fallback for models without native tool calls later.
 
@@ -571,6 +631,8 @@ Tasks:
 - W7: integrate workspace, grant, worker, checkpoint, and rollback events.
 - W8: add deterministic channel and cwd/project routing.
 - W9: add doctor and migration checks for the full layout.
+  Baseline complete for duplicate registered roots, missing project metadata,
+  and registry/metadata ID mismatch.
 
 ## 14. P11 - Telegram Adapter
 

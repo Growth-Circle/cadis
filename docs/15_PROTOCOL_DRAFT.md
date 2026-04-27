@@ -99,6 +99,9 @@ worker.tail
 models.list
 ui.preferences.get
 ui.preferences.set
+voice.status
+voice.doctor
+voice.preflight
 voice.preview
 voice.stop
 config.reload
@@ -129,8 +132,57 @@ Example:
 
 `events.snapshot` is a one-shot request for daemon-owned state. The desktop MVP
 snapshot is represented as normal event frames, currently including
-`agent.list.response`, `ui.preferences.updated`, and `session.updated` for known
-sessions.
+`agent.list.response`, `ui.preferences.updated`, `session.updated` for known
+sessions, `agent.session.*` snapshots for recovered or in-memory per-route
+AgentSession records, and worker lifecycle snapshots for workers known to the
+in-memory daemon worker registry or recovered durable worker metadata. Recovery
+diagnostics for corrupt or skipped durable metadata are emitted as redacted
+`daemon.error` events; partial temporary files are ignored and do not produce
+events.
+
+`worker.tail` is a one-shot request for recent daemon-owned worker log lines.
+The desktop MVP replays log lines from the in-memory worker registry as
+`worker.log.delta` events. `lines` is optional; when absent the daemon returns
+up to 64 recent lines, capped at 1000. Unknown workers are rejected with
+`worker_not_found`.
+
+Example:
+
+```json
+{
+  "protocol_version": "0.1",
+  "request_id": "req_...",
+  "client_id": "cli_...",
+  "type": "worker.tail",
+  "payload": {
+    "worker_id": "worker_000001",
+    "lines": 20
+  }
+}
+```
+
+`session.subscribe` keeps the connection open after the immediate
+`request.accepted` response. The daemon sends the current `session.updated`
+snapshot when `include_snapshot` is true, then bounded replay and live events
+whose event envelope has the requested `session_id`. It does not deliver
+daemon-global events such as agent rosters or UI preferences.
+
+Example:
+
+```json
+{
+  "protocol_version": "0.1",
+  "request_id": "req_...",
+  "client_id": "cli_...",
+  "type": "session.subscribe",
+  "payload": {
+    "session_id": "ses_...",
+    "since_event_id": "evt_000120",
+    "replay_limit": 128,
+    "include_snapshot": true
+  }
+}
+```
 
 `tool.call` requests daemon-owned native tool execution. Tool calls must resolve
 a registered workspace and an active workspace grant before execution or
@@ -233,7 +285,16 @@ daemon.status.response
   "socket_path": "/run/user/1000/cadis/cadisd.sock",
   "sessions": 0,
   "model_provider": "auto",
-  "uptime_seconds": 3
+  "uptime_seconds": 3,
+  "voice": {
+    "enabled": false,
+    "state": "disabled",
+    "provider": "edge",
+    "voice_id": "id-ID-GadisNeural",
+    "stt_language": "auto",
+    "max_spoken_chars": 800,
+    "bridge": "hud-local"
+  }
 }
 ```
 
@@ -255,6 +316,11 @@ agent.renamed
 agent.model.changed
 agent.status.changed
 agent.completed
+agent.session.started
+agent.session.updated
+agent.session.completed
+agent.session.failed
+agent.session.cancelled
 workspace.list.response
 workspace.registered
 workspace.grant.created
@@ -262,6 +328,9 @@ workspace.grant.revoked
 workspace.doctor.response
 models.list.response
 ui.preferences.updated
+voice.status.updated
+voice.doctor.response
+voice.preflight.response
 orchestrator.route
 tool.requested
 tool.started
@@ -282,6 +351,37 @@ voice.completed
 ```
 
 `models.list.response` payloads include conservative provider readiness metadata:
+
+`agent.session.*` events are emitted by the daemon-owned Agent Runtime baseline
+for each routed agent task. They are in-memory for the desktop MVP and carry the
+route, task, result, timeout, budget, cancellation, and parent-child metadata
+needed by clients to render lifecycle state without owning orchestration:
+
+```json
+{
+  "type": "agent.session.started",
+  "agent_session_id": "ags_000001",
+  "session_id": "ses_...",
+  "route_id": "route_000001",
+  "agent_id": "coder",
+  "parent_agent_id": "main",
+  "task": "run focused tests",
+  "status": "running",
+  "timeout_at": "2026-04-26T00:15:00Z",
+  "budget_steps": 1,
+  "steps_used": 0
+}
+```
+
+Allowed AgentSession statuses are `started`, `running`, `completed`, `failed`,
+`cancelled`, `timed_out`, and `budget_exceeded`. `agent.session.completed` adds
+an optional redacted `result`. Terminal failure/cancellation events add optional
+`error_code`, `error`, and `cancellation_requested_at` fields as applicable.
+The current baseline enforces a per-route step budget before provider execution
+and records timeout deadlines. AgentSession metadata is written atomically under
+`state/agent-sessions/` and recovered on daemon restart so snapshots can replay
+the current AgentSession state. Model/tool-loop cancellation and async
+interrupt remain later runtime work.
 
 `workspace.list.response` payload:
 
@@ -335,6 +435,16 @@ voice.completed
 {
   "models": [
     {
+      "provider": "auto",
+      "model": "llama3.2",
+      "display_name": "Auto (Ollama llama3.2, then local fallback)",
+      "capabilities": ["streaming", "local_fallback"],
+      "readiness": "fallback",
+      "effective_provider": "ollama",
+      "effective_model": "llama3.2",
+      "fallback": true
+    },
+    {
       "provider": "echo",
       "model": "cadis-local-fallback",
       "display_name": "CADIS local fallback",
@@ -350,9 +460,11 @@ voice.completed
 
 `readiness` is one of `ready`, `fallback`, `requires_configuration`, or
 `unavailable`. `fallback: true` means the entry is not a real model provider.
-For `auto`, CADIS reports the primary effective provider as `ollama` and marks
-the entry as fallback-capable because runtime requests can still fall back to
-`echo` if Ollama is not ready.
+For `auto`, CADIS reports the configured Ollama model as the primary effective
+model and marks the entry as fallback-capable because runtime requests can still
+fall back to `echo` if Ollama is not ready. `models.list` uses daemon config so
+clients can display the configured Ollama/OpenAI model IDs instead of generic
+placeholders.
 
 Model-backed `message.delta` and `message.completed` payloads may include a
 `model` object:
@@ -376,6 +488,31 @@ Model-backed `message.delta` and `message.completed` payloads may include a
 `effective_provider` and `effective_model` are the provider and model that
 actually served the request. When fallback occurs, `fallback` is true and
 `fallback_reason` may contain a redacted reason suitable for logs and clients.
+
+For `message.send`, `cadisd` first publishes daemon-owned session, route, and
+agent status events, then runs provider generation outside the runtime mutex.
+Providers with stream callbacks cause `message.delta` events to be fanned out
+as callbacks arrive; providers without native streaming still produce the same
+typed events after their blocking response returns.
+
+Model provider failures use the normal `ErrorPayload` shape on `session.failed`
+events:
+
+```json
+{
+  "code": "provider_unavailable",
+  "message": "Ollama request failed",
+  "retryable": true
+}
+```
+
+Clients should treat `code` and `retryable` as the machine-readable fields.
+Provider error messages are for display only and must be redacted before they
+reach protocol events or logs. Common Track B provider codes are
+`model_auth_missing`, `model_auth_failed`, `provider_client_error`,
+`provider_unavailable`, `provider_rate_limited`, `provider_http_error`,
+`model_not_found`, `model_request_rejected`, `provider_response_invalid`,
+`provider_response_empty`, and `codex_cli_*`.
 
 ## 5. Content Kind
 
@@ -445,6 +582,7 @@ Initial:
 
 - Unix socket NDJSON request/response frames
 - `events.subscribe` over the same socket for long-lived local event streams
+- `session.subscribe` over the same socket for session-filtered event streams
 
 The desktop daemon keeps an in-memory bounded replay buffer for recent runtime
 events. The baseline buffer is process-local and is not a durable event store.
@@ -541,6 +679,9 @@ The daemon assigns the new `agent_id` and confirms with `agent.spawned`.
 Client-requested spawning and explicit `/worker` or `/spawn` orchestration are
 bounded by daemon config. The desktop MVP defaults allow child depth 2, 4 direct
 children per parent, and 32 total registered agents including built-in agents.
+Explicit orchestration is daemon-owned: `/worker` and `/spawn` requests create
+an AgentSession, call the same core spawn path as `agent.spawn`, and enforce the
+same depth, child, and global caps before any provider response is produced.
 Rejections use:
 
 - `agent_spawn_depth_limit_exceeded`
@@ -563,6 +704,53 @@ Implicit model-driven spawning is reserved for a later runtime track.
   }
 }
 ```
+
+### `voice.status`, `voice.doctor`, and `voice.preflight`
+
+`voice.status` returns the daemon-visible voice state as a
+`voice.status.updated` event. `voice.doctor` returns `voice.doctor.response`
+with daemon checks plus the last local bridge preflight when one has been
+reported.
+
+The daemon remains the owner of voice preferences and policy state. HUD/Tauri
+remains the local capture/playback bridge for microphone permissions,
+`MediaRecorder`, WebAudio PCM fallback, whisper execution, and native audio
+playback.
+
+Supported daemon-visible TTS provider IDs are `edge`, `openai`, and `system`.
+The `stub` provider is available for deterministic tests. In this slice all
+provider implementations are daemon-local stubs: they validate policy and emit
+voice lifecycle events without calling external APIs or reading secrets.
+
+```json
+{
+  "type": "voice.preflight",
+  "surface": "cadis-hud",
+  "summary": "ready",
+  "checks": [
+    {
+      "name": "microphone",
+      "status": "ok",
+      "message": "1 input visible"
+    },
+    {
+      "name": "webaudio.pcm_fallback",
+      "status": "ok",
+      "message": "PCM fallback available when MediaRecorder emits zero chunks"
+    }
+  ]
+}
+```
+
+The daemon applies speech policy before provider dispatch. Final assistant
+messages may emit `voice.started` and `voice.completed` only after
+`message.completed`, only when `enabled` and `auto_speak` are true, and only for
+speakable content. Code, diffs, terminal logs, and long raw tool or test output
+must not produce voice playback events.
+
+`status` values are `ok`, `warn`, or `error`. The daemon also accepts HUD-local
+aliases such as `pass` and `fail` and normalizes them before emitting
+`voice.preflight.response`.
 
 ### `voice.preview`
 

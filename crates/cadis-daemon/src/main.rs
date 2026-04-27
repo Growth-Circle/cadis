@@ -9,11 +9,14 @@ use std::process;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use cadis_core::{Runtime, RuntimeOptions};
-use cadis_models::provider_from_config;
+use cadis_core::{PendingMessageGeneration, Runtime, RuntimeOptions};
+use cadis_models::{
+    provider_from_config, ModelError, ModelRequest, ModelStreamControl, ModelStreamEvent,
+};
 use cadis_protocol::{
     ClientRequest, DaemonResponse, ErrorPayload, EventEnvelope, EventId, EventSubscriptionRequest,
-    RequestEnvelope, RequestId, ResponseEnvelope, ServerFrame,
+    RequestEnvelope, RequestId, ResponseEnvelope, ServerFrame, SessionId,
+    SessionSubscriptionRequest,
 };
 use cadis_store::{
     ensure_layout, load_config, openai_api_key_from_env, redact, CadisConfig, EventLog,
@@ -64,13 +67,14 @@ fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn build_runtime(config: &CadisConfig, socket_path: Option<PathBuf>) -> Arc<Mutex<Runtime>> {
+    let openai_api_key = openai_api_key_from_env();
     let provider = provider_from_config(
         &config.model.provider,
         &config.model.ollama_endpoint,
         &config.model.ollama_model,
         &config.model.openai_base_url,
         &config.model.openai_model,
-        openai_api_key_from_env().as_deref(),
+        openai_api_key.as_deref(),
     );
 
     Arc::new(Mutex::new(Runtime::new(
@@ -79,6 +83,9 @@ fn build_runtime(config: &CadisConfig, socket_path: Option<PathBuf>) -> Arc<Mute
             profile_id: config.profile.default_profile.clone(),
             socket_path,
             model_provider: config.model.provider.clone(),
+            ollama_model: config.model.ollama_model.clone(),
+            openai_model: config.model.openai_model.clone(),
+            openai_api_key_configured: openai_api_key.is_some(),
             ui_preferences: config.ui_preferences(),
         },
         provider,
@@ -147,23 +154,59 @@ where
         match serde_json::from_str::<RequestEnvelope>(&line) {
             Ok(envelope) => {
                 let subscription = match &envelope.request {
-                    ClientRequest::EventsSubscribe(request) => Some(request.clone()),
+                    ClientRequest::EventsSubscribe(request) => {
+                        Some(EventBusSubscription::all(request))
+                    }
+                    ClientRequest::SessionSubscribe(request) => {
+                        Some(EventBusSubscription::session(request))
+                    }
                     _ => None,
                 };
                 let snapshot_only = matches!(envelope.request, ClientRequest::EventsSnapshot(_));
+                if matches!(envelope.request, ClientRequest::MessageSend(_)) {
+                    let pending = runtime
+                        .lock()
+                        .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+                        .begin_message_request(envelope);
+                    match pending {
+                        Ok(pending) => {
+                            serve_pending_message_generation(
+                                &mut writer,
+                                Arc::clone(&runtime),
+                                &event_log,
+                                &event_bus,
+                                pending,
+                            )?;
+                        }
+                        Err(outcome) => {
+                            let outcome = *outcome;
+                            write_frame(&mut writer, &ServerFrame::Response(outcome.response))?;
+                            for event in outcome.events {
+                                emit_event(&mut writer, &event_log, &event_bus, event)?;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let outcome = runtime
                     .lock()
                     .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
                     .handle_request(envelope);
+                let accepted_subscription = matches!(
+                    &outcome.response.response,
+                    DaemonResponse::RequestAccepted(_)
+                )
+                .then_some(subscription)
+                .flatten();
 
                 write_frame(&mut writer, &ServerFrame::Response(outcome.response))?;
 
-                if let Some(subscription) = subscription {
+                if let Some(subscription) = accepted_subscription {
                     for event in outcome.events {
                         write_frame(&mut writer, &ServerFrame::Event(event))?;
                     }
 
-                    let (replay, receiver) = event_bus.subscribe(&subscription);
+                    let (replay, receiver) = event_bus.subscribe(subscription);
                     for event in replay {
                         write_frame(&mut writer, &ServerFrame::Event(event))?;
                     }
@@ -181,11 +224,7 @@ where
                 }
 
                 for event in outcome.events {
-                    if let Err(error) = event_log.append_event(&event) {
-                        eprintln!("cadisd log error: {error}");
-                    }
-                    event_bus.publish(event.clone());
-                    write_frame(&mut writer, &ServerFrame::Event(event))?;
+                    emit_event(&mut writer, &event_log, &event_bus, event)?;
                 }
             }
             Err(error) => {
@@ -205,6 +244,87 @@ where
     Ok(())
 }
 
+fn serve_pending_message_generation<W: Write>(
+    writer: &mut W,
+    runtime: Arc<Mutex<Runtime>>,
+    event_log: &EventLog,
+    event_bus: &EventBus,
+    pending: PendingMessageGeneration,
+) -> Result<(), Box<dyn Error>> {
+    write_frame(writer, &ServerFrame::Response(pending.response.clone()))?;
+    for event in pending.initial_events.clone() {
+        emit_event(writer, event_log, event_bus, event)?;
+    }
+
+    let provider = Arc::clone(&pending.provider);
+    let mut invocation = None;
+    let mut final_content = String::new();
+    let mut emitted_delta = false;
+    let stream_result = provider.stream_chat(
+        ModelRequest::new(&pending.prompt).with_selected_model(pending.selected_model.as_deref()),
+        &mut |event| {
+            match event {
+                ModelStreamEvent::Started(started) | ModelStreamEvent::Completed(started) => {
+                    invocation = Some(started);
+                }
+                ModelStreamEvent::Delta(delta) => {
+                    final_content.push_str(&delta);
+                    emitted_delta = true;
+                    let event = runtime
+                        .lock()
+                        .map_err(|_| {
+                            ModelError::with_code(
+                                "runtime_lock_failed",
+                                "runtime mutex was poisoned",
+                                false,
+                            )
+                        })?
+                        .message_delta_event(&pending, delta, invocation.as_ref());
+                    emit_event(writer, event_log, event_bus, event).map_err(|error| {
+                        ModelError::with_code("event_write_failed", error.to_string(), false)
+                    })?;
+                }
+                ModelStreamEvent::Failed(_) | ModelStreamEvent::Cancelled(_) => {}
+            }
+            Ok(ModelStreamControl::Continue)
+        },
+    );
+
+    let final_events = match stream_result {
+        Ok(response) => runtime
+            .lock()
+            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+            .complete_message_generation(pending, response, final_content, emitted_delta),
+        Err(error) => runtime
+            .lock()
+            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+            .fail_message_generation(pending, error),
+    };
+
+    for event in final_events {
+        emit_event(writer, event_log, event_bus, event)?;
+    }
+
+    Ok(())
+}
+
+fn emit_event<W: Write>(
+    writer: &mut W,
+    event_log: &EventLog,
+    event_bus: &EventBus,
+    event: EventEnvelope,
+) -> Result<(), Box<dyn Error>> {
+    publish_event(event_log, event_bus, &event);
+    write_frame(writer, &ServerFrame::Event(event))
+}
+
+fn publish_event(event_log: &EventLog, event_bus: &EventBus, event: &EventEnvelope) {
+    if let Err(error) = event_log.append_event(event) {
+        eprintln!("cadisd log error: {error}");
+    }
+    event_bus.publish(event.clone());
+}
+
 #[derive(Clone)]
 struct EventBus {
     inner: Arc<Mutex<EventBusInner>>,
@@ -213,7 +333,56 @@ struct EventBus {
 
 struct EventBusInner {
     replay: VecDeque<EventEnvelope>,
-    subscribers: Vec<mpsc::Sender<EventEnvelope>>,
+    subscribers: Vec<EventSubscriber>,
+}
+
+struct EventSubscriber {
+    subscription: EventBusSubscription,
+    sender: mpsc::Sender<EventEnvelope>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EventBusSubscription {
+    since_event_id: Option<EventId>,
+    replay_limit: Option<u32>,
+    filter: EventFilter,
+}
+
+impl EventBusSubscription {
+    fn all(request: &EventSubscriptionRequest) -> Self {
+        Self {
+            since_event_id: request.since_event_id.clone(),
+            replay_limit: request.replay_limit,
+            filter: EventFilter::All,
+        }
+    }
+
+    fn session(request: &SessionSubscriptionRequest) -> Self {
+        Self {
+            since_event_id: request.since_event_id.clone(),
+            replay_limit: request.replay_limit,
+            filter: EventFilter::Session(request.session_id.clone()),
+        }
+    }
+
+    fn matches(&self, event: &EventEnvelope) -> bool {
+        self.filter.matches(event)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EventFilter {
+    All,
+    Session(SessionId),
+}
+
+impl EventFilter {
+    fn matches(&self, event: &EventEnvelope) -> bool {
+        match self {
+            Self::All => true,
+            Self::Session(session_id) => event.session_id.as_ref() == Some(session_id),
+        }
+    }
 }
 
 impl EventBus {
@@ -240,14 +409,15 @@ impl EventBus {
             inner.replay.push_back(event.clone());
         }
 
-        inner
-            .subscribers
-            .retain(|subscriber| subscriber.send(event.clone()).is_ok());
+        inner.subscribers.retain(|subscriber| {
+            !subscriber.subscription.matches(&event)
+                || subscriber.sender.send(event.clone()).is_ok()
+        });
     }
 
     fn subscribe(
         &self,
-        request: &EventSubscriptionRequest,
+        subscription: EventBusSubscription,
     ) -> (Vec<EventEnvelope>, mpsc::Receiver<EventEnvelope>) {
         let (sender, receiver) = mpsc::channel();
         let Ok(mut inner) = self.inner.lock() else {
@@ -257,11 +427,15 @@ impl EventBus {
 
         let replay = bounded_replay(
             &inner.replay,
-            request.since_event_id.as_ref(),
-            request.replay_limit,
+            subscription.since_event_id.as_ref(),
+            subscription.replay_limit,
             self.max_replay,
+            &subscription.filter,
         );
-        inner.subscribers.push(sender);
+        inner.subscribers.push(EventSubscriber {
+            subscription,
+            sender,
+        });
         (replay, receiver)
     }
 }
@@ -271,6 +445,7 @@ fn bounded_replay(
     since_event_id: Option<&EventId>,
     replay_limit: Option<u32>,
     max_replay: usize,
+    filter: &EventFilter,
 ) -> Vec<EventEnvelope> {
     let limit = replay_limit
         .and_then(|limit| usize::try_from(limit).ok())
@@ -284,7 +459,12 @@ fn bounded_replay(
         .and_then(|event_id| replay.iter().position(|event| &event.event_id == event_id))
         .map(|index| index + 1)
         .unwrap_or(0);
-    let available = replay.iter().skip(start_index).cloned().collect::<Vec<_>>();
+    let available = replay
+        .iter()
+        .skip(start_index)
+        .filter(|event| filter.matches(event))
+        .cloned()
+        .collect::<Vec<_>>();
     let start = available.len().saturating_sub(limit);
     available[start..].to_vec()
 }
@@ -292,7 +472,13 @@ fn bounded_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cadis_protocol::{CadisEvent, EmptyPayload, Timestamp};
+    use cadis_models::{ModelInvocation, ModelProvider, ModelResponse};
+    use cadis_protocol::{
+        CadisEvent, ClientId, ContentKind, DaemonResponse, EmptyPayload, MessageSendRequest,
+        RequestEnvelope, ServerFrame, SessionCreateRequest, SessionEventPayload, Timestamp,
+    };
+    use std::sync::Condvar;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn bounded_replay_returns_events_after_retained_event_id() {
@@ -302,7 +488,13 @@ mod tests {
             event("evt_000003"),
         ]);
 
-        let events = bounded_replay(&replay, Some(&EventId::from("evt_000001")), Some(1), 8);
+        let events = bounded_replay(
+            &replay,
+            Some(&EventId::from("evt_000001")),
+            Some(1),
+            8,
+            &EventFilter::All,
+        );
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_id.as_str(), "evt_000003");
@@ -311,11 +503,12 @@ mod tests {
     #[test]
     fn event_bus_fans_out_published_runtime_events() {
         let bus = EventBus::new(8);
-        let (_replay, receiver) = bus.subscribe(&EventSubscriptionRequest {
-            include_snapshot: false,
-            replay_limit: Some(8),
-            since_event_id: None,
-        });
+        let (_replay, receiver) =
+            bus.subscribe(EventBusSubscription::all(&EventSubscriptionRequest {
+                include_snapshot: false,
+                replay_limit: Some(8),
+                since_event_id: None,
+            }));
 
         bus.publish(event("evt_000001"));
 
@@ -323,6 +516,446 @@ mod tests {
             .try_recv()
             .expect("subscriber should receive event");
         assert_eq!(received.event_id.as_str(), "evt_000001");
+    }
+
+    #[test]
+    fn event_bus_replays_only_matching_session_events() {
+        let bus = EventBus::new(8);
+        bus.publish(session_event("evt_000001", "ses_target"));
+        bus.publish(session_event("evt_000002", "ses_other"));
+        bus.publish(session_event("evt_000003", "ses_target"));
+
+        let (replay, _receiver) = bus.subscribe(EventBusSubscription {
+            since_event_id: Some(EventId::from("evt_000001")),
+            replay_limit: Some(8),
+            filter: EventFilter::Session(SessionId::from("ses_target")),
+        });
+
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].event_id.as_str(), "evt_000003");
+    }
+
+    #[test]
+    fn event_bus_fans_out_session_events_to_two_filtered_clients() {
+        let bus = EventBus::new(8);
+        let subscription = EventBusSubscription {
+            since_event_id: None,
+            replay_limit: Some(8),
+            filter: EventFilter::Session(SessionId::from("ses_target")),
+        };
+        let (_replay, left) = bus.subscribe(subscription.clone());
+        let (_replay, right) = bus.subscribe(subscription);
+
+        bus.publish(session_event("evt_000001", "ses_other"));
+        assert!(left.try_recv().is_err());
+        assert!(right.try_recv().is_err());
+
+        bus.publish(session_event("evt_000002", "ses_target"));
+
+        let left_event = left
+            .try_recv()
+            .expect("left subscriber should receive event");
+        let right_event = right
+            .try_recv()
+            .expect("right subscriber should receive event");
+        assert_eq!(left_event.event_id.as_str(), "evt_000002");
+        assert_eq!(right_event.event_id.as_str(), "evt_000002");
+    }
+
+    #[test]
+    fn event_bus_keeps_unmatched_filtered_subscribers() {
+        let bus = EventBus::new(8);
+        let (_replay, receiver) = bus.subscribe(EventBusSubscription {
+            since_event_id: None,
+            replay_limit: Some(8),
+            filter: EventFilter::Session(SessionId::from("ses_target")),
+        });
+
+        bus.publish(session_event("evt_000001", "ses_other"));
+        bus.publish(session_event("evt_000002", "ses_target"));
+
+        let received = receiver
+            .try_recv()
+            .expect("subscriber should remain attached until a matching event");
+        assert_eq!(received.event_id.as_str(), "evt_000002");
+    }
+
+    #[test]
+    fn pending_message_generation_leaves_runtime_mutex_available() {
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let runtime = Arc::new(Mutex::new(Runtime::new(
+            RuntimeOptions {
+                cadis_home: test_workspace("cadis-daemon-runtime-lock"),
+                profile_id: "default".to_owned(),
+                socket_path: None,
+                model_provider: "waiting".to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
+                ui_preferences: serde_json::json!({}),
+            },
+            Box::new(WaitingProvider {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+        )));
+        let pending = runtime
+            .lock()
+            .expect("runtime mutex should lock")
+            .begin_message_request(RequestEnvelope::new(
+                RequestId::from("req_chat"),
+                ClientId::from("cli_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "hello".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ))
+            .expect("message generation should be prepared");
+        let selected_model = pending.selected_model.clone();
+        let prompt = pending.prompt.clone();
+        let provider = Arc::clone(&pending.provider);
+        let worker = thread::spawn(move || {
+            provider
+                .stream_chat(
+                    ModelRequest::new(&prompt).with_selected_model(selected_model.as_deref()),
+                    &mut |_event| Ok(ModelStreamControl::Continue),
+                )
+                .expect("waiting provider should complete")
+        });
+
+        wait_for_flag(&entered);
+        let status = runtime
+            .try_lock()
+            .expect("runtime mutex should not be held during provider generation")
+            .handle_request(RequestEnvelope::new(
+                RequestId::from("req_status"),
+                ClientId::from("cli_2"),
+                ClientRequest::DaemonStatus(EmptyPayload::default()),
+            ));
+        assert!(matches!(
+            status.response.response,
+            DaemonResponse::DaemonStatus(_)
+        ));
+
+        set_flag(&release);
+        let response = worker.join().expect("provider thread should not panic");
+        assert_eq!(response.deltas, vec!["done".to_owned()]);
+    }
+
+    #[test]
+    fn socket_clients_share_session_events_while_status_and_agent_list_stay_live() {
+        let cadis_home = test_workspace("cadis-daemon-socket-live-subscribe");
+        let socket_path = cadis_home.join("run").join("cadisd-test.sock");
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let config = CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        };
+        ensure_layout(&config).expect("test CADIS layout should be created");
+
+        let runtime = Arc::new(Mutex::new(Runtime::new(
+            RuntimeOptions {
+                cadis_home,
+                profile_id: "default".to_owned(),
+                socket_path: Some(socket_path.clone()),
+                model_provider: "waiting".to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
+                ui_preferences: serde_json::json!({}),
+            },
+            Box::new(WaitingProvider {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+        )));
+        let event_log = EventLog::new(&config);
+        let event_bus = EventBus::new(32);
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let accept_runtime = Arc::clone(&runtime);
+        let accept_event_log = event_log.clone();
+        let accept_event_bus = event_bus.clone();
+        let accept_thread = thread::spawn(move || {
+            for _ in 0..4 {
+                let (stream, _) = listener.accept().expect("test client should connect");
+                let runtime = Arc::clone(&accept_runtime);
+                let event_log = accept_event_log.clone();
+                let event_bus = accept_event_bus.clone();
+                thread::spawn(move || {
+                    let _ = serve_unix_stream(stream, runtime, event_log, event_bus);
+                });
+            }
+        });
+
+        let mut control = TestClient::connect(&socket_path);
+        let mut subscriber_one = TestClient::connect(&socket_path);
+        let mut subscriber_two = TestClient::connect(&socket_path);
+        let mut messenger = TestClient::connect(&socket_path);
+        accept_thread
+            .join()
+            .expect("test accept thread should not panic");
+
+        control.send(RequestEnvelope::new(
+            RequestId::from("req_create_session"),
+            ClientId::from("cli_control"),
+            ClientRequest::SessionCreate(SessionCreateRequest {
+                title: Some("Socket fan-out".to_owned()),
+                cwd: None,
+            }),
+        ));
+        assert!(matches!(
+            control.read_frame(),
+            ServerFrame::Response(ResponseEnvelope {
+                response: DaemonResponse::RequestAccepted(_),
+                ..
+            })
+        ));
+        let session_id = match control.read_frame() {
+            ServerFrame::Event(EventEnvelope {
+                event: CadisEvent::SessionStarted(payload),
+                ..
+            }) => payload.session_id,
+            other => panic!("expected session.started event, got {other:?}"),
+        };
+
+        let subscribe = |request_id: &str| {
+            RequestEnvelope::new(
+                RequestId::from(request_id),
+                ClientId::from(request_id),
+                ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
+                    session_id: session_id.clone(),
+                    since_event_id: None,
+                    replay_limit: Some(16),
+                    include_snapshot: false,
+                }),
+            )
+        };
+        subscriber_one.send(subscribe("req_subscribe_one"));
+        subscriber_two.send(subscribe("req_subscribe_two"));
+        assert_accepted_response(&mut subscriber_one);
+        assert_accepted_response(&mut subscriber_two);
+
+        messenger.send(RequestEnvelope::new(
+            RequestId::from("req_message"),
+            ClientId::from("cli_message"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: Some(session_id.clone()),
+                target_agent_id: None,
+                content: "hold generation open".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+        assert_accepted_response(&mut messenger);
+
+        wait_for_flag(&entered);
+
+        let route_one = subscriber_one
+            .read_event_matching(|event| matches!(event.event, CadisEvent::OrchestratorRoute(_)));
+        let route_two = subscriber_two
+            .read_event_matching(|event| matches!(event.event, CadisEvent::OrchestratorRoute(_)));
+        assert_eq!(route_one.event_id, route_two.event_id);
+        assert_eq!(route_one.session_id.as_ref(), Some(&session_id));
+        assert_eq!(route_two.session_id.as_ref(), Some(&session_id));
+
+        let status_one = subscriber_one
+            .read_event_matching(|event| matches!(event.event, CadisEvent::AgentStatusChanged(_)));
+        let status_two = subscriber_two
+            .read_event_matching(|event| matches!(event.event, CadisEvent::AgentStatusChanged(_)));
+        assert_eq!(status_one.event_id, status_two.event_id);
+
+        control.send(RequestEnvelope::new(
+            RequestId::from("req_status"),
+            ClientId::from("cli_control"),
+            ClientRequest::DaemonStatus(EmptyPayload::default()),
+        ));
+        match control.read_frame() {
+            ServerFrame::Response(ResponseEnvelope {
+                response: DaemonResponse::DaemonStatus(status),
+                ..
+            }) => assert_eq!(status.status, "ok"),
+            other => panic!("expected daemon.status.response during generation, got {other:?}"),
+        }
+
+        control.send(RequestEnvelope::new(
+            RequestId::from("req_agent_list"),
+            ClientId::from("cli_control"),
+            ClientRequest::AgentList(EmptyPayload::default()),
+        ));
+        assert_accepted_response(&mut control);
+        let agent_list = control
+            .read_event_matching(|event| matches!(event.event, CadisEvent::AgentListResponse(_)));
+        assert!(agent_list.session_id.is_none());
+
+        set_flag(&release);
+
+        let delta_one = subscriber_one
+            .read_event_matching(|event| matches!(event.event, CadisEvent::MessageDelta(_)));
+        let delta_two = subscriber_two
+            .read_event_matching(|event| matches!(event.event, CadisEvent::MessageDelta(_)));
+        assert_eq!(delta_one.event_id, delta_two.event_id);
+
+        let completed_one = subscriber_one
+            .read_event_matching(|event| matches!(event.event, CadisEvent::MessageCompleted(_)));
+        let completed_two = subscriber_two
+            .read_event_matching(|event| matches!(event.event, CadisEvent::MessageCompleted(_)));
+        assert_eq!(completed_one.event_id, completed_two.event_id);
+    }
+
+    #[derive(Clone, Debug)]
+    struct WaitingProvider {
+        entered: Arc<(Mutex<bool>, Condvar)>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl ModelProvider for WaitingProvider {
+        fn name(&self) -> &str {
+            "waiting"
+        }
+
+        fn chat(&self, _prompt: &str) -> Result<Vec<String>, ModelError> {
+            Ok(vec!["done".to_owned()])
+        }
+
+        fn stream_chat(
+            &self,
+            request: ModelRequest<'_>,
+            callback: &mut cadis_models::ModelStreamCallback<'_>,
+        ) -> Result<ModelResponse, ModelError> {
+            set_flag(&self.entered);
+            wait_for_flag(&self.release);
+            let invocation = ModelInvocation {
+                requested_model: request.selected_model.map(ToOwned::to_owned),
+                effective_provider: "waiting".to_owned(),
+                effective_model: "unit-test".to_owned(),
+                fallback: false,
+                fallback_reason: None,
+            };
+            callback(ModelStreamEvent::Started(invocation.clone()))?;
+            callback(ModelStreamEvent::Delta("done".to_owned()))?;
+            callback(ModelStreamEvent::Completed(invocation.clone()))?;
+            Ok(ModelResponse {
+                deltas: vec!["done".to_owned()],
+                invocation,
+            })
+        }
+    }
+
+    fn wait_for_flag(flag: &Arc<(Mutex<bool>, Condvar)>) {
+        let (lock, condvar) = &**flag;
+        let mut ready = lock.lock().expect("flag mutex should lock");
+        while !*ready {
+            ready = condvar
+                .wait(ready)
+                .expect("flag mutex should not be poisoned");
+        }
+    }
+
+    fn set_flag(flag: &Arc<(Mutex<bool>, Condvar)>) {
+        let (lock, condvar) = &**flag;
+        *lock.lock().expect("flag mutex should lock") = true;
+        condvar.notify_all();
+    }
+
+    struct TestClient {
+        reader: BufReader<UnixStream>,
+        writer: UnixStream,
+    }
+
+    impl TestClient {
+        fn connect(socket_path: &Path) -> Self {
+            let stream = UnixStream::connect(socket_path).expect("test client should connect");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("test client read timeout should be set");
+            let reader_stream = stream
+                .try_clone()
+                .expect("test client stream should clone for reading");
+            reader_stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("test client reader timeout should be set");
+            Self {
+                reader: BufReader::new(reader_stream),
+                writer: stream,
+            }
+        }
+
+        fn send(&mut self, request: RequestEnvelope) {
+            serde_json::to_writer(&mut self.writer, &request)
+                .expect("request frame should serialize");
+            self.writer
+                .write_all(b"\n")
+                .expect("request frame newline should write");
+            self.writer.flush().expect("request frame should flush");
+        }
+
+        fn read_frame(&mut self) -> ServerFrame {
+            let mut line = String::new();
+            self.reader
+                .read_line(&mut line)
+                .expect("server frame should be readable before timeout");
+            assert!(!line.is_empty(), "server closed the test client stream");
+            serde_json::from_str(&line).expect("server frame should deserialize")
+        }
+
+        fn read_event_matching(
+            &mut self,
+            mut predicate: impl FnMut(&EventEnvelope) -> bool,
+        ) -> EventEnvelope {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let frame = self.read_frame();
+                if let ServerFrame::Event(event) = frame {
+                    if predicate(&event) {
+                        return event;
+                    }
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for matching event"
+                );
+            }
+        }
+    }
+
+    fn assert_accepted_response(client: &mut TestClient) {
+        assert!(matches!(
+            client.read_frame(),
+            ServerFrame::Response(ResponseEnvelope {
+                response: DaemonResponse::RequestAccepted(_),
+                ..
+            })
+        ));
+    }
+
+    fn test_workspace(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "{name}-{}-{}",
+            process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be after unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).expect("test workspace should be created");
+        path
+    }
+
+    fn session_event(event_id: &str, session_id: &str) -> EventEnvelope {
+        let session_id = SessionId::from(session_id);
+        EventEnvelope::new(
+            EventId::from(event_id),
+            Timestamp::new_utc("2026-04-26T00:00:00Z").expect("timestamp should parse"),
+            "cadisd",
+            Some(session_id.clone()),
+            CadisEvent::SessionStarted(SessionEventPayload {
+                session_id,
+                title: None,
+            }),
+        )
     }
 
     fn event(event_id: &str) -> EventEnvelope {
@@ -408,6 +1041,10 @@ fn print_check(config: &CadisConfig, socket_path: &Path) {
     println!("ollama_endpoint: {}", config.model.ollama_endpoint);
     println!("openai_model: {}", config.model.openai_model);
     println!("openai_base_url: {}", redact(&config.model.openai_base_url));
+    println!("voice_enabled: {}", config.voice.enabled);
+    println!("voice_provider: {}", config.voice.provider);
+    println!("voice_id: {}", config.voice.voice_id);
+    println!("voice_stt_language: {}", config.voice.stt_language);
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

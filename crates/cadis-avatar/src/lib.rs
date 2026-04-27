@@ -11,8 +11,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "wgpu-renderer")]
+pub mod wgpu_renderer;
+
 /// Identifier used by the Wulan avatar prototype and native engine.
 pub const WULAN_AVATAR_ID: &str = "wulan_arc";
+
+/// Avatar style used when native Wulan rendering cannot produce a frame.
+pub const CADIS_ORB_AVATAR_ID: &str = "orb";
 
 /// Supported avatar renderer backend targets.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
@@ -25,6 +31,85 @@ pub enum RendererBackend {
     WgpuNative,
     /// Bevy scene renderer target for richer body and scene orchestration.
     BevyScene,
+}
+
+/// HUD avatar target used when a native renderer fails or is unavailable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AvatarFallbackTarget {
+    /// Stable default CADIS orb path.
+    #[default]
+    #[serde(rename = "orb")]
+    CadisOrb,
+    /// Static Wulan portrait texture without native animation.
+    StaticWulanTexture,
+}
+
+impl AvatarFallbackTarget {
+    /// Returns the daemon/HUD avatar style identifier for this fallback target.
+    pub fn avatar_id(self) -> &'static str {
+        match self {
+            Self::CadisOrb => CADIS_ORB_AVATAR_ID,
+            Self::StaticWulanTexture => WULAN_AVATAR_ID,
+        }
+    }
+}
+
+/// Renderer fallback behavior promised by native avatar adapters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AvatarFallbackContract {
+    /// HUD avatar target to show when native rendering fails.
+    pub target: AvatarFallbackTarget,
+    /// Whether renderer failure must leave the HUD launch path available.
+    pub preserves_hud_launch: bool,
+    /// Whether fallback events should carry a coarse reason code.
+    pub reason_code_required: bool,
+    /// Whether reduced-motion state should be preserved through fallback.
+    pub reduced_motion_passthrough: bool,
+}
+
+impl Default for AvatarFallbackContract {
+    fn default() -> Self {
+        Self {
+            target: AvatarFallbackTarget::CadisOrb,
+            preserves_hud_launch: true,
+            reason_code_required: true,
+            reduced_motion_passthrough: true,
+        }
+    }
+}
+
+/// Coarse reason a renderer adapter fell back instead of drawing Wulan.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AvatarFallbackReason {
+    /// Renderer implementation was not available.
+    #[default]
+    RendererUnavailable,
+    /// Renderer lost or could not acquire its target surface.
+    SurfaceLost,
+    /// Renderer returned an error while drawing a frame.
+    RenderError,
+    /// Requested backend is not supported by the adapter.
+    UnsupportedBackend,
+}
+
+/// Minimal state a HUD adapter needs to show a fallback avatar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct AvatarFallbackState {
+    /// Fallback avatar style to show.
+    pub target: AvatarFallbackTarget,
+    /// Coarse fallback reason suitable for HUD state and tests.
+    pub reason: AvatarFallbackReason,
+    /// Renderer backend that failed or was unavailable.
+    pub failed_backend: RendererBackend,
+    /// Runtime mode being rendered when fallback was selected.
+    pub mode: AvatarMode,
+    /// Whether reduced-motion state remains active in fallback.
+    pub reduced_motion: bool,
+    /// Monotonic timestamp in milliseconds from the source frame.
+    pub time_ms: u64,
 }
 
 impl RendererBackend {
@@ -213,6 +298,8 @@ pub struct AvatarEngineConfig {
     pub avatar_id: String,
     /// Preferred native renderer backend.
     pub renderer: RendererBackend,
+    /// Fallback avatar target when the native renderer fails.
+    pub renderer_fallback: AvatarFallbackTarget,
     /// Face tracking config.
     pub face_tracking: FaceTrackingConfig,
     /// Privacy policy for any face tracking data.
@@ -228,6 +315,7 @@ impl Default for AvatarEngineConfig {
         Self {
             avatar_id: WULAN_AVATAR_ID.to_owned(),
             renderer: RendererBackend::WgpuNative,
+            renderer_fallback: AvatarFallbackTarget::CadisOrb,
             face_tracking: FaceTrackingConfig::default(),
             privacy: AvatarPrivacy::default(),
             reduced_motion: false,
@@ -267,7 +355,7 @@ impl AvatarEngineConfig {
 
     /// Returns the renderer contract implied by this configuration.
     pub fn renderer_contract(&self) -> AvatarRendererContract {
-        AvatarRendererContract::for_backend(self.renderer)
+        AvatarRendererContract::for_backend(self.renderer).with_fallback(self.renderer_fallback)
     }
 }
 
@@ -487,6 +575,25 @@ impl AvatarFrame {
     }
 }
 
+impl AvatarFallbackContract {
+    /// Converts a failed render attempt into minimal fallback state for the HUD.
+    pub fn state_for_frame(
+        self,
+        failed_backend: RendererBackend,
+        frame: &AvatarFrame,
+        reason: AvatarFallbackReason,
+    ) -> AvatarFallbackState {
+        AvatarFallbackState {
+            target: self.target,
+            reason,
+            failed_backend,
+            mode: frame.mode,
+            reduced_motion: self.reduced_motion_passthrough && frame.body_state.reduced_motion,
+            time_ms: frame.time_ms,
+        }
+    }
+}
+
 /// Version of the direct-wgpu avatar uniform payload.
 pub const WGPU_AVATAR_UNIFORM_VERSION: u16 = 1;
 
@@ -621,6 +728,8 @@ pub struct AvatarRendererContract {
     pub wgpu: WgpuRendererContract,
     /// Deferred Bevy renderer contract.
     pub bevy: BevyRendererContract,
+    /// Required fallback behavior when native rendering fails.
+    pub fallback: AvatarFallbackContract,
 }
 
 impl AvatarRendererContract {
@@ -630,7 +739,24 @@ impl AvatarRendererContract {
             preferred_backend,
             wgpu: WgpuRendererContract::default(),
             bevy: BevyRendererContract::default(),
+            fallback: AvatarFallbackContract::default(),
         }
+    }
+
+    /// Overrides the fallback target while preserving fallback safety rules.
+    pub fn with_fallback(mut self, target: AvatarFallbackTarget) -> Self {
+        self.fallback.target = target;
+        self
+    }
+
+    /// Builds the HUD fallback state for a frame that could not be rendered.
+    pub fn fallback_for_frame(
+        &self,
+        failed_backend: RendererBackend,
+        frame: &AvatarFrame,
+        reason: AvatarFallbackReason,
+    ) -> AvatarFallbackState {
+        self.fallback.state_for_frame(failed_backend, frame, reason)
     }
 }
 
@@ -696,6 +822,35 @@ pub trait AvatarRenderer {
 pub trait WgpuAvatarRenderer: AvatarRenderer {
     /// Returns the no-dependency `wgpu` contract this renderer implements.
     fn wgpu_contract(&self) -> WgpuRendererContract;
+}
+
+/// Result of attempting to render a frame with fallback handling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AvatarRenderAttempt {
+    /// The renderer accepted the frame.
+    Rendered(AvatarRenderReceipt),
+    /// The renderer failed and the HUD should show fallback state.
+    Fallback(AvatarFallbackState),
+}
+
+/// Renders one frame or returns fallback state without blocking the HUD path.
+pub fn render_or_fallback<R>(
+    renderer: &mut R,
+    frame: &AvatarFrame,
+    contract: &AvatarRendererContract,
+) -> AvatarRenderAttempt
+where
+    R: AvatarRenderer + ?Sized,
+{
+    let backend = renderer.backend();
+    match renderer.render(frame) {
+        Ok(receipt) => AvatarRenderAttempt::Rendered(receipt),
+        Err(_) => AvatarRenderAttempt::Fallback(contract.fallback_for_frame(
+            backend,
+            frame,
+            AvatarFallbackReason::RenderError,
+        )),
+    }
 }
 
 /// Renderer error.
@@ -1010,16 +1165,21 @@ mod tests {
 
         assert_eq!(config.avatar_id, WULAN_AVATAR_ID);
         assert_eq!(config.renderer, RendererBackend::WgpuNative);
+        assert_eq!(config.renderer_fallback, AvatarFallbackTarget::CadisOrb);
         assert_eq!(config.face_tracking.mode, FaceTrackingMode::Off);
         assert!(config.privacy.local_only_face_tracking);
         assert!(!config.privacy.persist_raw_face_frames);
         assert!(!config.privacy.persist_face_landmarks);
         assert!(!config.privacy.allow_remote_face_tracking);
         assert!(!config.privacy.allow_face_identity);
-        assert_eq!(
-            config.renderer_contract().wgpu.uniform_version,
-            WGPU_AVATAR_UNIFORM_VERSION
-        );
+
+        let contract = config.renderer_contract();
+        assert_eq!(contract.wgpu.uniform_version, WGPU_AVATAR_UNIFORM_VERSION);
+        assert_eq!(contract.fallback.target, AvatarFallbackTarget::CadisOrb);
+        assert_eq!(contract.fallback.target.avatar_id(), CADIS_ORB_AVATAR_ID);
+        assert!(contract.fallback.preserves_hud_launch);
+        assert!(contract.fallback.reason_code_required);
+        assert!(contract.fallback.reduced_motion_passthrough);
     }
 
     #[test]
@@ -1042,6 +1202,61 @@ mod tests {
         assert!(frame.body.intensity > 0.8);
         assert!(frame.face.mouth_open > 0.5);
         assert!(frame.material.glow > 0.8);
+    }
+
+    #[test]
+    fn modes_export_expected_body_gestures_and_priorities() {
+        let mut engine = AvatarEngine::new(AvatarEngineConfig::default());
+        let cases = [
+            (
+                AvatarMode::Idle,
+                BodyGesture::IdleBreath,
+                BodyGesturePriority::Ambient,
+            ),
+            (
+                AvatarMode::Listening,
+                BodyGesture::AttentiveLean,
+                BodyGesturePriority::Activity,
+            ),
+            (
+                AvatarMode::Thinking,
+                BodyGesture::ThinkingOrbit,
+                BodyGesturePriority::Activity,
+            ),
+            (
+                AvatarMode::Speaking,
+                BodyGesture::SpeakingPulse,
+                BodyGesturePriority::Activity,
+            ),
+            (
+                AvatarMode::Coding,
+                BodyGesture::CodingFocus,
+                BodyGesturePriority::Activity,
+            ),
+            (
+                AvatarMode::Approval,
+                BodyGesture::ApprovalHold,
+                BodyGesturePriority::Interaction,
+            ),
+            (
+                AvatarMode::Error,
+                BodyGesture::ErrorAlert,
+                BodyGesturePriority::Safety,
+            ),
+        ];
+
+        for (index, (mode, gesture, priority)) in cases.into_iter().enumerate() {
+            let frame = engine.update(AvatarInput {
+                mode,
+                audio_level: 0.65,
+                now_ms: ((index + 1) * 100) as u64,
+                ..AvatarInput::default()
+            });
+
+            assert_eq!(frame.body_state.gesture, gesture);
+            assert_eq!(frame.body.gesture, gesture);
+            assert_eq!(frame.body_state.priority, priority);
+        }
     }
 
     #[test]
@@ -1162,6 +1377,78 @@ mod tests {
         assert_eq!(receipt.backend, RendererBackend::Headless);
         assert_eq!(receipt.time_ms, 42);
         assert_eq!(renderer.frames(), &[frame]);
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingWgpuRenderer;
+
+    impl AvatarRenderer for FailingWgpuRenderer {
+        fn backend(&self) -> RendererBackend {
+            RendererBackend::WgpuNative
+        }
+
+        fn render(
+            &mut self,
+            _frame: &AvatarFrame,
+        ) -> Result<AvatarRenderReceipt, AvatarRenderError> {
+            Err(AvatarRenderError::new("native surface unavailable"))
+        }
+    }
+
+    #[test]
+    fn renderer_error_returns_cadis_orb_fallback_state() {
+        let mut engine = AvatarEngine::new(AvatarEngineConfig {
+            reduced_motion: true,
+            ..AvatarEngineConfig::default()
+        });
+        let frame = engine.update(AvatarInput {
+            mode: AvatarMode::Approval,
+            now_ms: 777,
+            ..AvatarInput::default()
+        });
+        let contract = engine.config().renderer_contract();
+        let mut renderer = FailingWgpuRenderer;
+
+        let attempt = render_or_fallback(&mut renderer, &frame, &contract);
+
+        assert_eq!(
+            attempt,
+            AvatarRenderAttempt::Fallback(AvatarFallbackState {
+                target: AvatarFallbackTarget::CadisOrb,
+                reason: AvatarFallbackReason::RenderError,
+                failed_backend: RendererBackend::WgpuNative,
+                mode: AvatarMode::Approval,
+                reduced_motion: true,
+                time_ms: 777,
+            })
+        );
+    }
+
+    #[test]
+    fn fallback_state_serializes_for_hud_boundaries() {
+        let mut engine = AvatarEngine::new(AvatarEngineConfig {
+            renderer_fallback: AvatarFallbackTarget::StaticWulanTexture,
+            reduced_motion: true,
+            ..AvatarEngineConfig::default()
+        });
+        let frame = engine.update(AvatarInput {
+            mode: AvatarMode::Error,
+            now_ms: 900,
+            ..AvatarInput::default()
+        });
+        let fallback = engine.config().renderer_contract().fallback_for_frame(
+            RendererBackend::WgpuNative,
+            &frame,
+            AvatarFallbackReason::SurfaceLost,
+        );
+
+        let json = serde_json::to_string(&fallback).expect("fallback should serialize");
+
+        assert!(json.contains("\"target\":\"static_wulan_texture\""));
+        assert!(json.contains("\"reason\":\"surface_lost\""));
+        assert!(json.contains("\"failed_backend\":\"wgpu_native\""));
+        assert!(json.contains("\"mode\":\"error\""));
+        assert!(json.contains("\"reduced_motion\":true"));
     }
 
     #[test]

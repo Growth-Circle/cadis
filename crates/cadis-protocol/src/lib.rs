@@ -76,6 +76,10 @@ string_id!(
     AgentId
 );
 string_id!(
+    /// CADIS per-route agent runtime session identifier.
+    AgentSessionId
+);
+string_id!(
     /// CADIS registered workspace identifier.
     WorkspaceId
 );
@@ -302,6 +306,7 @@ pub enum ServerFrame {
 }
 
 /// Immediate response returned for request handling failures or acknowledgements.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", content = "payload")]
 pub enum DaemonResponse {
@@ -343,6 +348,9 @@ pub struct DaemonStatusPayload {
     pub model_provider: String,
     /// Daemon uptime in seconds.
     pub uptime_seconds: u64,
+    /// Daemon-visible voice capability status.
+    #[serde(default)]
+    pub voice: VoiceStatusPayload,
 }
 
 /// Machine-readable error payload for responses and error events.
@@ -381,7 +389,7 @@ pub enum ClientRequest {
     SessionCancel(SessionTargetRequest),
     /// Subscribe to a session stream.
     #[serde(rename = "session.subscribe")]
-    SessionSubscribe(SessionTargetRequest),
+    SessionSubscribe(SessionSubscriptionRequest),
     /// Unsubscribe from a session stream.
     #[serde(rename = "session.unsubscribe")]
     SessionUnsubscribe(SessionTargetRequest),
@@ -436,6 +444,15 @@ pub enum ClientRequest {
     /// Patch daemon-owned UI preferences.
     #[serde(rename = "ui.preferences.set")]
     UiPreferencesSet(UiPreferencesSetRequest),
+    /// Request daemon-visible voice capability status.
+    #[serde(rename = "voice.status")]
+    VoiceStatus(EmptyPayload),
+    /// Run daemon-visible voice diagnostics.
+    #[serde(rename = "voice.doctor")]
+    VoiceDoctor(VoiceDoctorRequest),
+    /// Report local HUD bridge preflight checks to the daemon.
+    #[serde(rename = "voice.preflight")]
+    VoicePreflight(VoicePreflightRequest),
     /// Preview voice output.
     #[serde(rename = "voice.preview")]
     VoicePreview(VoicePreviewRequest),
@@ -495,6 +512,22 @@ pub struct SessionCreateRequest {
 pub struct SessionTargetRequest {
     /// Target session ID.
     pub session_id: SessionId,
+}
+
+/// Payload for subscribing to one session's event stream.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct SessionSubscriptionRequest {
+    /// Target session ID.
+    pub session_id: SessionId,
+    /// Optional event ID. Buffered replay starts after this ID when still retained.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since_event_id: Option<EventId>,
+    /// Maximum buffered matching events to replay before live events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_limit: Option<u32>,
+    /// Whether the daemon should send the current session state before replay.
+    #[serde(default = "default_true")]
+    pub include_snapshot: bool,
 }
 
 /// Payload for a user message.
@@ -699,6 +732,36 @@ pub struct VoicePreferences {
     pub volume: i16,
 }
 
+/// Request payload for daemon-visible voice diagnostics.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct VoiceDoctorRequest {
+    /// Include the last local bridge preflight in the result when available.
+    #[serde(default = "default_true")]
+    pub include_bridge: bool,
+}
+
+impl Default for VoiceDoctorRequest {
+    fn default() -> Self {
+        Self {
+            include_bridge: true,
+        }
+    }
+}
+
+/// Request payload used by a local bridge to publish preflight results.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct VoicePreflightRequest {
+    /// Client or bridge that performed the checks, for example `cadis-hud`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+    /// Optional bridge-generated summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Local capture/playback checks performed outside the daemon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<VoiceDoctorCheck>,
+}
+
 /// Daemon events emitted by protocol version 0.1.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", content = "payload")]
@@ -748,6 +811,21 @@ pub enum CadisEvent {
     /// Agent completed a task.
     #[serde(rename = "agent.completed")]
     AgentCompleted(AgentEventPayload),
+    /// Agent runtime session started.
+    #[serde(rename = "agent.session.started")]
+    AgentSessionStarted(AgentSessionEventPayload),
+    /// Agent runtime session state changed.
+    #[serde(rename = "agent.session.updated")]
+    AgentSessionUpdated(AgentSessionEventPayload),
+    /// Agent runtime session completed.
+    #[serde(rename = "agent.session.completed")]
+    AgentSessionCompleted(AgentSessionEventPayload),
+    /// Agent runtime session failed.
+    #[serde(rename = "agent.session.failed")]
+    AgentSessionFailed(AgentSessionEventPayload),
+    /// Agent runtime session was cancelled.
+    #[serde(rename = "agent.session.cancelled")]
+    AgentSessionCancelled(AgentSessionEventPayload),
     /// Workspace registry snapshot.
     #[serde(rename = "workspace.list.response")]
     WorkspaceListResponse(WorkspaceListPayload),
@@ -769,6 +847,15 @@ pub enum CadisEvent {
     /// UI preferences changed.
     #[serde(rename = "ui.preferences.updated")]
     UiPreferencesUpdated(UiPreferencesPayload),
+    /// Voice capability status changed or was requested.
+    #[serde(rename = "voice.status.updated")]
+    VoiceStatusUpdated(VoiceStatusPayload),
+    /// Voice diagnostics result.
+    #[serde(rename = "voice.doctor.response")]
+    VoiceDoctorResponse(VoiceDoctorPayload),
+    /// Local bridge voice preflight was recorded by the daemon.
+    #[serde(rename = "voice.preflight.response")]
+    VoicePreflightResponse(VoiceDoctorPayload),
     /// Orchestrator routed a user request to an agent.
     #[serde(rename = "orchestrator.route")]
     OrchestratorRoute(OrchestratorRoutePayload),
@@ -946,6 +1033,44 @@ pub struct AgentStatusChangedPayload {
     pub task: Option<String>,
 }
 
+/// Agent runtime session lifecycle payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct AgentSessionEventPayload {
+    /// Per-route agent runtime session ID.
+    pub agent_session_id: AgentSessionId,
+    /// Owning CADIS user session ID.
+    pub session_id: SessionId,
+    /// Route identifier that caused this agent session.
+    pub route_id: String,
+    /// Agent running the task.
+    pub agent_id: AgentId,
+    /// Parent agent for tree display and spawn accounting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_agent_id: Option<AgentId>,
+    /// Current task summary.
+    pub task: String,
+    /// Runtime state machine status.
+    pub status: AgentSessionStatus,
+    /// Absolute timeout deadline.
+    pub timeout_at: Timestamp,
+    /// Step budget for this session.
+    pub budget_steps: u32,
+    /// Consumed step count.
+    pub steps_used: u32,
+    /// Redacted result summary for terminal success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// Stable error code for terminal failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Redacted error summary for terminal failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Cancellation request timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancellation_requested_at: Option<Timestamp>,
+}
+
 /// Workspace registry snapshot payload.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct WorkspaceListPayload {
@@ -1072,6 +1197,94 @@ pub enum ModelReadiness {
 pub struct UiPreferencesPayload {
     /// Full or partial preference object.
     pub preferences: serde_json::Value,
+}
+
+/// Daemon-visible voice capability state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceRuntimeState {
+    /// Voice is disabled in daemon-owned preferences.
+    Disabled,
+    /// Voice has no known blocking or warning diagnostics.
+    Ready,
+    /// Voice is usable but has warnings.
+    Degraded,
+    /// Voice has a blocking diagnostic.
+    Blocked,
+    /// The daemon has not seen enough information yet.
+    #[default]
+    Unknown,
+}
+
+/// Current daemon-visible voice status.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct VoiceStatusPayload {
+    /// Whether voice output is enabled in daemon-owned preferences.
+    pub enabled: bool,
+    /// Overall voice readiness.
+    pub state: VoiceRuntimeState,
+    /// Configured TTS provider.
+    pub provider: String,
+    /// Configured TTS voice identifier.
+    pub voice_id: String,
+    /// Configured STT language or `auto`.
+    pub stt_language: String,
+    /// Maximum characters eligible for direct speech output.
+    pub max_spoken_chars: usize,
+    /// Required local bridge mode for platform media APIs.
+    pub bridge: String,
+    /// Last local bridge preflight recorded by `voice.preflight`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_preflight: Option<VoicePreflightSummary>,
+}
+
+impl Default for VoiceStatusPayload {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            state: VoiceRuntimeState::Unknown,
+            provider: "edge".to_owned(),
+            voice_id: "id-ID-GadisNeural".to_owned(),
+            stt_language: "auto".to_owned(),
+            max_spoken_chars: 800,
+            bridge: "hud-local".to_owned(),
+            last_preflight: None,
+        }
+    }
+}
+
+/// One daemon or local bridge voice diagnostic check.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct VoiceDoctorCheck {
+    /// Stable check name.
+    pub name: String,
+    /// Result status, normally `ok`, `warn`, or `error`.
+    pub status: String,
+    /// Human-readable result.
+    #[serde(alias = "detail")]
+    pub message: String,
+}
+
+/// Summary of the last local bridge voice preflight.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct VoicePreflightSummary {
+    /// Client or bridge that performed the preflight.
+    pub surface: String,
+    /// Aggregated preflight status.
+    pub status: String,
+    /// Redacted human-readable summary.
+    pub summary: String,
+    /// UTC timestamp when the daemon recorded the preflight.
+    pub checked_at: Timestamp,
+}
+
+/// Voice diagnostics response payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct VoiceDoctorPayload {
+    /// Current daemon-visible voice status.
+    pub status: VoiceStatusPayload,
+    /// Checks performed or remembered by the daemon.
+    pub checks: Vec<VoiceDoctorCheck>,
 }
 
 /// Orchestrator routing decision payload.
@@ -1387,6 +1600,8 @@ pub enum ApprovalDecision {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
+    /// Agent is being created.
+    Spawning,
     /// Agent is idle.
     Idle,
     /// Agent is running.
@@ -1397,6 +1612,28 @@ pub enum AgentStatus {
     Completed,
     /// Agent failed.
     Failed,
+    /// Agent was cancelled.
+    Cancelled,
+}
+
+/// Agent runtime session status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSessionStatus {
+    /// Session was created and assigned.
+    Started,
+    /// Session is actively working.
+    Running,
+    /// Session completed successfully.
+    Completed,
+    /// Session failed.
+    Failed,
+    /// Session was cancelled.
+    Cancelled,
+    /// Session exceeded its timeout.
+    TimedOut,
+    /// Session exceeded its configured step budget.
+    BudgetExceeded,
 }
 
 /// Test status.
@@ -1469,6 +1706,66 @@ mod tests {
                     "since_event_id": "evt_000007",
                     "replay_limit": 32,
                     "include_snapshot": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn session_subscription_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
+                session_id: SessionId::from("ses_1"),
+                since_event_id: Some(EventId::from("evt_000010")),
+                replay_limit: Some(16),
+                include_snapshot: true,
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_1",
+                "client_id": "cli_1",
+                "type": "session.subscribe",
+                "payload": {
+                    "session_id": "ses_1",
+                    "since_event_id": "evt_000010",
+                    "replay_limit": 16,
+                    "include_snapshot": true
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn worker_tail_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkerTail(WorkerTailRequest {
+                worker_id: "worker_000001".to_owned(),
+                lines: Some(20),
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_1",
+                "client_id": "cli_1",
+                "type": "worker.tail",
+                "payload": {
+                    "worker_id": "worker_000001",
+                    "lines": 20
                 }
             })
         );
@@ -1608,6 +1905,32 @@ mod tests {
         match envelope.request {
             ClientRequest::EventsSubscribe(payload) => {
                 assert!(payload.include_snapshot);
+                assert_eq!(payload.since_event_id, None);
+                assert_eq!(payload.replay_limit, None);
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_subscription_defaults_include_snapshot() {
+        let value = json!({
+            "protocol_version": CURRENT_PROTOCOL_VERSION,
+            "request_id": "req_1",
+            "client_id": "cli_1",
+            "type": "session.subscribe",
+            "payload": {
+                "session_id": "ses_1"
+            }
+        });
+
+        let envelope =
+            serde_json::from_value::<RequestEnvelope>(value).expect("request should parse");
+
+        match envelope.request {
+            ClientRequest::SessionSubscribe(payload) => {
+                assert!(payload.include_snapshot);
+                assert_eq!(payload.session_id.as_str(), "ses_1");
                 assert_eq!(payload.since_event_id, None);
                 assert_eq!(payload.replay_limit, None);
             }
@@ -1767,6 +2090,99 @@ mod tests {
     }
 
     #[test]
+    fn agent_session_event_serializes_runtime_metadata() {
+        let envelope = EventEnvelope::new(
+            EventId::from("evt_4"),
+            Timestamp::new_utc("2026-04-26T00:00:00Z").expect("timestamp should be UTC"),
+            "cadisd",
+            Some(SessionId::from("ses_1")),
+            CadisEvent::AgentSessionStarted(AgentSessionEventPayload {
+                agent_session_id: AgentSessionId::from("ags_000001"),
+                session_id: SessionId::from("ses_1"),
+                route_id: "route_000001".to_owned(),
+                agent_id: AgentId::from("coder"),
+                parent_agent_id: Some(AgentId::from("main")),
+                task: "run focused tests".to_owned(),
+                status: AgentSessionStatus::Running,
+                timeout_at: Timestamp::new_utc("2026-04-26T00:15:00Z")
+                    .expect("timestamp should be UTC"),
+                budget_steps: 1,
+                steps_used: 0,
+                result: None,
+                error_code: None,
+                error: None,
+                cancellation_requested_at: None,
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("event should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "event_id": "evt_4",
+                "timestamp": "2026-04-26T00:00:00Z",
+                "source": "cadisd",
+                "session_id": "ses_1",
+                "type": "agent.session.started",
+                "payload": {
+                    "agent_session_id": "ags_000001",
+                    "session_id": "ses_1",
+                    "route_id": "route_000001",
+                    "agent_id": "coder",
+                    "parent_agent_id": "main",
+                    "task": "run focused tests",
+                    "status": "running",
+                    "timeout_at": "2026-04-26T00:15:00Z",
+                    "budget_steps": 1,
+                    "steps_used": 0
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn voice_preflight_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_voice"),
+            ClientId::from("hud_1"),
+            ClientRequest::VoicePreflight(VoicePreflightRequest {
+                surface: Some("cadis-hud".to_owned()),
+                summary: Some("ready".to_owned()),
+                checks: vec![VoiceDoctorCheck {
+                    name: "microphone".to_owned(),
+                    status: "ok".to_owned(),
+                    message: "1 input visible".to_owned(),
+                }],
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_voice",
+                "client_id": "hud_1",
+                "type": "voice.preflight",
+                "payload": {
+                    "surface": "cadis-hud",
+                    "summary": "ready",
+                    "checks": [
+                        {
+                            "name": "microphone",
+                            "status": "ok",
+                            "message": "1 input visible"
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
     fn server_response_frame_matches_transport_shape() {
         let frame = ServerFrame::Response(ResponseEnvelope::new(
             RequestId::from("req_1"),
@@ -1779,6 +2195,7 @@ mod tests {
                 sessions: 0,
                 model_provider: "echo".to_owned(),
                 uptime_seconds: 3,
+                voice: VoiceStatusPayload::default(),
             }),
         ));
 
@@ -1800,7 +2217,16 @@ mod tests {
                         "socket_path": "/run/user/1000/cadis/cadisd.sock",
                         "sessions": 0,
                         "model_provider": "echo",
-                        "uptime_seconds": 3
+                        "uptime_seconds": 3,
+                        "voice": {
+                            "enabled": false,
+                            "state": "unknown",
+                            "provider": "edge",
+                            "voice_id": "id-ID-GadisNeural",
+                            "stt_language": "auto",
+                            "max_spoken_chars": 800,
+                            "bridge": "hud-local"
+                        }
                     }
                 }
             })

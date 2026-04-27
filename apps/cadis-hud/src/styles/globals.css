@@ -1734,16 +1734,43 @@ html, body, #root {
 .worker-tree__list { list-style: none; padding: 4px 0 0 14px; margin: 0; }
 .worker-tree__item {
   display: grid;
-  grid-template-columns: 8px auto auto 1fr;
+  grid-template-columns: 8px minmax(68px, auto) auto minmax(0, 1fr) 42px;
   gap: 6px;
   align-items: center;
   padding: 2px 0;
   color: var(--dim);
 }
 .worker-tree__dot { width: 6px; height: 6px; border-radius: 50%; }
-.worker-tree__id { color: var(--text); }
+.worker-tree__id { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .worker-tree__status { color: var(--faint); text-transform: uppercase; font-size: 9px; }
 .worker-tree__text { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worker-tree__item--session .worker-tree__id { color: var(--accent); }
+.worker-tree__progress {
+  position: relative;
+  display: block;
+  width: 42px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: oklch(0.12 0.025 var(--hue) / 0.72);
+  border: 1px solid oklch(0.32 0.06 var(--hue) / 0.38);
+}
+.worker-tree__progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  opacity: 0.82;
+  transition: width 160ms ease;
+}
+.worker-tree__progress--active span {
+  background: linear-gradient(90deg, var(--accent-d), var(--ok), var(--accent-d));
+  animation: worker-progress-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes worker-progress-pulse {
+  0%, 100% { opacity: 0.46; }
+  50% { opacity: 0.95; }
+}
 
 /* ─── Theme picker (P5.6) ─── */
 

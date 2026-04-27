@@ -1,11 +1,13 @@
 # Workspace Architecture
 
 Status: Baseline accepted and partially implemented. CADIS now initializes
-profile homes, persists the workspace registry and active grants under the
-default profile, exposes `workspace list/register/grant/revoke/doctor` through
-the protocol and CLI, and keeps tool execution behind daemon-resolved workspace
-grants. Agent homes, real worker worktree creation/cleanup, checkpoint rollback,
-and workspace-local skill enforcement remain future work.
+profile homes, creates daemon-known agent homes from templates, persists the
+workspace registry and active grants under the default profile, exposes
+`workspace list/register/grant/revoke/doctor` through the protocol and CLI, and
+keeps tool execution behind daemon-resolved workspace grants. Real worker
+worktree creation/cleanup, checkpoint rollback, workspace-local skill
+enforcement, artifact production, and denied-path enforcement for mutating tools
+remain future work.
 
 ## 1. Purpose
 
@@ -39,19 +41,28 @@ The current desktop MVP implements only part of this architecture:
 Implemented baseline:
 
 - `~/.cadis/profiles/<profile>/` profile homes.
+- Persistent daemon-known agent homes under each profile with `AGENT.toml`,
+  persona/instruction/user/memory/tool guidance files, typed `POLICY.toml`
+  metadata, `SKILL_POLICY.toml`, and agent-local memory/skill/prompt folders.
 - Profile-local workspace registry and grant files.
 - Protocol/CLI workspace commands: `list`, `register`, `grant`, `revoke`, and
   `doctor`.
 - Tool calls require a registered workspace and matching active grant before
   safe-read execution or approval flow.
+- `workspace doctor` includes profile/agent-home diagnostics for missing,
+  corrupt, and oversized agent files.
 - Worker events include planned worktree/artifact metadata.
+- Store helpers now resolve project worker worktree paths and metadata files
+  under `<project>/.cadis/worktrees/`, resolve worker artifact paths under
+  `profiles/<profile>/artifacts/workers/`, and let `workspace doctor` report
+  stale worker worktree metadata or missing artifact roots.
 
 Still future:
 
-- Persistent agent homes under each profile.
 - Worker worktree creation/cleanup.
+- Worker artifact production and durable worker runtime records.
 - Checkpoint and rollback manager.
-- Profile and agent doctor commands.
+- Dedicated profile and agent doctor commands.
 - Workspace-local skills and project `.cadis/` metadata enforcement.
 
 ## 3. Target Home Layout
@@ -132,6 +143,11 @@ under `.cadis/` and must not contain secrets:
 `workspace.toml` records project-local defaults such as workspace ID, VCS type,
 worktree root, artifact root, and media root. It does not grant access by
 itself; the daemon must still resolve a workspace grant.
+
+Current baseline: `cadis-store` can load and write this project-local metadata,
+and `workspace doctor` reports missing files, registry ID mismatch, absolute
+project-local roots, and duplicate registered roots. Creation/initialization UX
+remains future work.
 
 ## 5. Media Assets Convention
 
@@ -252,6 +268,19 @@ Worker state and artifacts live under the profile:
 ~/.cadis/profiles/default/artifacts/workers/<worker-id>/
 ```
 
+Project-local worker worktree metadata lives beside the project worktree root:
+
+```text
+<project>/.cadis/worktrees/
+|-- <worker-id>/                  # planned/actual git worktree checkout
+`-- .metadata/
+    `-- <worker-id>.toml          # worker ID, workspace ID, path, branch, base ref, state, artifact root
+```
+
+`workspace doctor` treats these metadata files as diagnostics only. It warns
+when a recorded worktree path or profile artifact root is stale/missing; it does
+not create, remove, or mutate git worktrees.
+
 Workers receive write/exec grants only for their worktree unless the user
 explicitly approves broader access. The parent project checkout remains
 read-only by default.
@@ -277,11 +306,11 @@ The workspace architecture should be implemented in this order:
 | --- | --- |
 | W0 | Finalize terminology and protocol types |
 | W1 | CADIS home resolver and directory skeleton |
-| W2 | Profile manager |
-| W3 | Agent home manager |
+| W2 | Profile manager baseline implemented |
+| W3 | Agent home manager/templates baseline implemented |
 | W4 | Workspace registry and grants |
 | W5 | Worker worktree manager |
 | W6 | Checkpoint and rollback manager |
 | W7 | Event log and session store integration |
 | W8 | Channel bindings and deterministic routing |
-| W9 | Doctor, migration, and templates |
+| W9 | Doctor, migration, and templates; profile/agent file diagnostics baseline implemented |

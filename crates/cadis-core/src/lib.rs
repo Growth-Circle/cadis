@@ -4,31 +4,38 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Instant;
 
 use cadis_models::{
-    provider_catalog, ModelInvocation, ModelProvider, ModelRequest, ModelStreamEvent,
-    ProviderCatalogEntry, ProviderReadiness,
+    provider_catalog_for_config, ModelCatalogConfig, ModelInvocation, ModelProvider, ModelRequest,
+    ModelResponse, ModelStreamControl, ModelStreamEvent, ProviderCatalogEntry, ProviderReadiness,
 };
 use cadis_policy::{PolicyDecision, PolicyEngine};
 use cadis_protocol::{
     AgentEventPayload, AgentId, AgentListPayload, AgentModelChangedPayload, AgentRenamedPayload,
-    AgentSpawnRequest, AgentStatus, AgentStatusChangedPayload, ApprovalDecision, ApprovalId,
-    ApprovalRequestPayload, ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent,
-    ClientRequest, DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope, EventId,
+    AgentSessionEventPayload, AgentSessionId, AgentSessionStatus, AgentSpawnRequest, AgentStatus,
+    AgentStatusChangedPayload, ApprovalDecision, ApprovalId, ApprovalRequestPayload,
+    ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent, ClientRequest, ContentKind,
+    DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope, EventId,
     MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
     ModelInvocationPayload, ModelReadiness, ModelsListPayload, OrchestratorRoutePayload,
     ProtocolVersion, RequestAcceptedPayload, RequestEnvelope, RequestId, ResponseEnvelope,
     SessionEventPayload, SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload,
-    ToolFailedPayload, UiPreferencesPayload, WorkerArtifactLocations, WorkerEventPayload,
-    WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent, WorkerWorktreeState, WorkspaceAccess,
-    WorkspaceDoctorCheck, WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantId,
-    WorkspaceGrantPayload, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload,
-    WorkspaceListRequest, WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
+    ToolFailedPayload, UiPreferencesPayload, VoiceDoctorCheck, VoiceDoctorPayload,
+    VoicePreferences, VoicePreflightRequest, VoicePreflightSummary, VoicePreviewRequest,
+    VoiceRuntimeState, VoiceStatusPayload, WorkerArtifactLocations, WorkerEventPayload,
+    WorkerLogDeltaPayload, WorkerTailRequest, WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent,
+    WorkerWorktreeState, WorkspaceAccess, WorkspaceDoctorCheck, WorkspaceDoctorPayload,
+    WorkspaceDoctorRequest, WorkspaceGrantId, WorkspaceGrantPayload, WorkspaceGrantRequest,
+    WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest, WorkspaceRecordPayload,
+    WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
 use cadis_store::{
-    redact, ApprovalRecord, ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
-    GrantSource as StoreGrantSource, ProfileHome, StateStore,
+    redact, AgentHomeDiagnostic, AgentHomeDoctorOptions, AgentHomeTemplate, ApprovalRecord,
+    ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
+    GrantSource as StoreGrantSource, ProfileHome, ProjectWorkspaceStore, ProjectWorktreeDiagnostic,
+    StateRecoveryDiagnostic, StateStore, WorkerArtifactPathSet,
     WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
     WorkspaceGrantRecord as StoreWorkspaceGrantRecord, WorkspaceKind as StoreWorkspaceKind,
     WorkspaceMetadata, WorkspaceRegistry, WorkspaceVcs,
@@ -40,6 +47,8 @@ const FILE_READ_LIMIT_BYTES: usize = 64 * 1024;
 const FILE_SEARCH_LIMIT_BYTES: u64 = 1024 * 1024;
 const FILE_SEARCH_DEFAULT_LIMIT: usize = 50;
 const APPROVAL_TIMEOUT_MINUTES: i64 = 5;
+const WORKER_TAIL_DEFAULT_LINES: usize = 64;
+const WORKER_TAIL_MAX_LINES: usize = 1_000;
 
 /// Runtime options supplied by the daemon process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +61,12 @@ pub struct RuntimeOptions {
     pub socket_path: Option<PathBuf>,
     /// Configured model provider label.
     pub model_provider: String,
+    /// Configured Ollama model used for catalog visibility.
+    pub ollama_model: String,
+    /// Configured OpenAI model used for catalog visibility.
+    pub openai_model: String,
+    /// Whether an OpenAI API key is present in the daemon environment.
+    pub openai_api_key_configured: bool,
     /// Initial daemon-owned UI preferences.
     pub ui_preferences: serde_json::Value,
 }
@@ -95,6 +110,102 @@ impl Default for OrchestratorConfig {
     }
 }
 
+/// Configuration for the in-memory AgentSession state machine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentRuntimeConfig {
+    /// Default timeout for a per-route agent session.
+    pub default_timeout_sec: i64,
+    /// Maximum state-machine steps a single agent route may consume.
+    pub max_steps_per_session: u32,
+}
+
+impl Default for AgentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_sec: 900,
+            max_steps_per_session: 1,
+        }
+    }
+}
+
+/// Text-to-speech provider contract owned by the daemon runtime.
+pub trait TtsProvider: Send {
+    /// Stable provider identifier.
+    fn id(&self) -> &'static str;
+
+    /// Human-readable provider label.
+    fn label(&self) -> &'static str;
+
+    /// Curated voice IDs this provider can report without external calls.
+    fn supported_voices(&self) -> Vec<TtsVoice>;
+
+    /// Speaks or queues short speakable text.
+    fn speak(&mut self, request: TtsRequest<'_>) -> Result<TtsOutput, TtsError>;
+
+    /// Stops current speech where the provider supports cancellation.
+    fn stop(&mut self) -> Result<(), TtsError>;
+}
+
+/// Curated voice metadata exposed by TTS providers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtsVoice {
+    /// Provider voice identifier.
+    pub id: &'static str,
+    /// Display label.
+    pub label: &'static str,
+    /// BCP-47 locale.
+    pub locale: &'static str,
+    /// Display gender label from the provider catalog.
+    pub gender: &'static str,
+}
+
+/// TTS request after daemon speech policy has allowed the text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TtsRequest<'a> {
+    /// Redaction-checked speakable text.
+    pub text: &'a str,
+    /// Requested voice ID.
+    pub voice_id: &'a str,
+    /// Speaking rate adjustment.
+    pub rate: i16,
+    /// Pitch adjustment.
+    pub pitch: i16,
+    /// Volume adjustment.
+    pub volume: i16,
+}
+
+/// Successful TTS provider outcome.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtsOutput {
+    /// Provider that handled the request.
+    pub provider: String,
+    /// Voice selected for the request.
+    pub voice_id: String,
+    /// Character count accepted by the provider.
+    pub spoken_chars: usize,
+}
+
+/// Structured TTS provider error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtsError {
+    /// Stable provider error code.
+    pub code: String,
+    /// Redacted human-readable message.
+    pub message: String,
+    /// Whether retrying may help.
+    pub retryable: bool,
+}
+
+impl TtsError {
+    fn new(code: impl Into<String>, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retryable,
+        }
+    }
+}
+
 /// Result of handling one client request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestOutcome {
@@ -104,22 +215,51 @@ pub struct RequestOutcome {
     pub events: Vec<EventEnvelope>,
 }
 
+/// Daemon-owned model generation work prepared by the runtime.
+pub struct PendingMessageGeneration {
+    /// Immediate response for the client that sent `message.send`.
+    pub response: ResponseEnvelope,
+    /// Events that are ready before provider generation starts.
+    pub initial_events: Vec<EventEnvelope>,
+    /// Provider selected by the daemon runtime.
+    pub provider: Arc<dyn ModelProvider>,
+    /// Prompt text prepared by daemon-owned routing/orchestration.
+    pub prompt: String,
+    /// Optional provider/model selected on the routed agent.
+    pub selected_model: Option<String>,
+    context: MessageGenerationContext,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MessageGenerationContext {
+    session_id: SessionId,
+    agent_session_id: AgentSessionId,
+    content_kind: ContentKind,
+    agent_id: AgentId,
+    agent_name: String,
+    worker: Option<WorkerDelegation>,
+}
+
 /// CADIS core runtime.
 pub struct Runtime {
     options: RuntimeOptions,
-    provider: Box<dyn ModelProvider>,
+    provider: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
     started_at: Instant,
     next_event: u64,
     next_session: u64,
     next_agent: u64,
+    next_agent_session: u64,
     next_route: u64,
     next_worker: u64,
     sessions: HashMap<SessionId, SessionRecord>,
     agents: HashMap<AgentId, AgentRecord>,
+    agent_sessions: HashMap<AgentSessionId, AgentSessionRecord>,
+    workers: HashMap<String, WorkerRecord>,
     orchestrator: Orchestrator,
     ui_preferences: serde_json::Value,
     spawn_limits: AgentSpawnLimits,
+    agent_runtime: AgentRuntimeConfig,
     policy: PolicyEngine,
     approval_store: ApprovalStore,
     state_store: StateStore,
@@ -127,6 +267,8 @@ pub struct Runtime {
     pending_approvals: HashMap<ApprovalId, PendingApproval>,
     workspaces: HashMap<WorkspaceId, WorkspaceRecord>,
     workspace_grants: HashMap<WorkspaceGrantId, WorkspaceGrantRecord>,
+    last_voice_preflight: Option<VoicePreflightRecord>,
+    recovery_diagnostics: Vec<ErrorPayload>,
     next_tool: u64,
     next_approval: u64,
     next_workspace_grant: u64,
@@ -137,6 +279,7 @@ impl Runtime {
     pub fn new(options: RuntimeOptions, provider: Box<dyn ModelProvider>) -> Self {
         let ui_preferences = options.ui_preferences.clone();
         let spawn_limits = AgentSpawnLimits::from_options(&options.ui_preferences);
+        let agent_runtime = AgentRuntimeConfig::from_options(&options.ui_preferences);
         let orchestrator =
             Orchestrator::new(OrchestratorConfig::from_options(&options.ui_preferences));
         let approval_store = ApprovalStore::new(&options.cadis_home);
@@ -151,29 +294,49 @@ impl Runtime {
         let workspaces = load_workspace_registry(&profile_home);
         let workspace_grants = load_workspace_grants(&profile_home, &workspaces);
         let next_workspace_grant = next_workspace_grant_counter(&workspace_grants);
-        let sessions = recover_session_records(&state_store);
+        let RuntimeRecovery {
+            records: sessions,
+            mut diagnostics,
+        } = recover_session_records(&state_store);
+        let agent_session_recovery = recover_agent_session_records(&state_store);
+        let agent_sessions = agent_session_recovery.records;
+        diagnostics.extend(agent_session_recovery.diagnostics);
         let mut agents = default_agents(&options.model_provider);
-        for (agent_id, record) in recover_agent_records(&state_store) {
+        let agent_recovery = recover_agent_records(&state_store);
+        diagnostics.extend(agent_recovery.diagnostics);
+        for (agent_id, record) in agent_recovery.records {
             agents.insert(agent_id, record);
         }
+        init_agent_homes(&profile_home, &agents);
+        let worker_recovery = recover_worker_records(&state_store);
+        diagnostics.extend(worker_recovery.diagnostics);
+        let mut workers = worker_recovery.records;
+        diagnostics.extend(reconcile_recovered_workers(&state_store, &mut workers));
         let next_session = next_session_counter(&sessions);
         let next_agent = next_agent_counter(&agents);
+        let next_worker = next_worker_counter(&workers);
+        let next_agent_session = next_agent_session_counter(&agent_sessions);
+        let next_route = next_route_counter(&agent_sessions);
 
         Self {
             options,
-            provider,
+            provider: Arc::from(provider),
             tools: ToolRegistry::builtin().expect("built-in tool registry should be valid"),
             started_at: Instant::now(),
             next_event: 1,
             next_session,
             next_agent,
-            next_route: 1,
-            next_worker: 1,
+            next_agent_session,
+            next_route,
+            next_worker,
             sessions,
             agents,
+            agent_sessions,
+            workers,
             orchestrator,
             ui_preferences,
             spawn_limits,
+            agent_runtime,
             policy: PolicyEngine,
             approval_store,
             state_store,
@@ -181,6 +344,8 @@ impl Runtime {
             pending_approvals: HashMap::new(),
             workspaces,
             workspace_grants,
+            last_voice_preflight: None,
+            recovery_diagnostics: diagnostics,
             next_tool: 1,
             next_approval: 1,
             next_workspace_grant,
@@ -225,6 +390,7 @@ impl Runtime {
             }
             ClientRequest::SessionCancel(request) => {
                 if self.sessions.remove(&request.session_id).is_some() {
+                    let mut events = self.cancel_agent_sessions_for_session(&request.session_id);
                     let _ = self
                         .state_store
                         .remove_session_metadata(&request.session_id);
@@ -235,7 +401,8 @@ impl Runtime {
                             title: None,
                         }),
                     );
-                    self.accept(request_id, vec![event])
+                    events.push(event);
+                    self.accept(request_id, events)
                 } else {
                     self.reject(
                         request_id,
@@ -247,15 +414,19 @@ impl Runtime {
             }
             ClientRequest::SessionSubscribe(request) => {
                 if let Some(session) = self.sessions.get(&request.session_id) {
-                    let title = session.title.clone();
-                    let event = self.session_event(
-                        request.session_id.clone(),
-                        CadisEvent::SessionUpdated(SessionEventPayload {
-                            session_id: request.session_id,
-                            title,
-                        }),
-                    );
-                    self.accept(request_id, vec![event])
+                    let events = if request.include_snapshot {
+                        let title = session.title.clone();
+                        vec![self.session_event(
+                            request.session_id.clone(),
+                            CadisEvent::SessionUpdated(SessionEventPayload {
+                                session_id: request.session_id,
+                                title,
+                            }),
+                        )]
+                    } else {
+                        Vec::new()
+                    };
+                    self.accept(request_id, events)
                 } else {
                     self.reject(
                         request_id,
@@ -329,7 +500,7 @@ impl Runtime {
             ClientRequest::WorkspaceRevoke(request) => self.workspace_revoke(request_id, request),
             ClientRequest::WorkspaceDoctor(request) => self.workspace_doctor(request_id, request),
             ClientRequest::ModelsList(_) => {
-                let models = provider_catalog()
+                let models = provider_catalog_for_config(&self.model_catalog_config())
                     .into_iter()
                     .map(model_descriptor_from_catalog_entry)
                     .collect();
@@ -363,24 +534,73 @@ impl Runtime {
             ClientRequest::ApprovalRespond(request) => {
                 self.handle_approval_response(request_id, request)
             }
-            ClientRequest::VoicePreview(_) => {
-                let started = self.event(None, CadisEvent::VoicePreviewStarted(Default::default()));
-                let completed =
-                    self.event(None, CadisEvent::VoicePreviewCompleted(Default::default()));
-                self.accept(request_id, vec![started, completed])
+            ClientRequest::VoiceStatus(_) => {
+                let event = self.event(None, CadisEvent::VoiceStatusUpdated(self.voice_status()));
+                self.accept(request_id, vec![event])
             }
-            ClientRequest::VoiceStop(_) => {
-                let completed =
-                    self.event(None, CadisEvent::VoicePreviewCompleted(Default::default()));
-                self.accept(request_id, vec![completed])
+            ClientRequest::VoiceDoctor(request) => {
+                let event = self.event(
+                    None,
+                    CadisEvent::VoiceDoctorResponse(
+                        self.voice_doctor_payload(request.include_bridge),
+                    ),
+                );
+                self.accept(request_id, vec![event])
             }
-            ClientRequest::SessionUnsubscribe(_) | ClientRequest::WorkerTail(_) => self.reject(
+            ClientRequest::VoicePreflight(request) => {
+                self.handle_voice_preflight(request_id, request)
+            }
+            ClientRequest::VoicePreview(request) => self.handle_voice_preview(request_id, request),
+            ClientRequest::VoiceStop(_) => self.handle_voice_stop(request_id),
+            ClientRequest::WorkerTail(request) => self.worker_tail(request_id, request),
+            ClientRequest::SessionUnsubscribe(_) => self.reject(
                 request_id,
                 "not_implemented",
                 "this request is defined in the protocol but is not implemented in the desktop MVP",
                 false,
             ),
         }
+    }
+
+    /// Prepares a `message.send` request without running model generation.
+    ///
+    /// The returned plan contains all daemon-authoritative routing/session state
+    /// and enough provider context for the daemon to stream outside the runtime
+    /// mutex. Non-message requests and invalid message requests return a normal
+    /// request outcome.
+    pub fn begin_message_request(
+        &mut self,
+        envelope: RequestEnvelope,
+    ) -> Result<PendingMessageGeneration, Box<RequestOutcome>> {
+        let request_id = envelope.request_id.clone();
+
+        if let Err(error) = envelope.protocol_version.ensure_supported() {
+            return Err(Box::new(self.reject(
+                request_id,
+                "unsupported_protocol_version",
+                error.to_string(),
+                false,
+            )));
+        }
+
+        match envelope.request {
+            ClientRequest::MessageSend(request) => self.begin_message(request_id, request),
+            _ => Err(Box::new(self.reject(
+                request_id,
+                "invalid_request_type",
+                "begin_message_request only accepts message.send",
+                false,
+            ))),
+        }
+    }
+
+    fn model_catalog_config(&self) -> ModelCatalogConfig {
+        ModelCatalogConfig::new(
+            self.options.model_provider.clone(),
+            self.options.ollama_model.clone(),
+            self.options.openai_model.clone(),
+            self.options.openai_api_key_configured,
+        )
     }
 
     fn status(&self, request_id: RequestId) -> RequestOutcome {
@@ -400,6 +620,7 @@ impl Runtime {
                     sessions: self.sessions.len(),
                     model_provider: self.options.model_provider.clone(),
                     uptime_seconds: self.started_at.elapsed().as_secs(),
+                    voice: self.voice_status(),
                 }),
             ),
             events: Vec::new(),
@@ -422,6 +643,7 @@ impl Runtime {
         let risk_class = tool.risk_class;
         let policy_decision = self.policy.decide(risk_class);
         let policy_reason = tool.policy_reason();
+        let approval_summary = tool.approval_summary();
 
         let (session_id, mut events) =
             self.resolve_tool_session(request.session_id.clone(), &request.input);
@@ -508,7 +730,7 @@ impl Runtime {
                     tool_name: request.tool_name.clone(),
                     risk_class,
                     title: format!("Approve {}", request.tool_name),
-                    summary: tool.approval_summary(),
+                    summary: approval_summary,
                     command: command.clone(),
                     workspace: workspace.clone(),
                     requested_at,
@@ -658,6 +880,17 @@ impl Runtime {
         request_id: RequestId,
         request: MessageSendRequest,
     ) -> RequestOutcome {
+        match self.begin_message(request_id, request) {
+            Ok(pending) => self.complete_pending_message_blocking(pending),
+            Err(outcome) => *outcome,
+        }
+    }
+
+    fn begin_message(
+        &mut self,
+        request_id: RequestId,
+        request: MessageSendRequest,
+    ) -> Result<PendingMessageGeneration, Box<RequestOutcome>> {
         let content_kind = request.content_kind;
         let content = request.content;
         let decision =
@@ -666,7 +899,14 @@ impl Runtime {
                 .route_message(request.target_agent_id, &content, &self.agents)
             {
                 Ok(decision) => decision,
-                Err(error) => return self.reject(request_id, error.code, error.message, false),
+                Err(error) => {
+                    return Err(Box::new(self.reject(
+                        request_id,
+                        error.code,
+                        error.message,
+                        false,
+                    )));
+                }
             };
 
         let (route, spawned_agent) = match decision {
@@ -679,7 +919,14 @@ impl Runtime {
                     model: None,
                 }) {
                     Ok(record) => record,
-                    Err(error) => return self.reject(request_id, error.code, error.message, false),
+                    Err(error) => {
+                        return Err(Box::new(self.reject(
+                            request_id,
+                            error.code,
+                            error.message,
+                            false,
+                        )));
+                    }
                 };
                 (
                     RouteDecision {
@@ -746,20 +993,28 @@ impl Runtime {
             ));
         }
 
+        let route_id = format!("route_{:06}", self.next_route);
+        self.next_route += 1;
+        let (agent_session_id, agent_session_started) = self.start_agent_session(
+            session_id.clone(),
+            route_id.clone(),
+            route.agent_id.clone(),
+            route.content.clone(),
+        );
+        events.push(agent_session_started);
+
         events.push(self.session_event(
             session_id.clone(),
             CadisEvent::OrchestratorRoute(OrchestratorRoutePayload {
-                id: format!("route_{:06}", self.next_route),
+                id: route_id,
                 source: "cadisd".to_owned(),
                 target_agent_id: route.agent_id.clone(),
                 target_agent_name: route.agent_name.clone(),
                 reason: route.reason.clone(),
             }),
         ));
-        self.next_route += 1;
 
         let session_workspace = self.session_workspace(&session_id);
-        let artifact_root = self.options.cadis_home.join("artifacts").join("workers");
         let worker = route.worker_summary.as_ref().map(|summary| {
             let worker_id = self.next_worker_id();
             WorkerDelegation {
@@ -768,7 +1023,9 @@ impl Runtime {
                     session_workspace.as_deref(),
                     &route.content,
                 ),
-                artifacts: worker_artifact_locations(&artifact_root, &worker_id),
+                artifacts: worker_artifact_locations(
+                    &self.profile_home.worker_artifact_paths(&worker_id),
+                ),
                 worker_id,
                 parent_agent_id: self
                     .agents
@@ -780,20 +1037,7 @@ impl Runtime {
         });
 
         if let Some(worker) = &worker {
-            events.push(self.session_event(
-                session_id.clone(),
-                CadisEvent::WorkerStarted(WorkerEventPayload {
-                    worker_id: worker.worker_id.clone(),
-                    agent_id: Some(route.agent_id.clone()),
-                    parent_agent_id: worker.parent_agent_id.clone(),
-                    status: Some("running".to_owned()),
-                    cli: None,
-                    cwd: None,
-                    summary: Some(worker.summary.clone()),
-                    worktree: Some(worker.worktree.clone()),
-                    artifacts: Some(worker.artifacts.clone()),
-                }),
-            ));
+            events.extend(self.start_worker(session_id.clone(), route.agent_id.clone(), worker));
         }
 
         if route.agent_id.as_str() != "main" {
@@ -819,134 +1063,301 @@ impl Runtime {
             }),
         ));
 
+        if let Some(event) = self.consume_agent_session_step(&agent_session_id) {
+            events.push(event);
+        }
+        if self
+            .agent_sessions
+            .get(&agent_session_id)
+            .is_some_and(|record| record.status == AgentSessionStatus::BudgetExceeded)
+        {
+            events.push(self.session_event(
+                session_id.clone(),
+                CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                    agent_id: route.agent_id.clone(),
+                    status: AgentStatus::Failed,
+                    task: Some("agent budget exceeded".to_owned()),
+                }),
+            ));
+            events.push(self.session_event(
+                session_id,
+                CadisEvent::SessionFailed(ErrorPayload {
+                    code: "agent_budget_exceeded".to_owned(),
+                    message: "agent session exceeded its configured step budget".to_owned(),
+                    retryable: false,
+                }),
+            ));
+            return Err(Box::new(self.accept(request_id, events)));
+        }
+
         let prompt = self.agent_prompt(&route.agent_id, &route.content);
         let selected_model = self
             .agents
             .get(&route.agent_id)
             .map(|agent| agent.model.clone())
             .filter(|model| !model.trim().is_empty());
-        let mut streamed_deltas = Vec::new();
-        let stream_result = self.provider.stream_chat(
-            ModelRequest::new(&prompt).with_selected_model(selected_model.as_deref()),
+        let response = self.accept(request_id, Vec::new()).response;
+
+        Ok(PendingMessageGeneration {
+            response,
+            initial_events: events,
+            provider: Arc::clone(&self.provider),
+            prompt,
+            selected_model,
+            context: MessageGenerationContext {
+                session_id,
+                agent_session_id,
+                content_kind,
+                agent_id: route.agent_id,
+                agent_name: route.agent_name,
+                worker,
+            },
+        })
+    }
+
+    /// Creates a daemon event for a streamed model delta.
+    pub fn message_delta_event(
+        &mut self,
+        pending: &PendingMessageGeneration,
+        delta: String,
+        invocation: Option<&ModelInvocation>,
+    ) -> EventEnvelope {
+        let model = invocation.map(model_invocation_payload);
+        self.session_event(
+            pending.context.session_id.clone(),
+            CadisEvent::MessageDelta(MessageDeltaPayload {
+                delta,
+                content_kind: pending.context.content_kind,
+                agent_id: Some(pending.context.agent_id.clone()),
+                agent_name: Some(pending.context.agent_name.clone()),
+                model,
+            }),
+        )
+    }
+
+    /// Finalizes a successful streamed model generation.
+    pub fn complete_message_generation(
+        &mut self,
+        pending: PendingMessageGeneration,
+        response: ModelResponse,
+        final_content: String,
+        emitted_delta: bool,
+    ) -> Vec<EventEnvelope> {
+        let mut events = Vec::new();
+        let model = Some(model_invocation_payload(&response.invocation));
+        let mut content = final_content;
+
+        if !emitted_delta {
+            for delta in response.deltas {
+                content.push_str(&delta);
+                events.push(self.message_delta_event(&pending, delta, Some(&response.invocation)));
+            }
+        }
+
+        let context = pending.context;
+        if self.agent_session_timed_out(&context.agent_session_id) {
+            let error_message = format!(
+                "agent session exceeded default_timeout_sec={}",
+                self.agent_runtime.default_timeout_sec
+            );
+            if let Some(event) = self.fail_agent_session(
+                &context.agent_session_id,
+                AgentSessionStatus::TimedOut,
+                "agent_timeout",
+                error_message.clone(),
+            ) {
+                events.push(event);
+            }
+            events.push(self.session_event(
+                context.session_id.clone(),
+                CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                    agent_id: context.agent_id.clone(),
+                    status: AgentStatus::Failed,
+                    task: Some(error_message.clone()),
+                }),
+            ));
+            if let Some(worker) = &context.worker {
+                events.extend(self.complete_worker(
+                    &worker.worker_id,
+                    "failed",
+                    error_message.clone(),
+                ));
+            }
+            events.push(self.session_event(
+                context.session_id,
+                CadisEvent::SessionFailed(ErrorPayload {
+                    code: "agent_timeout".to_owned(),
+                    message: error_message,
+                    retryable: true,
+                }),
+            ));
+            return events;
+        }
+
+        events.push(self.session_event(
+            context.session_id.clone(),
+            CadisEvent::MessageCompleted(MessageCompletedPayload {
+                content_kind: context.content_kind,
+                content: Some(content.clone()),
+                agent_id: Some(context.agent_id.clone()),
+                agent_name: Some(context.agent_name.clone()),
+                model,
+            }),
+        ));
+        events.extend(self.auto_speech_events(&context.session_id, context.content_kind, &content));
+        if let Some(event) = self.complete_agent_session(&context.agent_session_id, content) {
+            events.push(event);
+        }
+        events.push(self.session_event(
+            context.session_id.clone(),
+            CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                agent_id: context.agent_id.clone(),
+                status: AgentStatus::Completed,
+                task: None,
+            }),
+        ));
+        if context.agent_id.as_str() != "main" {
+            events.push(self.session_event(
+                context.session_id.clone(),
+                CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                    agent_id: AgentId::from("main"),
+                    status: AgentStatus::Completed,
+                    task: None,
+                }),
+            ));
+        }
+        if let Some(worker) = &context.worker {
+            events.extend(self.complete_worker(
+                &worker.worker_id,
+                "completed",
+                worker.summary.clone(),
+            ));
+        }
+        events.push(self.session_event(
+            context.session_id.clone(),
+            CadisEvent::SessionCompleted(SessionEventPayload {
+                session_id: context.session_id,
+                title: None,
+            }),
+        ));
+        events
+    }
+
+    /// Finalizes a failed streamed model generation.
+    pub fn fail_message_generation(
+        &mut self,
+        pending: PendingMessageGeneration,
+        error: cadis_models::ModelError,
+    ) -> Vec<EventEnvelope> {
+        let context = pending.context;
+        let error_message = error.message().to_owned();
+        let mut events = Vec::new();
+        if let Some(event) = self.fail_agent_session(
+            &context.agent_session_id,
+            AgentSessionStatus::Failed,
+            error.code(),
+            error_message.clone(),
+        ) {
+            events.push(event);
+        }
+        events.push(self.session_event(
+            context.session_id.clone(),
+            CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                agent_id: context.agent_id.clone(),
+                status: AgentStatus::Failed,
+                task: Some(error_message.clone()),
+            }),
+        ));
+        if let Some(worker) = &context.worker {
+            events.extend(self.complete_worker(&worker.worker_id, "failed", error_message.clone()));
+        }
+        events.push(self.session_event(
+            context.session_id,
+            CadisEvent::SessionFailed(ErrorPayload {
+                code: error.code().to_owned(),
+                message: error_message,
+                retryable: error.retryable(),
+            }),
+        ));
+        events
+    }
+
+    fn complete_pending_message_blocking(
+        &mut self,
+        pending: PendingMessageGeneration,
+    ) -> RequestOutcome {
+        let response = pending.response.clone();
+        let mut events = pending.initial_events.clone();
+        let provider = Arc::clone(&pending.provider);
+        let mut invocation = None;
+        let mut final_content = String::new();
+        let mut emitted_delta = false;
+        let stream_result = provider.stream_chat(
+            ModelRequest::new(&pending.prompt)
+                .with_selected_model(pending.selected_model.as_deref()),
             &mut |event| {
-                if let ModelStreamEvent::Delta(delta) = event {
-                    streamed_deltas.push(delta);
+                match event {
+                    ModelStreamEvent::Started(started) | ModelStreamEvent::Completed(started) => {
+                        invocation = Some(started);
+                    }
+                    ModelStreamEvent::Delta(delta) => {
+                        final_content.push_str(&delta);
+                        emitted_delta = true;
+                        events.push(self.message_delta_event(&pending, delta, invocation.as_ref()));
+                    }
+                    ModelStreamEvent::Failed(_) | ModelStreamEvent::Cancelled(_) => {}
                 }
-                Ok(())
+                Ok(ModelStreamControl::Continue)
             },
         );
 
         match stream_result {
-            Ok(response) => {
-                let model = Some(model_invocation_payload(&response.invocation));
-                let deltas = if streamed_deltas.is_empty() {
-                    response.deltas
-                } else {
-                    streamed_deltas
-                };
-                let mut final_content = String::new();
-                for delta in deltas {
-                    final_content.push_str(&delta);
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::MessageDelta(MessageDeltaPayload {
-                            delta,
-                            content_kind,
-                            agent_id: Some(route.agent_id.clone()),
-                            agent_name: Some(route.agent_name.clone()),
-                            model: model.clone(),
-                        }),
-                    ));
-                }
-
-                events.push(self.session_event(
-                    session_id.clone(),
-                    CadisEvent::MessageCompleted(MessageCompletedPayload {
-                        content_kind,
-                        content: Some(final_content),
-                        agent_id: Some(route.agent_id.clone()),
-                        agent_name: Some(route.agent_name.clone()),
-                        model,
-                    }),
+            Ok(model_response) => {
+                events.extend(self.complete_message_generation(
+                    pending,
+                    model_response,
+                    final_content,
+                    emitted_delta,
                 ));
-                events.push(self.session_event(
-                    session_id.clone(),
-                    CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
-                        agent_id: route.agent_id.clone(),
-                        status: AgentStatus::Completed,
-                        task: None,
-                    }),
-                ));
-                if route.agent_id.as_str() != "main" {
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
-                            agent_id: AgentId::from("main"),
-                            status: AgentStatus::Completed,
-                            task: None,
-                        }),
-                    ));
-                }
-                if let Some(worker) = &worker {
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::WorkerCompleted(WorkerEventPayload {
-                            worker_id: worker.worker_id.clone(),
-                            agent_id: Some(route.agent_id.clone()),
-                            parent_agent_id: worker.parent_agent_id.clone(),
-                            status: Some("completed".to_owned()),
-                            cli: None,
-                            cwd: None,
-                            summary: Some(worker.summary.clone()),
-                            worktree: Some(worker.worktree.clone()),
-                            artifacts: Some(worker.artifacts.clone()),
-                        }),
-                    ));
-                }
-                events.push(self.session_event(
-                    session_id.clone(),
-                    CadisEvent::SessionCompleted(SessionEventPayload {
-                        session_id,
-                        title: None,
-                    }),
-                ));
+                RequestOutcome { response, events }
             }
             Err(error) => {
-                let error_message = error.message().to_owned();
-                events.push(self.session_event(
-                    session_id.clone(),
-                    CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
-                        agent_id: route.agent_id.clone(),
-                        status: AgentStatus::Failed,
-                        task: Some(error_message.clone()),
-                    }),
-                ));
-                if let Some(worker) = &worker {
-                    events.push(self.session_event(
-                        session_id.clone(),
-                        CadisEvent::WorkerCompleted(WorkerEventPayload {
-                            worker_id: worker.worker_id.clone(),
-                            agent_id: Some(route.agent_id.clone()),
-                            parent_agent_id: worker.parent_agent_id.clone(),
-                            status: Some("failed".to_owned()),
-                            cli: None,
-                            cwd: None,
-                            summary: Some(error_message.clone()),
-                            worktree: Some(worker.worktree.clone()),
-                            artifacts: Some(worker.artifacts.clone()),
-                        }),
-                    ));
-                }
-                events.push(self.session_event(
-                    session_id,
-                    CadisEvent::SessionFailed(ErrorPayload {
-                        code: error.code().to_owned(),
-                        message: error_message,
-                        retryable: error.retryable(),
-                    }),
-                ));
+                events.extend(self.fail_message_generation(pending, error));
+                RequestOutcome { response, events }
             }
         }
+    }
+
+    fn worker_tail(&mut self, request_id: RequestId, request: WorkerTailRequest) -> RequestOutcome {
+        let Some(worker) = self.workers.get(&request.worker_id).cloned() else {
+            return self.reject(
+                request_id,
+                "worker_not_found",
+                format!("worker '{}' was not found", request.worker_id),
+                false,
+            );
+        };
+
+        let line_limit = request
+            .lines
+            .and_then(|lines| usize::try_from(lines).ok())
+            .unwrap_or(WORKER_TAIL_DEFAULT_LINES)
+            .min(WORKER_TAIL_MAX_LINES);
+        let start = worker.log_lines.len().saturating_sub(line_limit);
+        let events = worker.log_lines[start..]
+            .iter()
+            .map(|line| {
+                self.session_event(
+                    worker.session_id.clone(),
+                    CadisEvent::WorkerLogDelta(WorkerLogDeltaPayload {
+                        worker_id: worker.worker_id.clone(),
+                        delta: line.clone(),
+                        agent_id: worker.agent_id.clone(),
+                        parent_agent_id: worker.parent_agent_id.clone(),
+                    }),
+                )
+            })
+            .collect();
 
         self.accept(request_id, events)
     }
@@ -1049,6 +1460,7 @@ impl Runtime {
         };
         self.agents.insert(agent_id.clone(), record.clone());
         let _ = self.persist_agent_record(&agent_id);
+        let _ = self.profile_home.init_agent(&record.agent_home_template());
         Ok(record)
     }
 
@@ -1266,6 +1678,271 @@ impl Runtime {
         self.accept(request_id, vec![event])
     }
 
+    fn handle_voice_preflight(
+        &mut self,
+        request_id: RequestId,
+        request: VoicePreflightRequest,
+    ) -> RequestOutcome {
+        let checked_at = now_timestamp();
+        let checks = normalize_voice_checks(request.checks);
+        let status = voice_check_summary_status(&checks);
+        let summary = request
+            .summary
+            .map(|summary| redact(&summary))
+            .filter(|summary| !summary.trim().is_empty())
+            .unwrap_or_else(|| voice_checks_summary(&checks));
+        let surface = request
+            .surface
+            .map(|surface| redact(&surface))
+            .filter(|surface| !surface.trim().is_empty())
+            .unwrap_or_else(|| "local-bridge".to_owned());
+
+        self.last_voice_preflight = Some(VoicePreflightRecord {
+            surface,
+            status,
+            summary,
+            checked_at,
+            checks,
+        });
+
+        let status_event = self.event(None, CadisEvent::VoiceStatusUpdated(self.voice_status()));
+        let response_event = self.event(
+            None,
+            CadisEvent::VoicePreflightResponse(self.voice_doctor_payload(true)),
+        );
+        self.accept(request_id, vec![status_event, response_event])
+    }
+
+    fn handle_voice_preview(
+        &mut self,
+        request_id: RequestId,
+        request: VoicePreviewRequest,
+    ) -> RequestOutcome {
+        let prefs = VoiceRuntimePreferences::from_preview(&self.ui_preferences, request.prefs);
+        match speech_decision(
+            &prefs,
+            ContentKind::Chat,
+            &request.text,
+            SpeechMode::Preview,
+        ) {
+            SpeechDecision::Speak => {
+                let started = self.event(None, CadisEvent::VoicePreviewStarted(Default::default()));
+                match self.speak_with_provider(&prefs, request.text.trim()) {
+                    Ok(_) => {
+                        let completed =
+                            self.event(None, CadisEvent::VoicePreviewCompleted(Default::default()));
+                        self.accept(request_id, vec![started, completed])
+                    }
+                    Err(error) => {
+                        let failed = self.event(
+                            None,
+                            CadisEvent::VoicePreviewFailed(ErrorPayload {
+                                code: error.code,
+                                message: error.message,
+                                retryable: error.retryable,
+                            }),
+                        );
+                        self.accept(request_id, vec![started, failed])
+                    }
+                }
+            }
+            SpeechDecision::Blocked(reason) | SpeechDecision::RequiresSummary(reason) => {
+                let failed = self.event(
+                    None,
+                    CadisEvent::VoicePreviewFailed(ErrorPayload {
+                        code: reason.to_owned(),
+                        message: "voice preview text is not speakable by daemon policy".to_owned(),
+                        retryable: false,
+                    }),
+                );
+                self.accept(request_id, vec![failed])
+            }
+        }
+    }
+
+    fn handle_voice_stop(&mut self, request_id: RequestId) -> RequestOutcome {
+        let prefs = VoiceRuntimePreferences::from_options(&self.ui_preferences);
+        let mut provider = tts_provider_from_config(&prefs.provider);
+        let event = match provider.stop() {
+            Ok(()) => CadisEvent::VoicePreviewCompleted(Default::default()),
+            Err(error) => CadisEvent::VoicePreviewFailed(ErrorPayload {
+                code: error.code,
+                message: error.message,
+                retryable: error.retryable,
+            }),
+        };
+        let event = self.event(None, event);
+        self.accept(request_id, vec![event])
+    }
+
+    fn speak_with_provider(
+        &self,
+        prefs: &VoiceRuntimePreferences,
+        text: &str,
+    ) -> Result<TtsOutput, TtsError> {
+        let mut provider = tts_provider_from_config(&prefs.provider);
+        provider.speak(TtsRequest {
+            text,
+            voice_id: &prefs.voice_id,
+            rate: prefs.rate,
+            pitch: prefs.pitch,
+            volume: prefs.volume,
+        })
+    }
+
+    fn auto_speech_events(
+        &mut self,
+        session_id: &SessionId,
+        content_kind: ContentKind,
+        text: &str,
+    ) -> Vec<EventEnvelope> {
+        let prefs = VoiceRuntimePreferences::from_options(&self.ui_preferences);
+        if speech_decision(&prefs, content_kind, text, SpeechMode::AutoSpeak)
+            != SpeechDecision::Speak
+        {
+            return Vec::new();
+        }
+
+        match self.speak_with_provider(&prefs, text.trim()) {
+            Ok(_) => vec![
+                self.session_event(
+                    session_id.clone(),
+                    CadisEvent::VoiceStarted(Default::default()),
+                ),
+                self.session_event(
+                    session_id.clone(),
+                    CadisEvent::VoiceCompleted(Default::default()),
+                ),
+            ],
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn voice_status(&self) -> VoiceStatusPayload {
+        let prefs = VoiceRuntimePreferences::from_options(&self.ui_preferences);
+        let checks = self.voice_doctor_checks(true);
+        let state = if !prefs.enabled {
+            VoiceRuntimeState::Disabled
+        } else {
+            voice_runtime_state(&checks)
+        };
+
+        VoiceStatusPayload {
+            enabled: prefs.enabled,
+            state,
+            provider: prefs.provider,
+            voice_id: prefs.voice_id,
+            stt_language: prefs.stt_language,
+            max_spoken_chars: prefs.max_spoken_chars,
+            bridge: "hud-local".to_owned(),
+            last_preflight: self.last_voice_preflight.as_ref().map(|preflight| {
+                VoicePreflightSummary {
+                    surface: preflight.surface.clone(),
+                    status: preflight.status.clone(),
+                    summary: preflight.summary.clone(),
+                    checked_at: preflight.checked_at.clone(),
+                }
+            }),
+        }
+    }
+
+    fn voice_doctor_payload(&self, include_bridge: bool) -> VoiceDoctorPayload {
+        VoiceDoctorPayload {
+            status: self.voice_status(),
+            checks: self.voice_doctor_checks(include_bridge),
+        }
+    }
+
+    fn voice_doctor_checks(&self, include_bridge: bool) -> Vec<VoiceDoctorCheck> {
+        let prefs = VoiceRuntimePreferences::from_options(&self.ui_preferences);
+        let provider = tts_provider_from_config(&prefs.provider);
+        let voice_count = provider.supported_voices().len();
+        let mut checks = Vec::new();
+
+        checks.push(VoiceDoctorCheck {
+            name: "voice.config".to_owned(),
+            status: "ok".to_owned(),
+            message: if prefs.enabled {
+                "voice output is enabled".to_owned()
+            } else {
+                "voice output is disabled".to_owned()
+            },
+        });
+
+        checks.push(VoiceDoctorCheck {
+            name: "voice.provider".to_owned(),
+            status: if is_supported_voice_provider(&prefs.provider) {
+                "ok"
+            } else {
+                "error"
+            }
+            .to_owned(),
+            message: if is_supported_voice_provider(&prefs.provider) {
+                format!(
+                    "configured provider {} ({}, {} curated voices)",
+                    provider.id(),
+                    provider.label(),
+                    voice_count
+                )
+            } else {
+                format!(
+                    "unsupported provider {}; expected edge, openai, system, or stub",
+                    prefs.provider
+                )
+            },
+        });
+
+        checks.push(VoiceDoctorCheck {
+            name: "voice.tts_voice".to_owned(),
+            status: if prefs.voice_id.trim().is_empty() {
+                "error"
+            } else {
+                "ok"
+            }
+            .to_owned(),
+            message: if prefs.voice_id.trim().is_empty() {
+                "voice_id is empty".to_owned()
+            } else {
+                format!("configured voice {}", prefs.voice_id)
+            },
+        });
+
+        checks.push(VoiceDoctorCheck {
+            name: "voice.stt_language".to_owned(),
+            status: "ok".to_owned(),
+            message: format!("STT language {}", prefs.stt_language),
+        });
+
+        checks.push(VoiceDoctorCheck {
+            name: "voice.bridge".to_owned(),
+            status: "ok".to_owned(),
+            message: "HUD remains the local capture/playback bridge for microphone, MediaRecorder, WebAudio PCM fallback, and native audio playback".to_owned(),
+        });
+
+        if include_bridge {
+            if let Some(preflight) = &self.last_voice_preflight {
+                checks.push(VoiceDoctorCheck {
+                    name: "voice.preflight".to_owned(),
+                    status: preflight.status.clone(),
+                    message: format!(
+                        "{} from {} at {}",
+                        preflight.summary, preflight.surface, preflight.checked_at
+                    ),
+                });
+                checks.extend(preflight.checks.clone());
+            } else {
+                checks.push(VoiceDoctorCheck {
+                    name: "voice.preflight".to_owned(),
+                    status: "warn".to_owned(),
+                    message: "no local bridge preflight has been reported; run HUD voice doctor"
+                        .to_owned(),
+                });
+            }
+        }
+
+        checks
+    }
+
     fn agent_prompt(&self, agent_id: &AgentId, content: &str) -> String {
         let Some(agent) = self.agents.get(agent_id) else {
             return content.to_owned();
@@ -1295,13 +1972,31 @@ impl Runtime {
         sessions
     }
 
+    fn worker_records_sorted(&self) -> Vec<WorkerRecord> {
+        let mut workers = self.workers.values().cloned().collect::<Vec<_>>();
+        workers.sort_by(|left, right| left.worker_id.cmp(&right.worker_id));
+        workers
+    }
+
+    fn agent_session_records_sorted(&self) -> Vec<AgentSessionRecord> {
+        let mut records = self.agent_sessions.values().cloned().collect::<Vec<_>>();
+        records.sort_by(|left, right| left.id.cmp(&right.id));
+        records
+    }
+
     fn snapshot_events(&mut self) -> Vec<EventEnvelope> {
         let agents = self
             .agent_records_sorted()
             .into_iter()
             .map(AgentRecord::event_payload)
             .collect();
-        let mut events = vec![
+        let diagnostics = self.recovery_diagnostics.clone();
+        let mut events = diagnostics
+            .into_iter()
+            .map(|diagnostic| self.event(None, CadisEvent::DaemonError(diagnostic)))
+            .collect::<Vec<_>>();
+
+        events.extend([
             self.event(
                 None,
                 CadisEvent::AgentListResponse(AgentListPayload { agents }),
@@ -1319,7 +2014,8 @@ impl Runtime {
                     preferences: self.ui_preferences.clone(),
                 }),
             ),
-        ];
+            self.event(None, CadisEvent::VoiceStatusUpdated(self.voice_status())),
+        ]);
 
         for (session_id, session) in self.session_records_sorted() {
             events.push(self.session_event(
@@ -1329,6 +2025,38 @@ impl Runtime {
                     title: session.title,
                 }),
             ));
+        }
+
+        for record in self.agent_session_records_sorted() {
+            let event = match record.status {
+                AgentSessionStatus::Completed => {
+                    CadisEvent::AgentSessionCompleted(record.event_payload())
+                }
+                AgentSessionStatus::Failed
+                | AgentSessionStatus::TimedOut
+                | AgentSessionStatus::BudgetExceeded => {
+                    CadisEvent::AgentSessionFailed(record.event_payload())
+                }
+                AgentSessionStatus::Cancelled => {
+                    CadisEvent::AgentSessionCancelled(record.event_payload())
+                }
+                AgentSessionStatus::Started | AgentSessionStatus::Running => {
+                    CadisEvent::AgentSessionUpdated(record.event_payload())
+                }
+            };
+            events.push(self.session_event(record.session_id.clone(), event));
+        }
+
+        for worker in self.worker_records_sorted() {
+            let session_id = worker.session_id.clone();
+            let is_terminal = worker.is_terminal();
+            let payload = worker.event_payload();
+            let event = if is_terminal {
+                CadisEvent::WorkerCompleted(payload)
+            } else {
+                CadisEvent::WorkerStarted(payload)
+            };
+            events.push(self.session_event(session_id, event));
         }
 
         events
@@ -1349,6 +2077,245 @@ impl Runtime {
         let worker_id = format!("worker_{:06}", self.next_worker);
         self.next_worker += 1;
         worker_id
+    }
+
+    fn next_agent_session_id(&mut self) -> AgentSessionId {
+        let agent_session_id = AgentSessionId::from(format!("ags_{:06}", self.next_agent_session));
+        self.next_agent_session += 1;
+        agent_session_id
+    }
+
+    fn start_agent_session(
+        &mut self,
+        session_id: SessionId,
+        route_id: String,
+        agent_id: AgentId,
+        task: String,
+    ) -> (AgentSessionId, EventEnvelope) {
+        let parent_agent_id = self
+            .agents
+            .get(&agent_id)
+            .and_then(|agent| agent.parent_agent_id.clone());
+        let id = self.next_agent_session_id();
+        let record = AgentSessionRecord {
+            id: id.clone(),
+            session_id: session_id.clone(),
+            route_id,
+            agent_id,
+            parent_agent_id,
+            task,
+            status: AgentSessionStatus::Running,
+            timeout_at: timestamp_after_seconds(self.agent_runtime.default_timeout_sec),
+            budget_steps: self.agent_runtime.max_steps_per_session,
+            steps_used: 0,
+            result: None,
+            error_code: None,
+            error: None,
+            cancellation_requested_at: None,
+        };
+        let event = self.session_event(
+            session_id,
+            CadisEvent::AgentSessionStarted(record.event_payload()),
+        );
+        self.agent_sessions.insert(id.clone(), record);
+        let _ = self.persist_agent_session_record(&id);
+        (id, event)
+    }
+
+    fn consume_agent_session_step(
+        &mut self,
+        agent_session_id: &AgentSessionId,
+    ) -> Option<EventEnvelope> {
+        let (session_id, payload) = {
+            let record = self.agent_sessions.get_mut(agent_session_id)?;
+            if record.steps_used >= record.budget_steps {
+                record.status = AgentSessionStatus::BudgetExceeded;
+                record.error_code = Some("agent_budget_exceeded".to_owned());
+                record.error = Some(format!(
+                    "agent session exceeded max_steps_per_session={}",
+                    record.budget_steps
+                ));
+                (
+                    record.session_id.clone(),
+                    CadisEvent::AgentSessionFailed(record.event_payload()),
+                )
+            } else {
+                record.steps_used += 1;
+                (
+                    record.session_id.clone(),
+                    CadisEvent::AgentSessionUpdated(record.event_payload()),
+                )
+            }
+        };
+        let _ = self.persist_agent_session_record(agent_session_id);
+        Some(self.session_event(session_id, payload))
+    }
+
+    fn complete_agent_session(
+        &mut self,
+        agent_session_id: &AgentSessionId,
+        result: impl Into<String>,
+    ) -> Option<EventEnvelope> {
+        let (session_id, payload) = {
+            let record = self.agent_sessions.get_mut(agent_session_id)?;
+            record.status = AgentSessionStatus::Completed;
+            record.result = Some(redact(&result.into()));
+            (record.session_id.clone(), record.event_payload())
+        };
+        let _ = self.persist_agent_session_record(agent_session_id);
+        Some(self.session_event(session_id, CadisEvent::AgentSessionCompleted(payload)))
+    }
+
+    fn fail_agent_session(
+        &mut self,
+        agent_session_id: &AgentSessionId,
+        status: AgentSessionStatus,
+        code: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Option<EventEnvelope> {
+        let (session_id, payload) = {
+            let record = self.agent_sessions.get_mut(agent_session_id)?;
+            record.status = status;
+            record.error_code = Some(code.into());
+            record.error = Some(redact(&error.into()));
+            (record.session_id.clone(), record.event_payload())
+        };
+        let _ = self.persist_agent_session_record(agent_session_id);
+        Some(self.session_event(session_id, CadisEvent::AgentSessionFailed(payload)))
+    }
+
+    fn agent_session_timed_out(&self, agent_session_id: &AgentSessionId) -> bool {
+        self.agent_sessions
+            .get(agent_session_id)
+            .is_some_and(|record| timestamp_is_past(&record.timeout_at))
+    }
+
+    fn cancel_agent_sessions_for_session(&mut self, session_id: &SessionId) -> Vec<EventEnvelope> {
+        let agent_session_ids = self
+            .agent_sessions
+            .iter()
+            .filter(|(_, record)| {
+                &record.session_id == session_id && !agent_session_is_terminal(record.status)
+            })
+            .map(|(agent_session_id, _)| agent_session_id.clone())
+            .collect::<Vec<_>>();
+        let cancellation_requested_at = now_timestamp();
+
+        let mut events = Vec::new();
+        for agent_session_id in agent_session_ids {
+            let Some((event_session_id, payload, agent_id)) = ({
+                self.agent_sessions
+                    .get_mut(&agent_session_id)
+                    .map(|record| {
+                        record.status = AgentSessionStatus::Cancelled;
+                        record.error_code = Some("session_cancelled".to_owned());
+                        record.error = Some("session was cancelled".to_owned());
+                        record.cancellation_requested_at = Some(cancellation_requested_at.clone());
+                        (
+                            record.session_id.clone(),
+                            record.event_payload(),
+                            record.agent_id.clone(),
+                        )
+                    })
+            }) else {
+                continue;
+            };
+            let _ = self.persist_agent_session_record(&agent_session_id);
+            events.push(self.session_event(
+                event_session_id.clone(),
+                CadisEvent::AgentSessionCancelled(payload),
+            ));
+            events.push(self.session_event(
+                event_session_id,
+                CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                    agent_id,
+                    status: AgentStatus::Cancelled,
+                    task: Some("session cancelled".to_owned()),
+                }),
+            ));
+        }
+        events
+    }
+
+    fn start_worker(
+        &mut self,
+        session_id: SessionId,
+        agent_id: AgentId,
+        worker: &WorkerDelegation,
+    ) -> Vec<EventEnvelope> {
+        let record = WorkerRecord::from_delegation(session_id, Some(agent_id), worker);
+        let worker_id = record.worker_id.clone();
+        let mut events = vec![self.session_event(
+            record.session_id.clone(),
+            CadisEvent::WorkerStarted(record.event_payload()),
+        )];
+        self.workers.insert(worker_id.clone(), record);
+        let _ = self.persist_worker_record(&worker_id);
+        if let Some(event) =
+            self.append_worker_log(&worker_id, format!("started: {}\n", worker.summary))
+        {
+            events.push(event);
+        }
+        events
+    }
+
+    fn complete_worker(
+        &mut self,
+        worker_id: &str,
+        status: &str,
+        summary: String,
+    ) -> Vec<EventEnvelope> {
+        let mut events = Vec::new();
+        if let Some(event) = self.append_worker_log(worker_id, format!("{status}: {summary}\n")) {
+            events.push(event);
+        }
+        if let Some(event) = self.update_worker_status(worker_id, status, Some(summary)) {
+            events.push(event);
+        }
+        events
+    }
+
+    fn append_worker_log(
+        &mut self,
+        worker_id: &str,
+        delta: impl Into<String>,
+    ) -> Option<EventEnvelope> {
+        let delta = redact(&delta.into());
+        let (session_id, payload) = {
+            let worker = self.workers.get_mut(worker_id)?;
+            worker.log_lines.push(delta.clone());
+            (
+                worker.session_id.clone(),
+                WorkerLogDeltaPayload {
+                    worker_id: worker.worker_id.clone(),
+                    delta,
+                    agent_id: worker.agent_id.clone(),
+                    parent_agent_id: worker.parent_agent_id.clone(),
+                },
+            )
+        };
+
+        Some(self.session_event(session_id, CadisEvent::WorkerLogDelta(payload)))
+    }
+
+    fn update_worker_status(
+        &mut self,
+        worker_id: &str,
+        status: &str,
+        summary: Option<String>,
+    ) -> Option<EventEnvelope> {
+        let (session_id, payload) = {
+            let worker = self.workers.get_mut(worker_id)?;
+            worker.status = status.to_owned();
+            if let Some(summary) = summary {
+                worker.summary = Some(summary);
+            }
+            worker.updated_at = now_timestamp();
+            (worker.session_id.clone(), worker.event_payload())
+        };
+        let _ = self.persist_worker_record(worker_id);
+
+        Some(self.session_event(session_id, CadisEvent::WorkerCompleted(payload)))
     }
 
     fn next_tool_call_id(&mut self) -> ToolCallId {
@@ -1425,12 +2392,16 @@ impl Runtime {
                 status: "ok".to_owned(),
                 message: format!("{} workspace(s) registered", self.workspaces.len()),
             });
+            checks.extend(self.workspace_duplicate_root_checks());
         }
+
+        checks.extend(self.profile_agent_doctor_checks());
 
         if let Some(workspace_id) = request.workspace_id {
             match self.workspaces.get(&workspace_id) {
                 Some(workspace) => {
                     checks.push(root_check("workspace.root", &workspace.root));
+                    checks.extend(project_workspace_metadata_checks(workspace));
                     let active_grants = self
                         .workspace_grants
                         .values()
@@ -1452,7 +2423,11 @@ impl Runtime {
 
         if let Some(root) = request.root {
             match canonical_workspace_root(&root) {
-                Ok(root) => checks.push(root_check("request.root", &root)),
+                Ok(root) => {
+                    checks.push(root_check("request.root", &root));
+                    checks.extend(project_workspace_metadata_checks_for_root(&root));
+                    checks.extend(project_worker_worktree_checks_for_root(&root));
+                }
                 Err(error) => checks.push(WorkspaceDoctorCheck {
                     name: "request.root".to_owned(),
                     status: "error".to_owned(),
@@ -1462,6 +2437,48 @@ impl Runtime {
         }
 
         checks
+    }
+
+    fn profile_agent_doctor_checks(&self) -> Vec<WorkspaceDoctorCheck> {
+        match self
+            .profile_home
+            .agent_doctor_diagnostics(AgentHomeDoctorOptions::default())
+        {
+            Ok(diagnostics) => diagnostics
+                .into_iter()
+                .map(agent_home_diagnostic_check)
+                .collect(),
+            Err(error) => vec![WorkspaceDoctorCheck {
+                name: "profile.agents".to_owned(),
+                status: "error".to_owned(),
+                message: format!("could not inspect agent homes: {error}"),
+            }],
+        }
+    }
+
+    fn workspace_duplicate_root_checks(&self) -> Vec<WorkspaceDoctorCheck> {
+        let mut roots: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        for workspace in self.workspaces.values() {
+            roots
+                .entry(workspace.root.clone())
+                .or_default()
+                .push(workspace.id.to_string());
+        }
+
+        roots
+            .into_iter()
+            .filter_map(|(root, mut ids)| {
+                if ids.len() <= 1 {
+                    return None;
+                }
+                ids.sort();
+                Some(WorkspaceDoctorCheck {
+                    name: "registry.duplicate_root".to_owned(),
+                    status: "warn".to_owned(),
+                    message: format!("{} is registered by {}", root.display(), ids.join(", ")),
+                })
+            })
+            .collect()
     }
 
     fn resolve_tool_session(
@@ -1807,10 +2824,31 @@ impl Runtime {
         Ok(())
     }
 
+    fn persist_worker_record(&self, worker_id: &str) -> Result<(), cadis_store::StoreError> {
+        if let Some(record) = self.workers.get(worker_id) {
+            self.state_store
+                .write_worker_metadata(worker_id, &WorkerMetadata::from_record(record))?;
+        }
+        Ok(())
+    }
+
     fn persist_agent_record(&self, agent_id: &AgentId) -> Result<(), cadis_store::StoreError> {
         if let Some(record) = self.agents.get(agent_id) {
             self.state_store
                 .write_agent_metadata(agent_id, &AgentMetadata::from_record(record))?;
+        }
+        Ok(())
+    }
+
+    fn persist_agent_session_record(
+        &self,
+        agent_session_id: &AgentSessionId,
+    ) -> Result<(), cadis_store::StoreError> {
+        if let Some(record) = self.agent_sessions.get(agent_session_id) {
+            self.state_store.write_agent_session_metadata(
+                agent_session_id,
+                &AgentSessionMetadata::from_record(record),
+            )?;
         }
         Ok(())
     }
@@ -1870,6 +2908,23 @@ impl AgentSpawnLimits {
                 .unwrap_or(defaults.max_children_per_parent),
             max_total_agents: json_usize(agent_spawn, "max_total_agents")
                 .unwrap_or(defaults.max_total_agents),
+        }
+    }
+}
+
+impl AgentRuntimeConfig {
+    fn from_options(options: &serde_json::Value) -> Self {
+        let defaults = Self::default();
+        let Some(agent_runtime) = options.get("agent_runtime") else {
+            return defaults;
+        };
+
+        Self {
+            default_timeout_sec: json_i64(agent_runtime, "default_timeout_sec")
+                .filter(|value| *value > 0)
+                .unwrap_or(defaults.default_timeout_sec),
+            max_steps_per_session: json_u32(agent_runtime, "max_steps_per_session")
+                .unwrap_or(defaults.max_steps_per_session),
         }
     }
 }
@@ -2144,6 +3199,16 @@ impl AgentMetadata {
 }
 
 impl AgentRecord {
+    fn agent_home_template(&self) -> AgentHomeTemplate {
+        AgentHomeTemplate::new(
+            self.id.clone(),
+            self.display_name.clone(),
+            self.role.clone(),
+            self.parent_agent_id.clone(),
+            self.model.clone(),
+        )
+    }
+
     fn event_payload(self) -> AgentEventPayload {
         AgentEventPayload {
             agent_id: self.id,
@@ -2152,6 +3217,113 @@ impl AgentRecord {
             parent_agent_id: self.parent_agent_id,
             model: Some(self.model),
             status: Some(self.status),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct AgentSessionRecovery {
+    records: HashMap<AgentSessionId, AgentSessionRecord>,
+    diagnostics: Vec<ErrorPayload>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentSessionRecord {
+    id: AgentSessionId,
+    session_id: SessionId,
+    route_id: String,
+    agent_id: AgentId,
+    parent_agent_id: Option<AgentId>,
+    task: String,
+    status: AgentSessionStatus,
+    timeout_at: Timestamp,
+    budget_steps: u32,
+    steps_used: u32,
+    result: Option<String>,
+    error_code: Option<String>,
+    error: Option<String>,
+    cancellation_requested_at: Option<Timestamp>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct AgentSessionMetadata {
+    agent_session_id: AgentSessionId,
+    session_id: SessionId,
+    route_id: String,
+    agent_id: AgentId,
+    parent_agent_id: Option<AgentId>,
+    task: String,
+    status: AgentSessionStatus,
+    timeout_at: Timestamp,
+    budget_steps: u32,
+    steps_used: u32,
+    result: Option<String>,
+    error_code: Option<String>,
+    error: Option<String>,
+    cancellation_requested_at: Option<Timestamp>,
+}
+
+impl AgentSessionMetadata {
+    fn from_record(record: &AgentSessionRecord) -> Self {
+        Self {
+            agent_session_id: record.id.clone(),
+            session_id: record.session_id.clone(),
+            route_id: record.route_id.clone(),
+            agent_id: record.agent_id.clone(),
+            parent_agent_id: record.parent_agent_id.clone(),
+            task: record.task.clone(),
+            status: record.status,
+            timeout_at: record.timeout_at.clone(),
+            budget_steps: record.budget_steps,
+            steps_used: record.steps_used,
+            result: record.result.clone(),
+            error_code: record.error_code.clone(),
+            error: record.error.clone(),
+            cancellation_requested_at: record.cancellation_requested_at.clone(),
+        }
+    }
+
+    fn into_record(self) -> (AgentSessionId, AgentSessionRecord) {
+        let id = self.agent_session_id;
+        (
+            id.clone(),
+            AgentSessionRecord {
+                id,
+                session_id: self.session_id,
+                route_id: self.route_id,
+                agent_id: self.agent_id,
+                parent_agent_id: self.parent_agent_id,
+                task: self.task,
+                status: self.status,
+                timeout_at: self.timeout_at,
+                budget_steps: self.budget_steps,
+                steps_used: self.steps_used,
+                result: self.result,
+                error_code: self.error_code,
+                error: self.error,
+                cancellation_requested_at: self.cancellation_requested_at,
+            },
+        )
+    }
+}
+
+impl AgentSessionRecord {
+    fn event_payload(&self) -> AgentSessionEventPayload {
+        AgentSessionEventPayload {
+            agent_session_id: self.id.clone(),
+            session_id: self.session_id.clone(),
+            route_id: self.route_id.clone(),
+            agent_id: self.agent_id.clone(),
+            parent_agent_id: self.parent_agent_id.clone(),
+            task: self.task.clone(),
+            status: self.status,
+            timeout_at: self.timeout_at.clone(),
+            budget_steps: self.budget_steps,
+            steps_used: self.steps_used,
+            result: self.result.clone(),
+            error_code: self.error_code.clone(),
+            error: self.error.clone(),
+            cancellation_requested_at: self.cancellation_requested_at.clone(),
         }
     }
 }
@@ -2310,8 +3482,428 @@ struct WorkerDelegation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkerRecord {
+    worker_id: String,
+    session_id: SessionId,
+    agent_id: Option<AgentId>,
+    parent_agent_id: Option<AgentId>,
+    status: String,
+    cli: Option<String>,
+    cwd: Option<String>,
+    summary: Option<String>,
+    worktree: Option<WorkerWorktreeIntent>,
+    artifacts: Option<WorkerArtifactLocations>,
+    updated_at: Timestamp,
+    log_lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct WorkerMetadata {
+    worker_id: String,
+    session_id: SessionId,
+    agent_id: Option<AgentId>,
+    parent_agent_id: Option<AgentId>,
+    status: String,
+    cli: Option<String>,
+    cwd: Option<String>,
+    summary: Option<String>,
+    worktree: Option<WorkerWorktreeIntent>,
+    artifacts: Option<WorkerArtifactLocations>,
+    updated_at: Timestamp,
+}
+
+impl WorkerRecord {
+    fn from_delegation(
+        session_id: SessionId,
+        agent_id: Option<AgentId>,
+        worker: &WorkerDelegation,
+    ) -> Self {
+        Self {
+            worker_id: worker.worker_id.clone(),
+            session_id,
+            agent_id,
+            parent_agent_id: worker.parent_agent_id.clone(),
+            status: "running".to_owned(),
+            cli: None,
+            cwd: None,
+            summary: Some(worker.summary.clone()),
+            worktree: Some(worker.worktree.clone()),
+            artifacts: Some(worker.artifacts.clone()),
+            updated_at: now_timestamp(),
+            log_lines: Vec::new(),
+        }
+    }
+
+    fn event_payload(&self) -> WorkerEventPayload {
+        WorkerEventPayload {
+            worker_id: self.worker_id.clone(),
+            agent_id: self.agent_id.clone(),
+            parent_agent_id: self.parent_agent_id.clone(),
+            status: Some(self.status.clone()),
+            cli: self.cli.clone(),
+            cwd: self.cwd.clone(),
+            summary: self.summary.clone(),
+            worktree: self.worktree.clone(),
+            artifacts: self.artifacts.clone(),
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        worker_status_is_terminal(&self.status)
+    }
+}
+
+impl WorkerMetadata {
+    fn from_record(record: &WorkerRecord) -> Self {
+        Self {
+            worker_id: record.worker_id.clone(),
+            session_id: record.session_id.clone(),
+            agent_id: record.agent_id.clone(),
+            parent_agent_id: record.parent_agent_id.clone(),
+            status: record.status.clone(),
+            cli: record.cli.clone(),
+            cwd: record.cwd.clone(),
+            summary: record.summary.clone(),
+            worktree: record.worktree.clone(),
+            artifacts: record.artifacts.clone(),
+            updated_at: record.updated_at.clone(),
+        }
+    }
+
+    fn into_record(self) -> (String, WorkerRecord) {
+        let worker_id = self.worker_id;
+        (
+            worker_id.clone(),
+            WorkerRecord {
+                worker_id,
+                session_id: self.session_id,
+                agent_id: self.agent_id,
+                parent_agent_id: self.parent_agent_id,
+                status: self.status,
+                cli: self.cli,
+                cwd: self.cwd,
+                summary: self.summary,
+                worktree: self.worktree,
+                artifacts: self.artifacts,
+                updated_at: self.updated_at,
+                log_lines: Vec::new(),
+            },
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingApproval {
     record: ApprovalRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VoicePreflightRecord {
+    surface: String,
+    status: String,
+    summary: String,
+    checked_at: Timestamp,
+    checks: Vec<VoiceDoctorCheck>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VoiceRuntimePreferences {
+    enabled: bool,
+    provider: String,
+    voice_id: String,
+    stt_language: String,
+    rate: i16,
+    pitch: i16,
+    volume: i16,
+    auto_speak: bool,
+    max_spoken_chars: usize,
+}
+
+impl VoiceRuntimePreferences {
+    fn from_options(options: &serde_json::Value) -> Self {
+        let voice = options.get("voice").and_then(serde_json::Value::as_object);
+
+        Self {
+            enabled: voice
+                .and_then(|voice| voice.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            provider: voice
+                .and_then(|voice| voice.get("provider"))
+                .and_then(serde_json::Value::as_str)
+                .map(normalize_voice_config_string)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "edge".to_owned()),
+            voice_id: voice
+                .and_then(|voice| voice.get("voice_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(normalize_voice_config_string)
+                .unwrap_or_else(|| "id-ID-GadisNeural".to_owned()),
+            stt_language: voice
+                .and_then(|voice| voice.get("stt_language"))
+                .and_then(serde_json::Value::as_str)
+                .map(normalize_voice_config_string)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "auto".to_owned()),
+            rate: voice
+                .and_then(|voice| voice.get("rate"))
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i16::try_from(value).ok())
+                .map(clamp_voice_adjustment)
+                .unwrap_or_default(),
+            pitch: voice
+                .and_then(|voice| voice.get("pitch"))
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i16::try_from(value).ok())
+                .map(clamp_voice_adjustment)
+                .unwrap_or_default(),
+            volume: voice
+                .and_then(|voice| voice.get("volume"))
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i16::try_from(value).ok())
+                .map(clamp_voice_adjustment)
+                .unwrap_or_default(),
+            auto_speak: voice
+                .and_then(|voice| voice.get("auto_speak"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            max_spoken_chars: voice
+                .and_then(|voice| voice.get("max_spoken_chars"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(800),
+        }
+    }
+
+    fn from_preview(options: &serde_json::Value, prefs: Option<VoicePreferences>) -> Self {
+        let mut runtime_prefs = Self::from_options(options);
+        if let Some(prefs) = prefs {
+            runtime_prefs.voice_id = normalize_voice_config_string(&prefs.voice_id);
+            runtime_prefs.rate = clamp_voice_adjustment(prefs.rate);
+            runtime_prefs.pitch = clamp_voice_adjustment(prefs.pitch);
+            runtime_prefs.volume = clamp_voice_adjustment(prefs.volume);
+        }
+        runtime_prefs
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TtsProviderKind {
+    Edge,
+    OpenAi,
+    System,
+    Stub,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StubbedTtsProvider {
+    kind: TtsProviderKind,
+    configured_id: String,
+}
+
+impl StubbedTtsProvider {
+    fn new(provider: &str) -> Self {
+        Self {
+            kind: tts_provider_kind(provider),
+            configured_id: normalize_voice_config_string(provider),
+        }
+    }
+}
+
+impl TtsProvider for StubbedTtsProvider {
+    fn id(&self) -> &'static str {
+        match self.kind {
+            TtsProviderKind::Edge => "edge",
+            TtsProviderKind::OpenAi => "openai",
+            TtsProviderKind::System => "system",
+            TtsProviderKind::Stub => "stub",
+            TtsProviderKind::Unsupported => "unsupported",
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self.kind {
+            TtsProviderKind::Edge => "Edge TTS daemon stub",
+            TtsProviderKind::OpenAi => "OpenAI TTS daemon stub",
+            TtsProviderKind::System => "System speech daemon stub",
+            TtsProviderKind::Stub => "Deterministic test TTS stub",
+            TtsProviderKind::Unsupported => "Unsupported TTS provider",
+        }
+    }
+
+    fn supported_voices(&self) -> Vec<TtsVoice> {
+        curated_tts_voices()
+    }
+
+    fn speak(&mut self, request: TtsRequest<'_>) -> Result<TtsOutput, TtsError> {
+        if self.kind == TtsProviderKind::Unsupported {
+            return Err(TtsError::new(
+                "unsupported_tts_provider",
+                format!("unsupported TTS provider '{}'", self.configured_id),
+                false,
+            ));
+        }
+        Ok(TtsOutput {
+            provider: self.id().to_owned(),
+            voice_id: request.voice_id.to_owned(),
+            spoken_chars: request.text.chars().count(),
+        })
+    }
+
+    fn stop(&mut self) -> Result<(), TtsError> {
+        if self.kind == TtsProviderKind::Unsupported {
+            return Err(TtsError::new(
+                "unsupported_tts_provider",
+                format!("unsupported TTS provider '{}'", self.configured_id),
+                false,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn tts_provider_from_config(provider: &str) -> Box<dyn TtsProvider> {
+    Box::new(StubbedTtsProvider::new(provider))
+}
+
+fn tts_provider_kind(provider: &str) -> TtsProviderKind {
+    match provider {
+        "edge" => TtsProviderKind::Edge,
+        "openai" => TtsProviderKind::OpenAi,
+        "system" => TtsProviderKind::System,
+        "stub" => TtsProviderKind::Stub,
+        _ => TtsProviderKind::Unsupported,
+    }
+}
+
+fn curated_tts_voices() -> Vec<TtsVoice> {
+    vec![
+        TtsVoice {
+            id: "id-ID-ArdiNeural",
+            label: "Ardi (Indonesian, Male)",
+            locale: "id-ID",
+            gender: "Male",
+        },
+        TtsVoice {
+            id: "id-ID-GadisNeural",
+            label: "Gadis (Indonesian, Female)",
+            locale: "id-ID",
+            gender: "Female",
+        },
+        TtsVoice {
+            id: "ms-MY-OsmanNeural",
+            label: "Osman (Malay, Male)",
+            locale: "ms-MY",
+            gender: "Male",
+        },
+        TtsVoice {
+            id: "ms-MY-YasminNeural",
+            label: "Yasmin (Malay, Female)",
+            locale: "ms-MY",
+            gender: "Female",
+        },
+        TtsVoice {
+            id: "en-US-AvaNeural",
+            label: "Ava (US, Female)",
+            locale: "en-US",
+            gender: "Female",
+        },
+        TtsVoice {
+            id: "en-US-AndrewNeural",
+            label: "Andrew (US, Male)",
+            locale: "en-US",
+            gender: "Male",
+        },
+        TtsVoice {
+            id: "en-US-EmmaNeural",
+            label: "Emma (US, Female)",
+            locale: "en-US",
+            gender: "Female",
+        },
+        TtsVoice {
+            id: "en-US-BrianNeural",
+            label: "Brian (US, Male)",
+            locale: "en-US",
+            gender: "Male",
+        },
+        TtsVoice {
+            id: "en-GB-SoniaNeural",
+            label: "Sonia (GB, Female)",
+            locale: "en-GB",
+            gender: "Female",
+        },
+        TtsVoice {
+            id: "en-GB-RyanNeural",
+            label: "Ryan (GB, Male)",
+            locale: "en-GB",
+            gender: "Male",
+        },
+    ]
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SpeechMode {
+    AutoSpeak,
+    Preview,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SpeechDecision {
+    Speak,
+    Blocked(&'static str),
+    RequiresSummary(&'static str),
+}
+
+fn speech_decision(
+    prefs: &VoiceRuntimePreferences,
+    content_kind: ContentKind,
+    text: &str,
+    mode: SpeechMode,
+) -> SpeechDecision {
+    let text = text.trim();
+    if text.is_empty() {
+        return SpeechDecision::Blocked("empty_text");
+    }
+
+    if mode == SpeechMode::AutoSpeak {
+        if !prefs.enabled {
+            return SpeechDecision::Blocked("voice_disabled");
+        }
+        if !prefs.auto_speak {
+            return SpeechDecision::Blocked("auto_speak_disabled");
+        }
+    }
+
+    match content_kind {
+        ContentKind::Code => return SpeechDecision::Blocked("code_not_speakable"),
+        ContentKind::Diff => return SpeechDecision::Blocked("diff_not_speakable"),
+        ContentKind::TerminalLog => return SpeechDecision::Blocked("terminal_log_not_speakable"),
+        ContentKind::TestResult if text.chars().count() > prefs.max_spoken_chars => {
+            return SpeechDecision::Blocked("long_tool_output_not_speakable");
+        }
+        ContentKind::TestResult if looks_like_raw_tool_output(text) => {
+            return SpeechDecision::Blocked("raw_tool_output_not_speakable");
+        }
+        _ => {}
+    }
+
+    if text.chars().count() > prefs.max_spoken_chars {
+        return SpeechDecision::RequiresSummary("content_exceeds_max_spoken_chars");
+    }
+
+    SpeechDecision::Speak
+}
+
+fn looks_like_raw_tool_output(text: &str) -> bool {
+    let line_count = text.lines().count();
+    line_count > 12
+        || text.contains("```")
+        || text.contains("diff --git")
+        || text.contains("thread '")
+        || text.contains("panicked at")
+        || text.contains("error[E")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2340,7 +3932,10 @@ impl ToolRegistry {
             if definition.side_effects.is_empty() {
                 return Err(RuntimeError {
                     code: "invalid_tool_side_effects",
-                    message: format!("tool '{}' must declare at least one side effect", definition.name),
+                    message: format!(
+                        "tool '{}' must declare at least one side effect",
+                        definition.name
+                    ),
                 });
             }
             if definition.timeout_secs == 0 {
@@ -2508,6 +4103,7 @@ impl ToolDefinition {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn approval_placeholder(
         name: &'static str,
         description: &'static str,
@@ -2682,30 +4278,232 @@ fn protocol_readiness(readiness: ProviderReadiness) -> ModelReadiness {
     }
 }
 
-fn recover_session_records(state_store: &StateStore) -> HashMap<SessionId, SessionRecord> {
-    state_store
-        .recover_session_metadata::<SessionMetadata>()
-        .map(|recovery| recovery.records)
-        .unwrap_or_default()
+#[derive(Debug)]
+struct RuntimeRecovery<K, V> {
+    records: HashMap<K, V>,
+    diagnostics: Vec<ErrorPayload>,
+}
+
+fn recover_session_records(state_store: &StateStore) -> RuntimeRecovery<SessionId, SessionRecord> {
+    match state_store.recover_session_metadata::<SessionMetadata>() {
+        Ok(recovery) => RuntimeRecovery {
+            records: recovery
+                .records
+                .into_iter()
+                .map(|record| record.metadata.into_record())
+                .collect(),
+            diagnostics: recovery_diagnostics("session", recovery.diagnostics),
+        },
+        Err(error) => RuntimeRecovery {
+            records: HashMap::new(),
+            diagnostics: vec![recovery_error(
+                "session_recovery_failed",
+                error.to_string(),
+                true,
+            )],
+        },
+    }
+}
+
+fn recover_agent_records(state_store: &StateStore) -> RuntimeRecovery<AgentId, AgentRecord> {
+    match state_store.recover_agent_metadata::<AgentMetadata>() {
+        Ok(recovery) => RuntimeRecovery {
+            records: recovery
+                .records
+                .into_iter()
+                .map(|record| record.metadata.into_record())
+                .collect(),
+            diagnostics: recovery_diagnostics("agent", recovery.diagnostics),
+        },
+        Err(error) => RuntimeRecovery {
+            records: HashMap::new(),
+            diagnostics: vec![recovery_error(
+                "agent_recovery_failed",
+                error.to_string(),
+                true,
+            )],
+        },
+    }
+}
+
+fn recover_worker_records(state_store: &StateStore) -> RuntimeRecovery<String, WorkerRecord> {
+    match state_store.recover_worker_metadata::<WorkerMetadata>() {
+        Ok(recovery) => RuntimeRecovery {
+            records: recovery
+                .records
+                .into_iter()
+                .map(|record| record.metadata.into_record())
+                .collect(),
+            diagnostics: recovery_diagnostics("worker", recovery.diagnostics),
+        },
+        Err(error) => RuntimeRecovery {
+            records: HashMap::new(),
+            diagnostics: vec![recovery_error(
+                "worker_recovery_failed",
+                error.to_string(),
+                true,
+            )],
+        },
+    }
+}
+
+fn reconcile_recovered_workers(
+    state_store: &StateStore,
+    workers: &mut HashMap<String, WorkerRecord>,
+) -> Vec<ErrorPayload> {
+    let mut diagnostics = Vec::new();
+
+    for worker in workers.values_mut() {
+        if worker.is_terminal() {
+            continue;
+        }
+
+        worker.status = "failed".to_owned();
+        worker.summary = Some(match worker.summary.take() {
+            Some(summary) if !summary.trim().is_empty() => {
+                format!("{summary} (marked failed during daemon recovery)")
+            }
+            _ => "Worker was marked failed during daemon recovery".to_owned(),
+        });
+        worker.updated_at = now_timestamp();
+
+        match state_store.write_worker_metadata(
+            &worker.worker_id,
+            &WorkerMetadata::from_record(worker),
+        ) {
+            Ok(()) => diagnostics.push(recovery_error(
+                "worker_recovered_stale",
+                format!(
+                    "worker '{}' had non-terminal status on daemon startup and was marked failed",
+                    worker.worker_id
+                ),
+                false,
+            )),
+            Err(error) => diagnostics.push(recovery_error(
+                "worker_recovery_persist_failed",
+                format!(
+                    "worker '{}' was marked failed in memory, but recovery state could not be persisted: {error}",
+                    worker.worker_id
+                ),
+                true,
+            )),
+        }
+    }
+
+    diagnostics
+}
+
+fn recovery_diagnostics(
+    kind: &'static str,
+    diagnostics: Vec<StateRecoveryDiagnostic>,
+) -> Vec<ErrorPayload> {
+    diagnostics
         .into_iter()
-        .map(|record| record.metadata.into_record())
+        .map(|diagnostic| {
+            recovery_error(
+                format!("{kind}_metadata_recovery_skipped"),
+                format!(
+                    "skipped invalid {kind} metadata '{}': {}",
+                    diagnostic.path.display(),
+                    diagnostic.reason
+                ),
+                false,
+            )
+        })
         .collect()
 }
 
-fn recover_agent_records(state_store: &StateStore) -> HashMap<AgentId, AgentRecord> {
-    state_store
-        .recover_agent_metadata::<AgentMetadata>()
-        .map(|recovery| recovery.records)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|record| record.metadata.into_record())
-        .collect()
+fn recovery_error(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    retryable: bool,
+) -> ErrorPayload {
+    ErrorPayload {
+        code: code.into(),
+        message: message.into(),
+        retryable,
+    }
+}
+
+fn recover_agent_session_records(state_store: &StateStore) -> AgentSessionRecovery {
+    match state_store.recover_agent_session_metadata::<AgentSessionMetadata>() {
+        Ok(recovery) => AgentSessionRecovery {
+            records: recovery
+                .records
+                .into_iter()
+                .map(|record| record.metadata.into_record())
+                .collect(),
+            diagnostics: recovery
+                .diagnostics
+                .into_iter()
+                .map(agent_session_recovery_diagnostic)
+                .collect(),
+        },
+        Err(error) => AgentSessionRecovery {
+            records: HashMap::new(),
+            diagnostics: vec![recovery_error(
+                "agent_session_recovery_failed",
+                format!("could not scan durable AgentSession metadata: {error}"),
+                true,
+            )],
+        },
+    }
+}
+
+fn agent_session_recovery_diagnostic(diagnostic: StateRecoveryDiagnostic) -> ErrorPayload {
+    let file_name = diagnostic
+        .path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("unknown");
+    recovery_error(
+        "agent_session_recovery_skipped",
+        format!(
+            "skipped durable AgentSession metadata state/agent-sessions/{file_name}: {}",
+            diagnostic.reason
+        ),
+        false,
+    )
+}
+
+fn init_agent_homes(profile_home: &ProfileHome, agents: &HashMap<AgentId, AgentRecord>) {
+    for record in agents.values() {
+        let _ = profile_home.init_agent(&record.agent_home_template());
+    }
+}
+
+fn agent_home_diagnostic_check(diagnostic: AgentHomeDiagnostic) -> WorkspaceDoctorCheck {
+    WorkspaceDoctorCheck {
+        name: diagnostic.name,
+        status: diagnostic.status,
+        message: diagnostic.message,
+    }
 }
 
 fn next_session_counter(sessions: &HashMap<SessionId, SessionRecord>) -> u64 {
     sessions
         .keys()
         .filter_map(|session_id| session_id.as_str().strip_prefix("ses_"))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn next_agent_session_counter(agent_sessions: &HashMap<AgentSessionId, AgentSessionRecord>) -> u64 {
+    agent_sessions
+        .keys()
+        .filter_map(|agent_session_id| agent_session_id.as_str().strip_prefix("ags_"))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn next_route_counter(agent_sessions: &HashMap<AgentSessionId, AgentSessionRecord>) -> u64 {
+    agent_sessions
+        .values()
+        .filter_map(|record| record.route_id.strip_prefix("route_"))
         .filter_map(|suffix| suffix.parse::<u64>().ok())
         .max()
         .unwrap_or(0)
@@ -2720,6 +4518,23 @@ fn next_agent_counter(agents: &HashMap<AgentId, AgentRecord>) -> u64 {
         .max()
         .unwrap_or(0)
         + 1
+}
+
+fn next_worker_counter(workers: &HashMap<String, WorkerRecord>) -> u64 {
+    workers
+        .keys()
+        .filter_map(|worker_id| worker_id.strip_prefix("worker_"))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn worker_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "canceled" | "expired"
+    )
 }
 
 fn load_workspace_registry(profile_home: &ProfileHome) -> HashMap<WorkspaceId, WorkspaceRecord> {
@@ -2883,6 +4698,18 @@ fn timestamp_after_minutes(minutes: i64) -> Timestamp {
     Timestamp::new_utc(value).expect("chrono UTC timestamp should satisfy protocol")
 }
 
+fn timestamp_after_seconds(seconds: i64) -> Timestamp {
+    let value =
+        (Utc::now() + Duration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Secs, true);
+    Timestamp::new_utc(value).expect("chrono UTC timestamp should satisfy protocol")
+}
+
+fn timestamp_is_past(timestamp: &Timestamp) -> bool {
+    DateTime::parse_from_rfc3339(timestamp.as_str())
+        .map(|timestamp| timestamp.with_timezone(&Utc) <= Utc::now())
+        .unwrap_or(true)
+}
+
 fn approval_is_expired(record: &ApprovalRecord) -> bool {
     DateTime::parse_from_rfc3339(record.expires_at.as_str())
         .map(|expires_at| expires_at.with_timezone(&Utc) <= Utc::now())
@@ -2903,6 +4730,86 @@ fn input_usize(input: &serde_json::Value, key: &str) -> Option<usize> {
         .get(key)
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
+}
+
+fn normalize_voice_checks(checks: Vec<VoiceDoctorCheck>) -> Vec<VoiceDoctorCheck> {
+    checks
+        .into_iter()
+        .filter_map(|check| {
+            let name = check.name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some(VoiceDoctorCheck {
+                name: redact(name),
+                status: normalize_voice_check_status(&check.status),
+                message: redact(check.message.trim()),
+            })
+        })
+        .collect()
+}
+
+fn normalize_voice_check_status(status: &str) -> String {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "ok" | "pass" | "passed" | "ready" => "ok",
+        "warn" | "warning" | "degraded" | "unknown" => "warn",
+        "error" | "fail" | "failed" | "blocked" => "error",
+        _ => "warn",
+    }
+    .to_owned()
+}
+
+fn voice_check_summary_status(checks: &[VoiceDoctorCheck]) -> String {
+    if checks.iter().any(|check| check.status == "error") {
+        "error".to_owned()
+    } else if checks.is_empty() || checks.iter().any(|check| check.status == "warn") {
+        "warn".to_owned()
+    } else {
+        "ok".to_owned()
+    }
+}
+
+fn voice_checks_summary(checks: &[VoiceDoctorCheck]) -> String {
+    let errors = checks
+        .iter()
+        .filter(|check| check.status == "error")
+        .count();
+    let warnings = checks.iter().filter(|check| check.status == "warn").count();
+    if errors > 0 {
+        format!("{errors} blocking voice issue{}", plural(errors))
+    } else if warnings > 0 {
+        format!("{warnings} voice warning{}", plural(warnings))
+    } else if checks.is_empty() {
+        "no bridge checks reported".to_owned()
+    } else {
+        "voice bridge ready".to_owned()
+    }
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+fn voice_runtime_state(checks: &[VoiceDoctorCheck]) -> VoiceRuntimeState {
+    if checks.iter().any(|check| check.status == "error") {
+        VoiceRuntimeState::Blocked
+    } else if checks.iter().any(|check| check.status == "warn") {
+        VoiceRuntimeState::Degraded
+    } else {
+        VoiceRuntimeState::Ready
+    }
+}
+
+fn normalize_voice_config_string(value: &str) -> String {
+    value.trim().to_owned()
+}
+
+fn is_supported_voice_provider(provider: &str) -> bool {
+    matches!(provider, "edge" | "openai" | "system" | "stub")
 }
 
 fn tool_workspace_summary(input: &serde_json::Value) -> Option<String> {
@@ -3112,6 +5019,110 @@ fn root_check(name: &str, root: &Path) -> WorkspaceDoctorCheck {
             status: "error".to_owned(),
             message: format!("{} is not a directory", root.display()),
         }
+    }
+}
+
+fn project_workspace_metadata_checks(workspace: &WorkspaceRecord) -> Vec<WorkspaceDoctorCheck> {
+    if workspace.kind != WorkspaceKind::Project {
+        return Vec::new();
+    }
+
+    let mut checks = project_workspace_metadata_checks_for_root(&workspace.root);
+    checks.extend(project_worker_worktree_checks_for_root(&workspace.root));
+    let Some(metadata) = ProjectWorkspaceStore::new(&workspace.root)
+        .load()
+        .ok()
+        .flatten()
+    else {
+        return checks;
+    };
+
+    if metadata.workspace_id != workspace.id.to_string() {
+        checks.push(WorkspaceDoctorCheck {
+            name: "workspace.metadata.id".to_owned(),
+            status: "error".to_owned(),
+            message: format!(
+                ".cadis/workspace.toml workspace_id '{}' does not match registry id '{}'",
+                metadata.workspace_id, workspace.id
+            ),
+        });
+    }
+
+    let metadata_kind = protocol_workspace_kind(metadata.kind);
+    if metadata_kind != workspace.kind {
+        checks.push(WorkspaceDoctorCheck {
+            name: "workspace.metadata.kind".to_owned(),
+            status: "warn".to_owned(),
+            message: format!(
+                ".cadis/workspace.toml kind {:?} differs from registry kind {:?}",
+                metadata_kind, workspace.kind
+            ),
+        });
+    }
+
+    for (name, path) in [
+        ("workspace.metadata.worktree_root", metadata.worktree_root),
+        ("workspace.metadata.artifact_root", metadata.artifact_root),
+        ("workspace.metadata.media_root", metadata.media_root),
+    ] {
+        if path.is_absolute() {
+            checks.push(WorkspaceDoctorCheck {
+                name: name.to_owned(),
+                status: "warn".to_owned(),
+                message: format!("{} should be project-relative", path.display()),
+            });
+        }
+    }
+
+    checks
+}
+
+fn project_workspace_metadata_checks_for_root(root: &Path) -> Vec<WorkspaceDoctorCheck> {
+    let store = ProjectWorkspaceStore::new(root);
+    match store.load() {
+        Ok(Some(_)) => vec![WorkspaceDoctorCheck {
+            name: "workspace.metadata".to_owned(),
+            status: "ok".to_owned(),
+            message: format!("{} exists", store.workspace_toml_path().display()),
+        }],
+        Ok(None) => vec![WorkspaceDoctorCheck {
+            name: "workspace.metadata".to_owned(),
+            status: "warn".to_owned(),
+            message: format!("{} is missing", store.workspace_toml_path().display()),
+        }],
+        Err(error) => vec![WorkspaceDoctorCheck {
+            name: "workspace.metadata".to_owned(),
+            status: "error".to_owned(),
+            message: format!(
+                "could not read {}: {error}",
+                store.workspace_toml_path().display()
+            ),
+        }],
+    }
+}
+
+fn project_worker_worktree_checks_for_root(root: &Path) -> Vec<WorkspaceDoctorCheck> {
+    let store = ProjectWorkspaceStore::new(root);
+    match store.worker_worktree_diagnostics() {
+        Ok(diagnostics) => diagnostics
+            .into_iter()
+            .map(project_worktree_diagnostic_check)
+            .collect(),
+        Err(error) => vec![WorkspaceDoctorCheck {
+            name: "workspace.worktrees.metadata".to_owned(),
+            status: "error".to_owned(),
+            message: format!("could not inspect worker worktree metadata: {error}"),
+        }],
+    }
+}
+
+fn project_worktree_diagnostic_check(
+    diagnostic: ProjectWorktreeDiagnostic,
+) -> WorkspaceDoctorCheck {
+    WorkspaceDoctorCheck {
+        name: diagnostic.name,
+        status: diagnostic.status,
+        message: diagnostic.message,
     }
 }
 
@@ -3420,9 +5431,11 @@ fn planned_worker_worktree(
 ) -> WorkerWorktreeIntent {
     let worktree_root = workspace
         .map(|workspace| {
-            Path::new(workspace)
-                .join(".cadis")
-                .join("worktrees")
+            let store = ProjectWorkspaceStore::new(workspace);
+            let metadata = store.load().ok().flatten();
+            store
+                .worker_worktree_paths(worker_id, metadata.as_ref())
+                .worktree_root
                 .display()
                 .to_string()
         })
@@ -3444,17 +5457,14 @@ fn planned_worker_worktree(
     }
 }
 
-fn worker_artifact_locations(root: &Path, worker_id: &str) -> WorkerArtifactLocations {
-    let root = root.join(worker_id);
-    let root_display = root.display().to_string();
-
+fn worker_artifact_locations(paths: &WorkerArtifactPathSet) -> WorkerArtifactLocations {
     WorkerArtifactLocations {
-        root: root_display,
-        patch: root.join("patch.diff").display().to_string(),
-        test_report: root.join("test-report.json").display().to_string(),
-        summary: root.join("summary.md").display().to_string(),
-        changed_files: root.join("changed-files.json").display().to_string(),
-        memory_candidates: root.join("memory-candidates.jsonl").display().to_string(),
+        root: paths.root.display().to_string(),
+        patch: paths.patch.display().to_string(),
+        test_report: paths.test_report.display().to_string(),
+        summary: paths.summary.display().to_string(),
+        changed_files: paths.changed_files.display().to_string(),
+        memory_candidates: paths.memory_candidates.display().to_string(),
     }
 }
 
@@ -3497,11 +5507,37 @@ fn branch_slug(value: &str) -> String {
     }
 }
 
+fn agent_session_is_terminal(status: AgentSessionStatus) -> bool {
+    matches!(
+        status,
+        AgentSessionStatus::Completed
+            | AgentSessionStatus::Failed
+            | AgentSessionStatus::Cancelled
+            | AgentSessionStatus::TimedOut
+            | AgentSessionStatus::BudgetExceeded
+    )
+}
+
 fn json_usize(value: &serde_json::Value, key: &str) -> Option<usize> {
     value
         .get(key)
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
+}
+
+fn json_u32(value: &serde_json::Value, key: &str) -> Option<u32> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn json_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
+    value.get(key).and_then(serde_json::Value::as_i64)
+}
+
+fn clamp_voice_adjustment(value: i16) -> i16 {
+    value.clamp(-50, 50)
 }
 
 fn merge_json(mut base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
@@ -3524,9 +5560,15 @@ mod tests {
     use cadis_protocol::{
         AgentModelSetRequest, AgentRenameRequest, AgentSpawnRequest, ApprovalResponseRequest,
         ClientId, ContentKind, EmptyPayload, EventSubscriptionRequest, EventsSnapshotRequest,
-        MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest, SessionTargetRequest,
-        ToolCallRequest, WorkspaceAccess, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
+        MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest,
+        SessionSubscriptionRequest, SessionTargetRequest, ToolCallRequest, VoiceDoctorCheck,
+        VoiceDoctorRequest, VoicePreflightRequest, WorkerTailRequest, WorkspaceAccess,
+        WorkspaceDoctorRequest, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
         WorkspaceRegisterRequest,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     fn runtime() -> Runtime {
@@ -3556,6 +5598,43 @@ mod tests {
         )
     }
 
+    fn runtime_with_voice(enabled: bool, auto_speak: bool, max_spoken_chars: usize) -> Runtime {
+        Runtime::new(
+            RuntimeOptions {
+                cadis_home: test_workspace("cadis-home"),
+                profile_id: "default".to_owned(),
+                socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
+                model_provider: "echo".to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
+                ui_preferences: serde_json::json!({
+                    "voice": {
+                        "enabled": enabled,
+                        "provider": "stub",
+                        "voice_id": "id-ID-GadisNeural",
+                        "stt_language": "auto",
+                        "rate": 0,
+                        "pitch": 0,
+                        "volume": 0,
+                        "auto_speak": auto_speak,
+                        "max_spoken_chars": max_spoken_chars
+                    },
+                    "agent_spawn": {
+                        "max_depth": AgentSpawnLimits::default().max_depth,
+                        "max_children_per_parent": AgentSpawnLimits::default().max_children_per_parent,
+                        "max_total_agents": AgentSpawnLimits::default().max_total_agents
+                    },
+                    "orchestrator": {
+                        "worker_delegation_enabled": true,
+                        "default_worker_role": "Worker"
+                    }
+                }),
+            },
+            Box::<EchoProvider>::default(),
+        )
+    }
+
     fn runtime_with_home_and_options(
         cadis_home: PathBuf,
         spawn_limits: AgentSpawnLimits,
@@ -3567,6 +5646,9 @@ mod tests {
                 profile_id: "default".to_owned(),
                 socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
                 model_provider: "echo".to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
                 ui_preferences: serde_json::json!({
                     "hud": {
                         "theme": "arc",
@@ -3599,6 +5681,9 @@ mod tests {
                 profile_id: "default".to_owned(),
                 socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
                 model_provider: model_provider.to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
                 ui_preferences: serde_json::json!({
                     "agent_spawn": {
                         "max_depth": AgentSpawnLimits::default().max_depth,
@@ -3612,6 +5697,52 @@ mod tests {
                 }),
             },
             provider,
+        )
+    }
+
+    #[derive(Clone, Debug)]
+    struct CountingProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ModelProvider for CountingProvider {
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        fn chat(&self, _prompt: &str) -> Result<Vec<String>, cadis_models::ModelError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec!["counted".to_owned()])
+        }
+    }
+
+    fn runtime_with_agent_runtime_config(agent_runtime: AgentRuntimeConfig) -> Runtime {
+        Runtime::new(
+            RuntimeOptions {
+                cadis_home: test_workspace("cadis-home"),
+                profile_id: "default".to_owned(),
+                socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
+                model_provider: "echo".to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
+                ui_preferences: serde_json::json!({
+                    "agent_spawn": {
+                        "max_depth": AgentSpawnLimits::default().max_depth,
+                        "max_children_per_parent": AgentSpawnLimits::default().max_children_per_parent,
+                        "max_total_agents": AgentSpawnLimits::default().max_total_agents
+                    },
+                    "agent_runtime": {
+                        "default_timeout_sec": agent_runtime.default_timeout_sec,
+                        "max_steps_per_session": agent_runtime.max_steps_per_session
+                    },
+                    "orchestrator": {
+                        "worker_delegation_enabled": true,
+                        "default_worker_role": "Worker"
+                    }
+                }),
+            },
+            Box::<EchoProvider>::default(),
         )
     }
 
@@ -3673,6 +5804,23 @@ mod tests {
         ));
     }
 
+    fn send_message_with_kind(
+        runtime: &mut Runtime,
+        content_kind: ContentKind,
+        content: &str,
+    ) -> RequestOutcome {
+        runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_message"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: content.to_owned(),
+                content_kind,
+            }),
+        ))
+    }
+
     #[test]
     fn status_returns_typed_response() {
         let mut runtime = runtime();
@@ -3686,10 +5834,209 @@ mod tests {
             DaemonResponse::DaemonStatus(status) => {
                 assert_eq!(status.status, "ok");
                 assert_eq!(status.model_provider, "echo");
+                assert_eq!(status.voice.provider, "edge");
+                assert_eq!(status.voice.state, VoiceRuntimeState::Disabled);
             }
             other => panic!("unexpected response: {other:?}"),
         }
         assert!(outcome.events.is_empty());
+    }
+
+    #[test]
+    fn voice_doctor_reports_missing_local_bridge_preflight() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_voice_doctor"),
+            ClientId::from("cli_1"),
+            ClientRequest::VoiceDoctor(VoiceDoctorRequest::default()),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        let doctor = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::VoiceDoctorResponse(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("voice doctor event should be emitted");
+        assert!(doctor.checks.iter().any(|check| {
+            check.name == "voice.preflight"
+                && check.status == "warn"
+                && check.message.contains("no local bridge preflight")
+        }));
+    }
+
+    #[test]
+    fn voice_preflight_promotes_hud_checks_into_status() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_voice_preflight"),
+            ClientId::from("hud_1"),
+            ClientRequest::VoicePreflight(VoicePreflightRequest {
+                surface: Some("cadis-hud".to_owned()),
+                summary: Some("ready".to_owned()),
+                checks: vec![VoiceDoctorCheck {
+                    name: "microphone".to_owned(),
+                    status: "pass".to_owned(),
+                    message: "1 input visible".to_owned(),
+                }],
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        let status = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::VoiceStatusUpdated(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("voice status event should be emitted");
+        assert_eq!(status.last_preflight.as_ref().unwrap().surface, "cadis-hud");
+        assert_eq!(status.last_preflight.as_ref().unwrap().status, "ok");
+
+        let doctor = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::VoicePreflightResponse(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("voice preflight response should be emitted");
+        assert!(doctor.checks.iter().any(|check| {
+            check.name == "microphone" && check.status == "ok" && check.message == "1 input visible"
+        }));
+    }
+
+    #[test]
+    fn voice_provider_stubs_report_curated_catalog_without_external_calls() {
+        for provider_id in ["edge", "openai", "system", "stub"] {
+            let provider = tts_provider_from_config(provider_id);
+            assert_eq!(provider.id(), provider_id);
+            assert!(provider
+                .supported_voices()
+                .iter()
+                .any(|voice| voice.id == "id-ID-GadisNeural"));
+        }
+    }
+
+    #[test]
+    fn voice_preview_uses_daemon_provider_stub() {
+        let mut runtime = runtime_with_voice(false, false, 800);
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_voice_preview"),
+            ClientId::from("hud_1"),
+            ClientRequest::VoicePreview(VoicePreviewRequest {
+                text: "Halo, saya CADIS.".to_owned(),
+                prefs: Some(VoicePreferences {
+                    voice_id: "id-ID-GadisNeural".to_owned(),
+                    rate: 5,
+                    pitch: 0,
+                    volume: 0,
+                }),
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoicePreviewStarted(_))));
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoicePreviewCompleted(_))));
+    }
+
+    #[test]
+    fn auto_speak_speaks_short_final_chat_response() {
+        let mut runtime = runtime_with_voice(true, true, 10_000);
+        let outcome = send_message_with_kind(&mut runtime, ContentKind::Chat, "hello");
+
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoiceStarted(_))));
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoiceCompleted(_))));
+    }
+
+    #[test]
+    fn speech_policy_blocks_code_diff_and_terminal_log() {
+        for content_kind in [
+            ContentKind::Code,
+            ContentKind::Diff,
+            ContentKind::TerminalLog,
+        ] {
+            let mut runtime = runtime_with_voice(true, true, 10_000);
+            let outcome = send_message_with_kind(&mut runtime, content_kind, "unsafe to speak");
+
+            assert!(outcome
+                .events
+                .iter()
+                .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
+            assert!(!outcome
+                .events
+                .iter()
+                .any(|event| matches!(event.event, CadisEvent::VoiceStarted(_))));
+            assert!(!outcome
+                .events
+                .iter()
+                .any(|event| matches!(event.event, CadisEvent::VoiceCompleted(_))));
+        }
+    }
+
+    #[test]
+    fn speech_policy_blocks_long_tool_output() {
+        let prefs = VoiceRuntimePreferences {
+            enabled: true,
+            provider: "stub".to_owned(),
+            voice_id: "id-ID-GadisNeural".to_owned(),
+            stt_language: "auto".to_owned(),
+            rate: 0,
+            pitch: 0,
+            volume: 0,
+            auto_speak: true,
+            max_spoken_chars: 40,
+        };
+        let output = "running 42 tests\n".repeat(12);
+
+        assert_eq!(
+            speech_decision(
+                &prefs,
+                ContentKind::TestResult,
+                &output,
+                SpeechMode::AutoSpeak
+            ),
+            SpeechDecision::Blocked("long_tool_output_not_speakable")
+        );
+
+        let mut runtime = runtime_with_voice(true, true, 40);
+        let outcome = send_message_with_kind(&mut runtime, ContentKind::TestResult, &output);
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoiceStarted(_))));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoiceCompleted(_))));
     }
 
     #[test]
@@ -3718,14 +6065,26 @@ mod tests {
         }
 
         let file_read = registry.get("file.read").expect("file.read should exist");
-        assert_eq!(file_read.workspace_behavior, ToolWorkspaceBehavior::PathScoped);
-        assert_eq!(file_read.cancellation_behavior, ToolCancellationBehavior::NotSupported);
+        assert_eq!(
+            file_read.workspace_behavior,
+            ToolWorkspaceBehavior::PathScoped
+        );
+        assert_eq!(
+            file_read.cancellation_behavior,
+            ToolCancellationBehavior::NotSupported
+        );
         assert!(!file_read.needs_network);
         assert!(!file_read.may_read_secrets);
 
         let shell = registry.get("shell.run").expect("shell.run should exist");
-        assert_eq!(shell.workspace_behavior, ToolWorkspaceBehavior::RequiresWorkspace);
-        assert_eq!(shell.cancellation_behavior, ToolCancellationBehavior::Cooperative);
+        assert_eq!(
+            shell.workspace_behavior,
+            ToolWorkspaceBehavior::RequiresWorkspace
+        );
+        assert_eq!(
+            shell.cancellation_behavior,
+            ToolCancellationBehavior::Cooperative
+        );
         assert!(shell.may_read_secrets);
     }
 
@@ -3938,6 +6297,122 @@ mod tests {
     }
 
     #[test]
+    fn workspace_doctor_reports_project_metadata_mismatch_and_duplicate_roots() {
+        let workspace = test_workspace("doctor-metadata");
+        cadis_store::ProjectWorkspaceStore::new(&workspace)
+            .save(&cadis_store::ProjectWorkspaceMetadata {
+                workspace_id: "wrong-id".to_owned(),
+                kind: cadis_store::WorkspaceKind::Project,
+                vcs: cadis_store::WorkspaceVcs::Git,
+                worktree_root: PathBuf::from(".cadis/worktrees"),
+                artifact_root: PathBuf::from(".cadis/artifacts"),
+                media_root: PathBuf::from(".cadis/media"),
+            })
+            .expect("project workspace metadata should save");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "doctor-a", &workspace);
+        register_workspace(&mut runtime, "doctor-b", &workspace);
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_workspace_doctor"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceDoctor(WorkspaceDoctorRequest {
+                workspace_id: Some(WorkspaceId::from("doctor-a")),
+                root: None,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkspaceDoctorResponse(payload)
+                    if payload.checks.iter().any(|check| check.name == "registry.duplicate_root"
+                        && check.status == "warn")
+                        && payload.checks.iter().any(|check| check.name == "workspace.metadata.id"
+                            && check.status == "error")
+            )
+        }));
+    }
+
+    #[test]
+    fn workspace_doctor_warns_when_project_metadata_is_missing() {
+        let workspace = test_workspace("doctor-missing-metadata");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "doctor-missing", &workspace);
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_workspace_doctor"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceDoctor(WorkspaceDoctorRequest {
+                workspace_id: Some(WorkspaceId::from("doctor-missing")),
+                root: None,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkspaceDoctorResponse(payload)
+                    if payload.checks.iter().any(|check| check.name == "workspace.metadata"
+                        && check.status == "warn")
+            )
+        }));
+    }
+
+    #[test]
+    fn workspace_doctor_reports_stale_worker_worktree_metadata() {
+        let workspace = test_workspace("doctor-stale-worktree");
+        let mut runtime = runtime();
+        let store = cadis_store::ProjectWorkspaceStore::new(&workspace);
+        store
+            .save(&cadis_store::ProjectWorkspaceMetadata {
+                workspace_id: "doctor-stale".to_owned(),
+                kind: cadis_store::WorkspaceKind::Project,
+                vcs: cadis_store::WorkspaceVcs::Git,
+                worktree_root: PathBuf::from(".cadis/worktrees"),
+                artifact_root: PathBuf::from(".cadis/artifacts"),
+                media_root: PathBuf::from(".cadis/media"),
+            })
+            .expect("project workspace metadata should save");
+        store
+            .save_worker_worktree_metadata(&cadis_store::ProjectWorkerWorktreeMetadata {
+                worker_id: "worker_000001".to_owned(),
+                workspace_id: "doctor-stale".to_owned(),
+                worktree_path: PathBuf::from(".cadis/worktrees/worker_000001"),
+                branch_name: "cadis/worker_000001/example".to_owned(),
+                base_ref: Some("HEAD".to_owned()),
+                state: cadis_store::ProjectWorkerWorktreeState::Planned,
+                artifact_root: runtime
+                    .profile_home
+                    .root()
+                    .join("artifacts/workers/worker_000001"),
+            })
+            .expect("worker worktree metadata should save");
+
+        register_workspace(&mut runtime, "doctor-stale", &workspace);
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_workspace_doctor"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceDoctor(WorkspaceDoctorRequest {
+                workspace_id: Some(WorkspaceId::from("doctor-stale")),
+                root: None,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkspaceDoctorResponse(payload)
+                    if payload.checks.iter().any(|check| check.name == "workspace.worktrees.worker_000001.path"
+                        && check.status == "warn")
+                        && payload.checks.iter().any(|check| check.name == "workspace.worktrees.worker_000001.artifacts"
+                            && check.status == "warn")
+            )
+        }));
+    }
+
+    #[test]
     fn workspace_registry_and_grants_survive_runtime_restart() {
         let cadis_home = test_workspace("persistent-cadis-home");
         let workspace = test_workspace("persistent-workspace");
@@ -4011,8 +6486,11 @@ mod tests {
         let outcome = runtime.handle_request(RequestEnvelope::new(
             RequestId::from("req_subscribe_session"),
             ClientId::from("cli_1"),
-            ClientRequest::SessionSubscribe(SessionTargetRequest {
+            ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
                 session_id: session_id.clone(),
+                since_event_id: None,
+                replay_limit: None,
+                include_snapshot: true,
             }),
         ));
 
@@ -4041,7 +6519,12 @@ mod tests {
         let outcome = runtime.handle_request(RequestEnvelope::new(
             RequestId::from("req_subscribe_removed_session"),
             ClientId::from("cli_1"),
-            ClientRequest::SessionSubscribe(SessionTargetRequest { session_id }),
+            ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
+                session_id,
+                since_event_id: None,
+                replay_limit: None,
+                include_snapshot: true,
+            }),
         ));
 
         assert!(matches!(
@@ -4093,6 +6576,234 @@ mod tests {
                     && agent.model.as_deref() == Some("echo/cadis-local-fallback")
                     && agent.parent_agent_id.as_ref() == Some(&AgentId::from("main"))
             })
+        }));
+    }
+
+    #[test]
+    fn worker_metadata_survives_runtime_restart_and_snapshot_replays_worker() {
+        let cadis_home = test_workspace("persistent-worker-home");
+        let worker_id = {
+            let mut runtime = runtime_with_home(cadis_home.clone());
+            let outcome = runtime.handle_request(RequestEnvelope::new(
+                RequestId::from("req_worker"),
+                ClientId::from("hud_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "/route @codex run focused tests".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ));
+
+            assert!(matches!(
+                outcome.response.response,
+                DaemonResponse::RequestAccepted(_)
+            ));
+            outcome
+                .events
+                .iter()
+                .find_map(|event| match &event.event {
+                    CadisEvent::WorkerCompleted(payload) => Some(payload.worker_id.clone()),
+                    _ => None,
+                })
+                .expect("worker.completed should be emitted")
+        };
+
+        assert_eq!(worker_id, "worker_000001");
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCompleted(payload)
+                    if payload.worker_id == worker_id
+                        && payload.agent_id.as_ref().map(AgentId::as_str) == Some("codex")
+                        && payload.status.as_deref() == Some("completed")
+            )
+        }));
+
+        let next = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_next_worker"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: "/route @codex inspect next task".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(next.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerStarted(payload)
+                    if payload.worker_id == "worker_000002"
+                        && payload.status.as_deref() == Some("running")
+            )
+        }));
+    }
+
+    #[test]
+    fn stale_running_worker_metadata_is_failed_on_runtime_recovery() {
+        let cadis_home = test_workspace("stale-worker-home");
+        let state_store = StateStore::new(&CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        });
+        state_store
+            .ensure_layout()
+            .expect("state layout should initialize");
+        state_store
+            .write_worker_metadata(
+                "worker_000007",
+                &WorkerMetadata {
+                    worker_id: "worker_000007".to_owned(),
+                    session_id: SessionId::from("ses_stale"),
+                    agent_id: Some(AgentId::from("codex")),
+                    parent_agent_id: Some(AgentId::from("main")),
+                    status: "running".to_owned(),
+                    cli: None,
+                    cwd: None,
+                    summary: Some("stale worker".to_owned()),
+                    worktree: None,
+                    artifacts: None,
+                    updated_at: now_timestamp(),
+                },
+            )
+            .expect("stale worker metadata should write");
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::DaemonError(payload)
+                    if payload.code == "worker_recovered_stale"
+                        && payload.message.contains("worker_000007")
+            )
+        }));
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCompleted(payload)
+                    if payload.worker_id == "worker_000007"
+                        && payload.status.as_deref() == Some("failed")
+                        && payload.summary.as_deref().is_some_and(|summary| {
+                            summary.contains("marked failed during daemon recovery")
+                        })
+            )
+        }));
+
+        let recovered = state_store
+            .recover_worker_metadata::<WorkerMetadata>()
+            .expect("worker metadata should recover");
+        assert_eq!(recovered.records.len(), 1);
+        assert_eq!(recovered.records[0].metadata.status, "failed");
+    }
+
+    #[test]
+    fn invalid_session_metadata_surfaces_recovery_diagnostic_in_snapshot() {
+        let cadis_home = test_workspace("invalid-session-recovery");
+        let state_store = StateStore::new(&CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        });
+        state_store
+            .ensure_layout()
+            .expect("state layout should initialize");
+        fs::write(state_store.state_dir().join("sessions/broken.json"), "{")
+            .expect("corrupt session metadata should write");
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::DaemonError(payload)
+                    if payload.code == "session_metadata_recovery_skipped"
+                        && payload.message.contains("broken.json")
+            )
+        }));
+    }
+
+    #[test]
+    fn runtime_initializes_agent_home_templates() {
+        let cadis_home = test_workspace("runtime-agent-home");
+        let mut runtime = runtime_with_home(cadis_home.clone());
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_spawn_agent_home"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentSpawn(AgentSpawnRequest {
+                role: "Review".to_owned(),
+                parent_agent_id: Some(AgentId::from("main")),
+                display_name: Some("Review Scout".to_owned()),
+                model: Some("echo".to_owned()),
+            }),
+        ));
+        let spawned_id = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::AgentSpawned(payload) => Some(payload.agent_id.clone()),
+                _ => None,
+            })
+            .expect("agent.spawned should be emitted");
+
+        let profile = CadisHome::new(cadis_home).profile("default");
+        assert!(profile.agent("main").agent_toml_path().is_file());
+        let spawned_home = profile.agent(spawned_id.as_str());
+        assert!(spawned_home.agent_toml_path().is_file());
+        assert!(spawned_home.policy_toml_path().is_file());
+        let metadata = spawned_home
+            .load_metadata()
+            .expect("spawned AGENT.toml should parse");
+        assert_eq!(metadata.agent.display_name, "Review Scout");
+        assert_eq!(metadata.agent.role, "Review");
+        assert_eq!(metadata.agent.parent_agent_id.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn workspace_doctor_reports_agent_home_diagnostics() {
+        let cadis_home = test_workspace("runtime-agent-doctor");
+        let mut runtime = runtime_with_home(cadis_home.clone());
+        let policy_path = CadisHome::new(cadis_home)
+            .profile("default")
+            .agent("main")
+            .policy_toml_path();
+        fs::write(policy_path, "[policy\n").expect("corrupt policy should write");
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_agent_doctor"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceDoctor(WorkspaceDoctorRequest {
+                workspace_id: None,
+                root: None,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkspaceDoctorResponse(payload)
+                    if payload.checks.iter().any(|check| check.name == "main/agent.POLICY.toml"
+                        && check.status == "error")
+            )
         }));
     }
 
@@ -4312,6 +7023,316 @@ mod tests {
     }
 
     #[test]
+    fn begin_message_request_prepares_progress_without_calling_provider() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = CountingProvider {
+            calls: Arc::clone(&calls),
+        };
+        let mut runtime = runtime_with_provider(Box::new(provider), "counting");
+
+        let pending = runtime
+            .begin_message_request(RequestEnvelope::new(
+                RequestId::from("req_1"),
+                ClientId::from("cli_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "hello".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ))
+            .expect("message request should be prepared");
+
+        assert!(matches!(
+            pending.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(pending
+            .initial_events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::SessionStarted(_))));
+        assert!(pending.initial_events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentStatusChanged(payload)
+                    if payload.status == AgentStatus::Running
+            )
+        }));
+        assert!(!pending
+            .initial_events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
+    }
+
+    #[test]
+    fn message_send_emits_agent_session_lifecycle_events() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_agent_session"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("codex")),
+                content: "run tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        let started = outcome.events.iter().find_map(|event| match &event.event {
+            CadisEvent::AgentSessionStarted(payload) => Some(payload),
+            _ => None,
+        });
+        let started = started.expect("agent.session.started should be emitted");
+        assert_eq!(started.agent_id.as_str(), "codex");
+        assert_eq!(started.route_id, "route_000001");
+        assert_eq!(started.status, AgentSessionStatus::Running);
+        assert_eq!(started.task, "run tests");
+        assert_eq!(started.budget_steps, 1);
+        assert_eq!(started.steps_used, 0);
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionUpdated(payload)
+                    if payload.agent_session_id == started.agent_session_id
+                        && payload.steps_used == 1
+            )
+        }));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionCompleted(payload)
+                    if payload.agent_session_id == started.agent_session_id
+                        && payload.result.as_deref().is_some_and(|result| result.contains("run tests"))
+            )
+        }));
+    }
+
+    #[test]
+    fn agent_session_metadata_survives_runtime_restart_and_snapshot() {
+        let cadis_home = test_workspace("persistent-agent-session-home");
+        let completed = {
+            let mut runtime = runtime_with_home(cadis_home.clone());
+            let outcome = runtime.handle_request(RequestEnvelope::new(
+                RequestId::from("req_agent_session_persist"),
+                ClientId::from("cli_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: Some(AgentId::from("codex")),
+                    content: "run recovery tests".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ));
+
+            outcome
+                .events
+                .iter()
+                .find_map(|event| match &event.event {
+                    CadisEvent::AgentSessionCompleted(payload) => Some(payload.clone()),
+                    _ => None,
+                })
+                .expect("agent.session.completed should be emitted")
+        };
+
+        let store = StateStore::new(&CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        });
+        assert!(store
+            .agent_session_path(&completed.agent_session_id)
+            .is_file());
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_agent_session_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionCompleted(payload)
+                    if payload.agent_session_id == completed.agent_session_id
+                        && payload.route_id == completed.route_id
+                        && payload.status == AgentSessionStatus::Completed
+                        && payload.steps_used == 1
+                        && payload.result.as_deref().is_some_and(|result| result.contains("run recovery tests"))
+            )
+        }));
+
+        let next = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_agent_session_next"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("codex")),
+                content: "next route".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(next.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionStarted(payload)
+                    if payload.agent_session_id.as_str() == "ags_000002"
+                        && payload.route_id == "route_000002"
+            )
+        }));
+    }
+
+    #[test]
+    fn corrupt_agent_session_metadata_reports_diagnostic_and_ignores_partial_temp_file() {
+        let cadis_home = test_workspace("corrupt-agent-session-home");
+        let store = StateStore::new(&CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        });
+        store.ensure_layout().expect("state layout should exist");
+        let valid = AgentSessionMetadata {
+            agent_session_id: AgentSessionId::from("ags_000041"),
+            session_id: SessionId::from("ses_recovered"),
+            route_id: "route_000041".to_owned(),
+            agent_id: AgentId::from("codex"),
+            parent_agent_id: Some(AgentId::from("main")),
+            task: "recover me".to_owned(),
+            status: AgentSessionStatus::Running,
+            timeout_at: Timestamp::new_utc("2026-04-26T00:15:00Z")
+                .expect("test timestamp should be valid"),
+            budget_steps: 2,
+            steps_used: 1,
+            result: None,
+            error_code: None,
+            error: None,
+            cancellation_requested_at: None,
+        };
+
+        store
+            .write_agent_session_metadata(&valid.agent_session_id, &valid)
+            .expect("valid AgentSession metadata should write");
+        let agent_sessions_dir = cadis_home.join("state/agent-sessions");
+        fs::write(agent_sessions_dir.join("corrupt.json"), "{")
+            .expect("corrupt AgentSession metadata should write");
+        fs::write(agent_sessions_dir.join(".ags_partial.json.tmp.1"), "{")
+            .expect("partial AgentSession temp metadata should write");
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_corrupt_agent_session_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionUpdated(payload)
+                    if payload.agent_session_id.as_str() == "ags_000041"
+                        && payload.task == "recover me"
+            )
+        }));
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::DaemonError(error)
+                    if error.code == "agent_session_recovery_skipped"
+                        && error.message.contains("corrupt.json")
+                        && !error.message.contains(".ags_partial")
+            )
+        }));
+    }
+
+    #[test]
+    fn agent_session_budget_limit_fails_before_provider_execution() {
+        let mut runtime = runtime_with_agent_runtime_config(AgentRuntimeConfig {
+            default_timeout_sec: 900,
+            max_steps_per_session: 0,
+        });
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_budget"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("codex")),
+                content: "run tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionFailed(payload)
+                    if payload.status == AgentSessionStatus::BudgetExceeded
+                        && payload.error_code.as_deref() == Some("agent_budget_exceeded")
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::SessionFailed(payload)
+                    if payload.code == "agent_budget_exceeded"
+            )
+        }));
+    }
+
+    #[test]
+    fn session_cancel_marks_running_agent_sessions_cancelled() {
+        let mut runtime = runtime();
+        let session_id = runtime.create_session(Some("Cancelable".to_owned()), None);
+        let (agent_session_id, _event) = runtime.start_agent_session(
+            session_id.clone(),
+            "route_000001".to_owned(),
+            AgentId::from("codex"),
+            "wait for user".to_owned(),
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_cancel"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionCancel(SessionTargetRequest {
+                session_id: session_id.clone(),
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionCancelled(payload)
+                    if payload.agent_session_id == agent_session_id
+                        && payload.status == AgentSessionStatus::Cancelled
+                        && payload.cancellation_requested_at.is_some()
+            )
+        }));
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentStatusChanged(payload)
+                    if payload.agent_id.as_str() == "codex"
+                        && payload.status == AgentStatus::Cancelled
+            )
+        }));
+    }
+
+    #[test]
     fn response_and_events_can_be_framed() {
         let mut runtime = runtime();
         let outcome = runtime.handle_request(RequestEnvelope::new(
@@ -4378,6 +7399,44 @@ mod tests {
             ClientRequest::EventsSubscribe(EventSubscriptionRequest {
                 include_snapshot: false,
                 ..EventSubscriptionRequest::default()
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome.events.is_empty());
+    }
+
+    #[test]
+    fn session_subscribe_can_skip_initial_snapshot() {
+        let mut runtime = runtime();
+        let create = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_create"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionCreate(SessionCreateRequest {
+                title: Some("Quiet session stream".to_owned()),
+                cwd: None,
+            }),
+        ));
+        let session_id = create
+            .events
+            .into_iter()
+            .find_map(|event| match event.event {
+                CadisEvent::SessionStarted(payload) => Some(payload.session_id),
+                _ => None,
+            })
+            .expect("session.started should be emitted");
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_subscribe"),
+            ClientId::from("cli_1"),
+            ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
+                session_id,
+                since_event_id: None,
+                replay_limit: None,
+                include_snapshot: false,
             }),
         ));
 
@@ -4482,6 +7541,40 @@ mod tests {
     }
 
     #[test]
+    fn message_send_surfaces_structured_provider_error() {
+        let provider = provider_from_config(
+            "openai",
+            "http://127.0.0.1:11434",
+            "llama3.2",
+            "https://api.openai.com/v1",
+            "gpt-5.2",
+            None,
+        );
+        let mut runtime = runtime_with_provider(provider, "openai");
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_chat"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("main")),
+                content: "hello".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::SessionFailed(error)
+                    if error.code == "model_auth_missing"
+                        && !error.retryable
+                        && error.message.contains("OpenAI provider requires")
+            )
+        }));
+    }
+
+    #[test]
     fn agent_list_returns_roster_snapshot() {
         let mut runtime = runtime();
         let outcome = runtime.handle_request(RequestEnvelope::new(
@@ -4537,6 +7630,62 @@ mod tests {
         );
         assert_eq!(ollama.effective_provider.as_deref(), Some("ollama"));
         assert!(!ollama.fallback);
+    }
+
+    #[test]
+    fn models_list_uses_runtime_model_config() {
+        let mut runtime = Runtime::new(
+            RuntimeOptions {
+                cadis_home: test_workspace("cadis-home-model-config"),
+                profile_id: "default".to_owned(),
+                socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
+                model_provider: "openai".to_owned(),
+                ollama_model: "qwen2.5-coder".to_owned(),
+                openai_model: "gpt-5.4".to_owned(),
+                openai_api_key_configured: true,
+                ui_preferences: serde_json::json!({
+                    "agent_spawn": {
+                        "max_depth": AgentSpawnLimits::default().max_depth,
+                        "max_children_per_parent": AgentSpawnLimits::default().max_children_per_parent,
+                        "max_total_agents": AgentSpawnLimits::default().max_total_agents
+                    },
+                    "orchestrator": {
+                        "worker_delegation_enabled": true,
+                        "default_worker_role": "Worker"
+                    }
+                }),
+            },
+            Box::<EchoProvider>::default(),
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("hud_1"),
+            ClientRequest::ModelsList(EmptyPayload::default()),
+        ));
+        let models = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::ModelsListResponse(payload) => Some(&payload.models),
+                _ => None,
+            })
+            .expect("models.list.response should be emitted");
+
+        let ollama = models
+            .iter()
+            .find(|model| model.provider == "ollama")
+            .expect("ollama should be listed");
+        assert_eq!(ollama.model, "qwen2.5-coder");
+        assert_eq!(ollama.effective_model.as_deref(), Some("qwen2.5-coder"));
+
+        let openai = models
+            .iter()
+            .find(|model| model.provider == "openai")
+            .expect("openai should be listed");
+        assert_eq!(openai.model, "gpt-5.4");
+        assert_eq!(openai.effective_model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(openai.readiness, Some(ModelReadiness::Ready));
     }
 
     #[test]
@@ -4786,8 +7935,8 @@ mod tests {
             "cadis/worker_000001/run-focused-tests"
         );
         let expected_patch = runtime
-            .options
-            .cadis_home
+            .profile_home
+            .root()
             .join("artifacts/workers/worker_000001/patch.diff")
             .display()
             .to_string();
@@ -4798,6 +7947,96 @@ mod tests {
                 .map(|artifacts| artifacts.patch.as_str()),
             Some(expected_patch.as_str())
         );
+    }
+
+    #[test]
+    fn worker_tail_replays_registered_worker_log_lines() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_route"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: "/route @codex run focused tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        let worker_id = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerStarted(payload) => Some(payload.worker_id.clone()),
+                _ => None,
+            })
+            .expect("worker.started should be emitted");
+        let live_log_count = outcome
+            .events
+            .iter()
+            .filter(|event| matches!(event.event, CadisEvent::WorkerLogDelta(_)))
+            .count();
+        assert_eq!(live_log_count, 2);
+
+        let tail = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_tail"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkerTail(WorkerTailRequest {
+                worker_id: worker_id.clone(),
+                lines: Some(1),
+            }),
+        ));
+        assert!(matches!(
+            tail.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        let deltas = tail
+            .events
+            .iter()
+            .filter_map(|event| match &event.event {
+                CadisEvent::WorkerLogDelta(payload) => Some(payload),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].worker_id, worker_id);
+        assert_eq!(
+            deltas[0].agent_id.as_ref().map(AgentId::as_str),
+            Some("codex")
+        );
+        assert_eq!(
+            deltas[0].delta,
+            "completed: Route @codex: run focused tests\n"
+        );
+
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_snapshot_workers"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCompleted(payload)
+                    if payload.worker_id == worker_id
+                        && payload.status.as_deref() == Some("completed")
+            )
+        }));
+    }
+
+    #[test]
+    fn worker_tail_rejects_unknown_worker() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_missing_worker_tail"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkerTail(WorkerTailRequest {
+                worker_id: "worker_missing".to_owned(),
+                lines: Some(10),
+            }),
+        ));
+
+        assert_rejected(outcome, "worker_not_found");
     }
 
     #[test]

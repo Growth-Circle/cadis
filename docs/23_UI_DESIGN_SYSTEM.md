@@ -181,6 +181,8 @@ Responsibilities:
 - show worker status
 - show worker ID
 - show last text
+- show agent-session step progress when available
+- show compact worker progress without expanding card height unpredictably
 - collapse/expand
 
 ### `CadisChatPanel`
@@ -315,4 +317,3 @@ Canvas/pixel checks:
 - chat panel does not cover agent cards
 - approval cards do not cover config dialog
 - text fits in status bar at 1200px width
-
