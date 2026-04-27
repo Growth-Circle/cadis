@@ -2,11 +2,15 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration as StdDuration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use cadis_models::{
     provider_catalog_for_config, ModelCatalogConfig, ModelInvocation, ModelProvider, ModelRequest,
@@ -49,6 +53,8 @@ const FILE_READ_LIMIT_BYTES: usize = 64 * 1024;
 const FILE_SEARCH_LIMIT_BYTES: u64 = 1024 * 1024;
 const FILE_SEARCH_DEFAULT_LIMIT: usize = 50;
 const GIT_DIFF_LIMIT_BYTES: usize = 128 * 1024;
+const SHELL_OUTPUT_LIMIT_BYTES: usize = 16 * 1024;
+const SHELL_POLL_INTERVAL_MS: u64 = 10;
 const APPROVAL_TIMEOUT_MINUTES: i64 = 5;
 const WORKER_TAIL_DEFAULT_LINES: usize = 64;
 const WORKER_TAIL_MAX_LINES: usize = 1_000;
@@ -768,6 +774,7 @@ impl Runtime {
                     approval_id.clone(),
                     PendingApproval {
                         record: record.clone(),
+                        request: Some(request),
                     },
                 );
 
@@ -791,8 +798,12 @@ impl Runtime {
         request_id: RequestId,
         request: ApprovalResponseRequest,
     ) -> RequestOutcome {
+        let mut pending_request = None;
         let mut record = match self.pending_approvals.remove(&request.approval_id) {
-            Some(pending) => pending.record,
+            Some(pending) => {
+                pending_request = pending.request;
+                pending.record
+            }
             None => match self.approval_store.load(&request.approval_id) {
                 Ok(Some(record)) => record,
                 Ok(None) => {
@@ -851,31 +862,47 @@ impl Runtime {
                 decision: effective_decision,
             }),
         )];
-        let error = match effective_decision {
-            ApprovalDecision::Approved => ErrorPayload {
-                code: "tool_execution_blocked".to_owned(),
-                message: "approval was recorded, but risky tool execution is not implemented in this baseline".to_owned(),
-                retryable: false,
-            },
-            ApprovalDecision::Denied => ErrorPayload {
-                code: if record.state == ApprovalState::Expired {
-                    "approval_expired".to_owned()
+
+        match effective_decision {
+            ApprovalDecision::Approved => {
+                if let Some(pending_request) = pending_request {
+                    events.extend(self.execute_approved_tool(&record, pending_request));
                 } else {
-                    "approval_denied".to_owned()
-                },
-                message: "approval did not authorize tool execution".to_owned(),
-                retryable: false,
-            },
-        };
-        events.push(self.session_event(
-            session_id,
-            CadisEvent::ToolFailed(ToolFailedPayload {
-                tool_call_id: record.tool_call_id,
-                tool_name: record.tool_name,
-                error,
-                risk_class: Some(record.risk_class),
-            }),
-        ));
+                    events.push(self.session_event(
+                        session_id,
+                        CadisEvent::ToolFailed(ToolFailedPayload {
+                            tool_call_id: record.tool_call_id,
+                            tool_name: record.tool_name,
+                            error: ErrorPayload {
+                                code: "tool_execution_unavailable".to_owned(),
+                                message: "approval was recovered without process-local execution context; resubmit the tool call".to_owned(),
+                                retryable: false,
+                            },
+                            risk_class: Some(record.risk_class),
+                        }),
+                    ));
+                }
+            }
+            ApprovalDecision::Denied => {
+                events.push(self.session_event(
+                    session_id,
+                    CadisEvent::ToolFailed(ToolFailedPayload {
+                        tool_call_id: record.tool_call_id,
+                        tool_name: record.tool_name,
+                        error: ErrorPayload {
+                            code: if record.state == ApprovalState::Expired {
+                                "approval_expired".to_owned()
+                            } else {
+                                "approval_denied".to_owned()
+                            },
+                            message: "approval did not authorize tool execution".to_owned(),
+                            retryable: false,
+                        },
+                        risk_class: Some(record.risk_class),
+                    }),
+                ));
+            }
+        }
 
         self.accept(request_id, events)
     }
@@ -2746,6 +2773,135 @@ impl Runtime {
         }
     }
 
+    fn execute_approved_tool(
+        &mut self,
+        record: &ApprovalRecord,
+        request: ToolCallRequest,
+    ) -> Vec<EventEnvelope> {
+        if request.tool_name != record.tool_name {
+            return vec![self.session_event(
+                record.session_id.clone(),
+                CadisEvent::ToolFailed(ToolFailedPayload {
+                    tool_call_id: record.tool_call_id.clone(),
+                    tool_name: record.tool_name.clone(),
+                    error: tool_error(
+                        "approval_request_mismatch",
+                        "approved tool request did not match the approval record",
+                        false,
+                    ),
+                    risk_class: Some(record.risk_class),
+                }),
+            )];
+        }
+
+        let tool_timeout_secs = match self.tools.get(&request.tool_name) {
+            Some(tool) if tool.execution == ToolExecutionMode::ApprovalPlaceholder => {
+                tool.timeout_secs
+            }
+            Some(_) => {
+                return vec![self.session_event(
+                    record.session_id.clone(),
+                    CadisEvent::ToolFailed(ToolFailedPayload {
+                        tool_call_id: record.tool_call_id.clone(),
+                        tool_name: request.tool_name,
+                        error: tool_error(
+                            "tool_execution_blocked",
+                            "approved execution is only available for approval-gated tools",
+                            false,
+                        ),
+                        risk_class: Some(record.risk_class),
+                    }),
+                )]
+            }
+            None => {
+                return vec![self.session_event(
+                    record.session_id.clone(),
+                    CadisEvent::ToolFailed(ToolFailedPayload {
+                        tool_call_id: record.tool_call_id.clone(),
+                        tool_name: request.tool_name,
+                        error: tool_error(
+                            "tool_not_found",
+                            "approved tool is not registered",
+                            false,
+                        ),
+                        risk_class: Some(record.risk_class),
+                    }),
+                )]
+            }
+        };
+
+        let workspace = match self.resolved_granted_workspace(
+            &record.session_id,
+            request.agent_id.as_ref(),
+            &request.input,
+            required_tool_access(&request.tool_name),
+        ) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                return vec![self.session_event(
+                    record.session_id.clone(),
+                    CadisEvent::ToolFailed(ToolFailedPayload {
+                        tool_call_id: record.tool_call_id.clone(),
+                        tool_name: request.tool_name,
+                        error,
+                        risk_class: Some(record.risk_class),
+                    }),
+                )]
+            }
+        };
+
+        let mut events = vec![self.session_event(
+            record.session_id.clone(),
+            CadisEvent::ToolStarted(ToolEventPayload {
+                tool_call_id: record.tool_call_id.clone(),
+                tool_name: request.tool_name.clone(),
+                summary: Some("approved tool execution started".to_owned()),
+                risk_class: Some(record.risk_class),
+                output: None,
+            }),
+        )];
+
+        match self.execute_approved_tool_backend(&workspace.root, &request, tool_timeout_secs) {
+            Ok(result) => events.push(self.session_event(
+                record.session_id.clone(),
+                CadisEvent::ToolCompleted(ToolEventPayload {
+                    tool_call_id: record.tool_call_id.clone(),
+                    tool_name: request.tool_name,
+                    summary: Some(result.summary),
+                    risk_class: Some(record.risk_class),
+                    output: Some(result.output),
+                }),
+            )),
+            Err(error) => events.push(self.session_event(
+                record.session_id.clone(),
+                CadisEvent::ToolFailed(ToolFailedPayload {
+                    tool_call_id: record.tool_call_id.clone(),
+                    tool_name: request.tool_name,
+                    error,
+                    risk_class: Some(record.risk_class),
+                }),
+            )),
+        }
+
+        events
+    }
+
+    fn execute_approved_tool_backend(
+        &self,
+        workspace: &Path,
+        request: &ToolCallRequest,
+        tool_timeout_secs: u64,
+    ) -> Result<ToolExecutionResult, ErrorPayload> {
+        match request.tool_name.as_str() {
+            "shell.run" => self.execute_shell_run(workspace, &request.input, tool_timeout_secs),
+            tool_name => Err(tool_error(
+                "tool_not_implemented",
+                format!("{tool_name} has no approved execution backend"),
+                false,
+            )),
+        }
+    }
+
     fn execute_file_read(
         &self,
         workspace: &Path,
@@ -2933,6 +3089,79 @@ impl Runtime {
                 "pathspec": pathspec,
                 "diff": diff,
                 "truncated": truncated
+            }),
+        })
+    }
+
+    fn execute_shell_run(
+        &self,
+        workspace: &Path,
+        input: &serde_json::Value,
+        tool_timeout_secs: u64,
+    ) -> Result<ToolExecutionResult, ErrorPayload> {
+        let command = input_string(input, "command")
+            .ok_or_else(|| tool_error("invalid_tool_input", "shell.run requires command", false))?;
+        if command.contains('\0') {
+            return Err(tool_error(
+                "invalid_tool_input",
+                "shell.run command cannot contain NUL bytes",
+                false,
+            ));
+        }
+
+        let cwd = input_string(input, "cwd")
+            .or_else(|| input_string(input, "path"))
+            .unwrap_or_else(|| ".".to_owned());
+        let cwd = resolve_inside_workspace(workspace, &cwd)?;
+        validate_shell_cwd(&cwd, &self.options.cadis_home)?;
+
+        let timeout = shell_timeout(input, tool_timeout_secs)?;
+        let result = run_shell_command(&cwd, &command, timeout)?;
+        let stdout = redact(&String::from_utf8_lossy(&result.stdout.bytes));
+        let stderr = redact(&String::from_utf8_lossy(&result.stderr.bytes));
+        let timeout_ms = duration_millis(timeout);
+
+        if result.timed_out {
+            return Err(tool_error(
+                "tool_timeout",
+                format!("shell.run exceeded timeout_ms={timeout_ms}"),
+                false,
+            ));
+        }
+
+        if !result.status_success {
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_owned()
+            } else if !stdout.trim().is_empty() {
+                stdout.trim().to_owned()
+            } else {
+                "command exited without output".to_owned()
+            };
+            return Err(tool_error(
+                "shell_command_failed",
+                format!(
+                    "shell.run exited with code {:?}: {}",
+                    result.exit_code, detail
+                ),
+                false,
+            ));
+        }
+
+        Ok(ToolExecutionResult {
+            summary: shell_summary(
+                &stdout,
+                &stderr,
+                result.stdout.truncated,
+                result.stderr.truncated,
+            ),
+            output: serde_json::json!({
+                "cwd": display_relative_path(workspace, &cwd),
+                "exit_code": result.exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_truncated": result.stdout.truncated,
+                "stderr_truncated": result.stderr.truncated,
+                "timeout_ms": timeout_ms
             }),
         })
     }
@@ -3862,9 +4091,10 @@ impl WorkerMetadata {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct PendingApproval {
     record: ApprovalRecord,
+    request: Option<ToolCallRequest>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4505,6 +4735,21 @@ struct ToolExecutionResult {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ShellRunResult {
+    status_success: bool,
+    exit_code: Option<i32>,
+    stdout: BoundedOutput,
+    stderr: BoundedOutput,
+    timed_out: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct SearchMatch {
     path: String,
     line_number: usize,
@@ -4644,7 +4889,15 @@ fn pending_approval_records(
         .into_iter()
         .filter(|(_, record)| record.state == ApprovalState::Pending)
         .filter(|(_, record)| !approval_is_expired(record))
-        .map(|(approval_id, record)| (approval_id, PendingApproval { record }))
+        .map(|(approval_id, record)| {
+            (
+                approval_id,
+                PendingApproval {
+                    record,
+                    request: None,
+                },
+            )
+        })
         .collect()
 }
 
@@ -5105,6 +5358,69 @@ fn input_usize(input: &serde_json::Value, key: &str) -> Option<usize> {
         .and_then(|value| usize::try_from(value).ok())
 }
 
+fn input_u64(input: &serde_json::Value, key: &str) -> Option<u64> {
+    input.get(key).and_then(serde_json::Value::as_u64)
+}
+
+fn shell_timeout(
+    input: &serde_json::Value,
+    tool_timeout_secs: u64,
+) -> Result<StdDuration, ErrorPayload> {
+    let max_ms = tool_timeout_secs.saturating_mul(1_000);
+    let requested_ms = input_u64(input, "timeout_ms")
+        .or_else(|| input_u64(input, "timeout_secs").map(|seconds| seconds.saturating_mul(1_000)))
+        .unwrap_or(max_ms);
+
+    if requested_ms == 0 {
+        return Err(tool_error(
+            "invalid_tool_input",
+            "shell.run timeout must be positive",
+            false,
+        ));
+    }
+
+    Ok(StdDuration::from_millis(requested_ms.min(max_ms).max(1)))
+}
+
+fn duration_millis(duration: StdDuration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn shell_summary(
+    stdout: &str,
+    stderr: &str,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+) -> String {
+    let mut summary = String::new();
+    if !stdout.is_empty() {
+        summary.push_str(stdout);
+        if stdout_truncated {
+            if !summary.ends_with('\n') {
+                summary.push('\n');
+            }
+            summary.push_str("[stdout truncated]");
+        }
+    }
+    if !stderr.is_empty() {
+        if !summary.is_empty() && !summary.ends_with('\n') {
+            summary.push('\n');
+        }
+        summary.push_str(stderr);
+        if stderr_truncated {
+            if !summary.ends_with('\n') {
+                summary.push('\n');
+            }
+            summary.push_str("[stderr truncated]");
+        }
+    }
+    if summary.is_empty() {
+        "command completed with no output".to_owned()
+    } else {
+        summary
+    }
+}
+
 fn normalize_voice_checks(checks: Vec<VoiceDoctorCheck>) -> Vec<VoiceDoctorCheck> {
     checks
         .into_iter()
@@ -5371,6 +5687,63 @@ fn validate_workspace_root(root: &Path, cadis_home: &Path) -> Result<(), ErrorPa
             return Err(tool_error(
                 "workspace_root_denied",
                 "workspace root cannot be CADIS_HOME or an ancestor/child of it",
+                false,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_shell_cwd(cwd: &Path, cadis_home: &Path) -> Result<(), ErrorPayload> {
+    if cwd.parent().is_none() {
+        return Err(tool_error(
+            "shell_cwd_denied",
+            "shell.run cwd cannot be the filesystem root",
+            false,
+        ));
+    }
+
+    for denied in ["/etc", "/dev", "/proc", "/sys", "/run"] {
+        let denied = Path::new(denied);
+        if cwd == denied || cwd.starts_with(denied) {
+            return Err(tool_error(
+                "shell_cwd_denied",
+                format!("shell.run cwd {} is a protected system path", cwd.display()),
+                false,
+            ));
+        }
+    }
+
+    if let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|path| path.canonicalize().ok())
+    {
+        if cwd == home || home.starts_with(cwd) {
+            return Err(tool_error(
+                "shell_cwd_denied",
+                "shell.run cwd cannot be the home directory or an ancestor of it",
+                false,
+            ));
+        }
+
+        for denied in [".ssh", ".aws", ".gnupg", ".config/gh", ".cadis"] {
+            let denied = home.join(denied);
+            if cwd.starts_with(&denied) {
+                return Err(tool_error(
+                    "shell_cwd_denied",
+                    format!("shell.run cwd {} is a protected secret path", cwd.display()),
+                    false,
+                ));
+            }
+        }
+    }
+
+    if let Ok(cadis_home) = cadis_home.canonicalize() {
+        if cwd == cadis_home || cwd.starts_with(&cadis_home) || cadis_home.starts_with(cwd) {
+            return Err(tool_error(
+                "shell_cwd_denied",
+                "shell.run cwd cannot be CADIS_HOME or an ancestor/child of it",
                 false,
             ));
         }
@@ -6148,6 +6521,118 @@ fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String, Str
     }
 }
 
+fn run_shell_command(
+    cwd: &Path,
+    command: &str,
+    timeout: StdDuration,
+) -> Result<ShellRunResult, ErrorPayload> {
+    let mut child_command = Command::new("sh");
+    child_command
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    child_command.process_group(0);
+
+    let mut child = child_command
+        .spawn()
+        .map_err(|error| tool_error("shell_spawn_failed", error.to_string(), false))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .map(|stdout| thread::spawn(move || read_bounded_output(stdout, SHELL_OUTPUT_LIMIT_BYTES)));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|stderr| thread::spawn(move || read_bounded_output(stderr, SHELL_OUTPUT_LIMIT_BYTES)));
+
+    let started_at = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started_at.elapsed() >= timeout => {
+                timed_out = true;
+                terminate_child(&mut child);
+                break child
+                    .wait()
+                    .map_err(|error| tool_error("shell_wait_failed", error.to_string(), false))?;
+            }
+            Ok(None) => thread::sleep(StdDuration::from_millis(SHELL_POLL_INTERVAL_MS)),
+            Err(error) => return Err(tool_error("shell_wait_failed", error.to_string(), false)),
+        }
+    };
+
+    Ok(ShellRunResult {
+        status_success: !timed_out && status.success(),
+        exit_code: status.code(),
+        stdout: join_bounded_output(stdout),
+        stderr: join_bounded_output(stderr),
+        timed_out,
+    })
+}
+
+fn read_bounded_output(mut reader: impl Read, limit: usize) -> BoundedOutput {
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 8192];
+
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                let remaining = limit.saturating_sub(bytes.len());
+                if remaining > 0 {
+                    let visible = read.min(remaining);
+                    bytes.extend_from_slice(&buffer[..visible]);
+                    if visible < read {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+            }
+            Err(_) => {
+                truncated = true;
+                break;
+            }
+        }
+    }
+
+    BoundedOutput { bytes, truncated }
+}
+
+fn join_bounded_output(handle: Option<thread::JoinHandle<BoundedOutput>>) -> BoundedOutput {
+    handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or(BoundedOutput {
+            bytes: Vec::new(),
+            truncated: false,
+        })
+}
+
+fn terminate_child(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let process_group = format!("-{}", child.id());
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(&process_group)
+            .status();
+        thread::sleep(StdDuration::from_millis(20));
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(&process_group)
+            .status();
+    }
+
+    let _ = child.kill();
+}
+
 fn normalize_lookup(value: &str) -> String {
     value
         .chars()
@@ -6244,7 +6729,7 @@ mod tests {
         SessionSubscriptionRequest, SessionTargetRequest, ToolCallRequest, VoiceDoctorCheck,
         VoiceDoctorRequest, VoicePreflightRequest, WorkerTailRequest, WorkspaceAccess,
         WorkspaceDoctorRequest, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
-        WorkspaceRegisterRequest,
+        WorkspaceRegisterRequest, WorkspaceRevokeRequest,
     };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -6516,6 +7001,29 @@ mod tests {
             outcome.response.response,
             DaemonResponse::RequestAccepted(_)
         ));
+    }
+
+    fn approval_id_from(outcome: &RequestOutcome) -> ApprovalId {
+        outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::ApprovalRequested(payload) => Some(payload.approval_id.clone()),
+                _ => None,
+            })
+            .expect("approval.requested should be emitted")
+    }
+
+    fn approve(runtime: &mut Runtime, approval_id: ApprovalId) -> RequestOutcome {
+        runtime.handle_request(RequestEnvelope::new(
+            RequestId::from(format!("req_approve_{approval_id}")),
+            ClientId::from("cli_1"),
+            ClientRequest::ApprovalRespond(ApprovalResponseRequest {
+                approval_id,
+                decision: ApprovalDecision::Approved,
+                reason: Some("approved by test".to_owned()),
+            }),
+        ))
     }
 
     fn send_message_with_kind(
@@ -8096,6 +8604,226 @@ mod tests {
                     if payload.error.code == "approval_denied"
             )
         }));
+    }
+
+    #[test]
+    fn risky_shell_tool_runs_simple_command_after_approval() {
+        let workspace = test_workspace("shell-approved");
+        fs::create_dir_all(workspace.join("subdir")).expect("subdir should be created");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "shell-approved", &workspace);
+        grant_workspace(&mut runtime, "shell-approved", vec![WorkspaceAccess::Exec]);
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_shell_approved"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "shell.run".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "shell-approved",
+                    "cwd": "subdir",
+                    "command": "printf cadis-shell-ok"
+                }),
+            }),
+        ));
+
+        assert!(request.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalRequested(payload)
+                    if payload.command.as_deref() == Some("printf cadis-shell-ok")
+            )
+        }));
+        assert!(!request
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+
+        let approval_id = approval_id_from(&request);
+        let approved = approve(&mut runtime, approval_id);
+
+        assert!(approved.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalResolved(payload)
+                    if payload.decision == ApprovalDecision::Approved
+            )
+        }));
+        assert!(approved
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+        let completed = approved
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::ToolCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("approved shell.run should complete");
+        assert_eq!(completed.summary.as_deref(), Some("cadis-shell-ok"));
+        let output = completed
+            .output
+            .as_ref()
+            .expect("shell output should exist");
+        assert_eq!(output["cwd"], "subdir");
+        assert_eq!(output["stdout"], "cadis-shell-ok");
+        assert_eq!(output["exit_code"], 0);
+    }
+
+    #[test]
+    fn risky_shell_tool_rechecks_exec_grant_at_approval_time() {
+        let workspace = test_workspace("shell-grant-recheck");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "shell-grant-recheck", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "shell-grant-recheck",
+            vec![WorkspaceAccess::Exec],
+        );
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_shell_recheck"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "shell.run".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "shell-grant-recheck",
+                    "command": "printf should-not-run"
+                }),
+            }),
+        ));
+        let approval_id = approval_id_from(&request);
+        let grant_id = runtime
+            .workspace_grants
+            .keys()
+            .next()
+            .cloned()
+            .expect("workspace grant should exist");
+
+        let revoke = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_revoke_before_approval"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceRevoke(WorkspaceRevokeRequest {
+                grant_id: Some(grant_id),
+                workspace_id: None,
+                agent_id: None,
+            }),
+        ));
+        assert!(matches!(
+            revoke.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+
+        let approved = approve(&mut runtime, approval_id);
+        assert!(approved.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.error.code == "workspace_grant_required"
+            )
+        }));
+        assert!(!approved
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+    }
+
+    #[test]
+    fn risky_shell_tool_timeout_fails_closed() {
+        let workspace = test_workspace("shell-timeout");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "shell-timeout", &workspace);
+        grant_workspace(&mut runtime, "shell-timeout", vec![WorkspaceAccess::Exec]);
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_shell_timeout"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "shell.run".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "shell-timeout",
+                    "command": "sleep 2",
+                    "timeout_ms": 50
+                }),
+            }),
+        ));
+
+        let approved = approve(&mut runtime, approval_id_from(&request));
+        assert!(approved
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+        assert!(approved.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.error.code == "tool_timeout"
+                        && payload.error.message.contains("timeout_ms=50")
+            )
+        }));
+        assert!(!approved
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolCompleted(_))));
+    }
+
+    #[test]
+    fn risky_shell_tool_output_is_bounded_and_redacted() {
+        let workspace = test_workspace("shell-output-redaction");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "shell-output-redaction", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "shell-output-redaction",
+            vec![WorkspaceAccess::Exec],
+        );
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_shell_output_redaction"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "shell.run".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "shell-output-redaction",
+                    "command": "printf 'token=secret-value\\n'; printf '%*s' 20000 '' | tr ' ' A"
+                }),
+            }),
+        ));
+
+        let approved = approve(&mut runtime, approval_id_from(&request));
+        let completed = approved
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::ToolCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("approved shell.run should complete");
+        let output = completed
+            .output
+            .as_ref()
+            .expect("shell output should exist");
+        let stdout = output["stdout"]
+            .as_str()
+            .expect("stdout should be a string");
+
+        assert!(stdout.contains("token=[REDACTED]"));
+        assert!(!stdout.contains("secret-value"));
+        assert!(stdout.len() <= SHELL_OUTPUT_LIMIT_BYTES);
+        assert_eq!(output["stdout_truncated"], true);
+        assert!(completed
+            .summary
+            .as_deref()
+            .is_some_and(|summary| !summary.contains("secret-value")));
     }
 
     #[test]
