@@ -7,11 +7,16 @@ import {
   useHud,
   type AvatarStyle,
   type AgentLive,
+  type AgentSessionRecord,
+  type AgentSessionStatus,
   type ThemeKey,
   type VoiceDaemonStatus,
   type VoiceDiagnosticCheck,
   type VoiceDoctorReport,
+  type WorkerArtifactInfo,
+  type WorkerRecord,
   type WorkerStatus,
+  type WorkerWorktreeInfo,
 } from "./hudState.js";
 import { AGENT_ROSTER } from "../lib/agents-roster.js";
 import type { VoicePrefs } from "../lib/voice/voices.js";
@@ -370,7 +375,7 @@ function handleMessage(type: string, payload: unknown, sessionId?: string): void
     handleRequestRejected(payload);
     return;
   }
-  if (type === "daemon.status.response") {
+  if (type === "daemon.status.response" || type === "daemon.status") {
     handleDaemonStatus(payload);
     return;
   }
@@ -422,6 +427,16 @@ function handleMessage(type: string, payload: unknown, sessionId?: string): void
     handleAgentStatusChanged(payload);
     return;
   }
+  if (
+    type === "agent.session.started" ||
+    type === "agent.session.updated" ||
+    type === "agent.session.completed" ||
+    type === "agent.session.failed" ||
+    type === "agent.session.cancelled"
+  ) {
+    handleAgentSessionEvent(type, payload, sessionId);
+    return;
+  }
   if (type === "approval.requested") {
     handleApprovalRequested(payload);
     return;
@@ -438,6 +453,8 @@ function handleMessage(type: string, payload: unknown, sessionId?: string): void
     type === "worker.started" ||
     type === "worker.log.delta" ||
     type === "worker.completed" ||
+    type === "worker.failed" ||
+    type === "worker.cancelled" ||
     type === "worker.event"
   ) {
     handleWorkerEvent(type, payload);
@@ -629,6 +646,49 @@ function handleAgentStatusChanged(payload: unknown): void {
   }
 }
 
+function handleAgentSessionEvent(type: string, payload: unknown, sessionId?: string): void {
+  const p = asRecord(payload);
+  const sessionRecordId = stringFrom(p.agent_session_id) ?? stringFrom(p.id);
+  const agentId = stringFrom(p.agent_id);
+  if (!sessionRecordId || !agentId) return;
+
+  const existing = useHud
+    .getState()
+    .agentSessions.find((candidate) => candidate.id === sessionRecordId);
+  const status =
+    normalizeAgentSessionStatus(stringFrom(p.status)) ?? defaultAgentSessionStatus(type);
+  const task = stringFrom(p.task) ?? existing?.task ?? "agent session";
+  const budgetSteps = numberFrom(p.budget_steps) ?? existing?.budgetSteps ?? 0;
+  const stepsUsed = numberFrom(p.steps_used) ?? existing?.stepsUsed ?? 0;
+  const result = stringFrom(p.result);
+  const error = stringFrom(p.error) ?? stringFrom(p.error_code);
+  const parentAgentId = stringFrom(p.parent_agent_id) ?? existing?.parentAgentId;
+
+  ensureKnownAgent(agentId);
+  useHud.getState().upsertAgentSession({
+    id: sessionRecordId,
+    sessionId: stringFrom(p.session_id) ?? sessionId ?? existing?.sessionId ?? "main",
+    routeId: stringFrom(p.route_id) ?? existing?.routeId ?? "",
+    agentId,
+    parentAgentId,
+    task,
+    status,
+    timeoutAt: stringFrom(p.timeout_at) ?? existing?.timeoutAt,
+    budgetSteps,
+    stepsUsed,
+    result,
+    error,
+    updatedAt: Date.now(),
+  });
+
+  useHud.getState().setAgentStatus(agentId, agentStatusFromSession(status));
+  useHud.getState().setAgentTask(agentId, {
+    verb: agentTaskVerbFromSession(status),
+    target: task,
+    detail: agentSessionDetail({ status, budgetSteps, stepsUsed, result, error }),
+  });
+}
+
 function handleApprovalRequested(payload: unknown): void {
   const p = asRecord(payload);
   const approvalId = stringFrom(p.approval_id) ?? stringFrom(p.id);
@@ -681,15 +741,23 @@ function handleWorkerEvent(type: string, payload: unknown): void {
   const status = normalizeWorkerStatus(stringFrom(p.status)) ?? defaultWorkerStatus(type);
   const summary = stringFrom(p.summary);
   const delta = stringFrom(p.delta);
+  const text = delta ?? summary ?? stringFrom(p.text) ?? existing?.lastText;
+  const logTail = nextWorkerLogTail(existing, delta);
+  const logLineCount = existing ? existing.logLineCount + (delta ? 1 : 0) : delta ? 1 : 0;
+  ensureKnownAgent(parentAgentId);
   useHud.getState().upsertWorker({
     id: workerId,
-    agentId,
+    agentId: agentId ?? existing?.agentId,
     parentAgentId,
-    cli: stringFrom(p.cli),
-    cwd: stringFrom(p.cwd),
+    cli: stringFrom(p.cli) ?? existing?.cli,
+    cwd: stringFrom(p.cwd) ?? existing?.cwd,
     status,
-    lastText: delta ?? summary ?? stringFrom(p.text),
-    summary,
+    lastText: text,
+    summary: summary ?? existing?.summary,
+    logLineCount,
+    logTail,
+    worktree: readWorkerWorktree(p.worktree) ?? existing?.worktree,
+    artifacts: readWorkerArtifacts(p.artifacts) ?? existing?.artifacts,
     startedAt: numberFrom(p.started_at) ?? existing?.startedAt ?? Date.now(),
     updatedAt: numberFrom(p.updated_at) ?? Date.now(),
   });
@@ -823,14 +891,36 @@ function joinModel(provider: string, model: string): string {
   return cleanModel.includes("/") ? cleanModel : `${cleanProvider}/${cleanModel}`;
 }
 
-function normalizeAgentStatus(status: string | undefined): "working" | "idle" | "waiting" | null {
+function normalizeAgentStatus(status: string | undefined): AgentLive["status"] | null {
   if (!status) return null;
   const normalized = status.toLowerCase();
+  if (normalized === "spawning" || normalized === "starting" || normalized === "started") {
+    return "waiting";
+  }
   if (normalized === "running" || normalized === "working") return "working";
   if (normalized === "waitingapproval" || normalized === "waiting_approval" || normalized === "waiting") {
     return "waiting";
   }
-  if (normalized === "idle" || normalized === "completed" || normalized === "failed") return "idle";
+  if (normalized === "idle" || normalized === "completed") return "idle";
+  if (normalized === "failed" || normalized === "error" || normalized === "timed_out") return "idle";
+  if (normalized === "cancelled" || normalized === "canceled") return "idle";
+  return null;
+}
+
+function normalizeAgentSessionStatus(status: string | undefined): AgentSessionStatus | null {
+  if (!status) return null;
+  const normalized = status.toLowerCase();
+  if (normalized === "started" || normalized === "starting") return "started";
+  if (normalized === "running" || normalized === "working") return "running";
+  if (normalized === "completed" || normalized === "complete" || normalized === "succeeded") {
+    return "completed";
+  }
+  if (normalized === "failed" || normalized === "error") return "failed";
+  if (normalized === "cancelled" || normalized === "canceled") return "cancelled";
+  if (normalized === "timed_out" || normalized === "timeout") return "timed_out";
+  if (normalized === "budget_exceeded" || normalized === "budgetexceeded") {
+    return "budget_exceeded";
+  }
   return null;
 }
 
@@ -932,7 +1022,70 @@ function voiceDoctorSummary(checks: VoiceDiagnosticCheck[]): string {
 function defaultWorkerStatus(type: string): WorkerStatus {
   if (type === "worker.started") return "spawning";
   if (type === "worker.completed") return "completed";
+  if (type === "worker.failed") return "failed";
+  if (type === "worker.cancelled") return "cancelled";
   return "running";
+}
+
+function defaultAgentSessionStatus(type: string): AgentSessionStatus {
+  if (type === "agent.session.started") return "started";
+  if (type === "agent.session.completed") return "completed";
+  if (type === "agent.session.failed") return "failed";
+  if (type === "agent.session.cancelled") return "cancelled";
+  return "running";
+}
+
+function agentStatusFromSession(status: AgentSessionStatus): AgentLive["status"] {
+  if (status === "started" || status === "running") return "working";
+  if (status === "failed" || status === "timed_out" || status === "budget_exceeded") return "idle";
+  if (status === "cancelled") return "idle";
+  return "idle";
+}
+
+function agentTaskVerbFromSession(status: AgentSessionStatus): string {
+  if (status === "completed") return "completed";
+  if (status === "failed" || status === "timed_out" || status === "budget_exceeded") return "failed";
+  if (status === "cancelled") return "cancelled";
+  return "working";
+}
+
+function agentSessionDetail({
+  status,
+  budgetSteps,
+  stepsUsed,
+  result,
+  error,
+}: Pick<AgentSessionRecord, "status" | "budgetSteps" | "stepsUsed" | "result" | "error">): string {
+  if (status === "completed" && result) return result;
+  if ((status === "failed" || status === "timed_out" || status === "budget_exceeded") && error) {
+    return error;
+  }
+  if (budgetSteps > 0) return `step ${Math.min(stepsUsed, budgetSteps)}/${budgetSteps}`;
+  return status.replace("_", " ");
+}
+
+function nextWorkerLogTail(existing: WorkerRecord | undefined, delta: string | undefined): string[] {
+  if (!delta) return existing?.logTail ?? [];
+  return [...(existing?.logTail ?? []), delta].slice(-3);
+}
+
+function readWorkerWorktree(value: unknown): WorkerWorktreeInfo | undefined {
+  const worktree = asRecord(value);
+  const state = stringFrom(worktree.state);
+  const branchName = stringFrom(worktree.branch_name);
+  const worktreePath = stringFrom(worktree.worktree_path);
+  const cleanupPolicy = stringFrom(worktree.cleanup_policy);
+  if (!state && !branchName && !worktreePath && !cleanupPolicy) return undefined;
+  return { state, branchName, worktreePath, cleanupPolicy };
+}
+
+function readWorkerArtifacts(value: unknown): WorkerArtifactInfo | undefined {
+  const artifacts = asRecord(value);
+  const summary = stringFrom(artifacts.summary);
+  const patch = stringFrom(artifacts.patch);
+  const testReport = stringFrom(artifacts.test_report);
+  if (!summary && !patch && !testReport) return undefined;
+  return { summary, patch, testReport };
 }
 
 function readSessionId(envelope: CadisEnvelope): string | undefined {

@@ -282,7 +282,7 @@
 - [x] Show chat stream.
 - [x] Show agent tree.
 - [x] Add `@agent` mention picker baseline.
-- [ ] Show worker progress.
+- [x] Show worker progress from daemon `agent.session.*` and `worker.*` events.
 - [x] Show approval cards.
 - [x] Add voice controls.
 - [x] Add local mic debug telemetry.
@@ -294,6 +294,7 @@
 - [x] Add desktop packaging notes.
 - [ ] Validate HUD prototype against RamaClaw adaptation contract.
 - [x] Render HUD from a mock CADIS daemon event stream.
+- [x] Render HUD worker progress from a mock CADIS daemon event stream fixture.
 - [x] Confirm HUD is protocol-client only and does not execute tools directly.
 - [ ] Confirm durable HUD preferences are daemon-backed, not browser/local UI storage.
 - [x] Confirm disconnected state references CADIS daemon, not OpenClaw.
