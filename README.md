@@ -26,6 +26,14 @@
   <sub>C.A.D.I.S. HUD: local daemon status, orbital agents, voice I/O, model routing, and approval-aware desktop control.</sub>
 </p>
 
+<p align="center">
+  <img src="docs/assets/readme/wulan-avatar-concept.jpg" alt="Wulan avatar concept for C.A.D.I.S. with luminous network lines and local-first identity presence" width="360" />
+</p>
+
+<p align="center">
+  <sub>Wulan avatar direction: renderer-neutral identity, presence, and expression layer for future C.A.D.I.S. clients.</sub>
+</p>
+
 C.A.D.I.S. is a Rust-first, local-first, model-agnostic runtime for coordinating
 AI agents across a desktop HUD, CLI, voice, approvals, native tools, and
 isolated coding work. The repository and binaries stay lowercase as `cadis` and
@@ -117,6 +125,13 @@ The same daemon is meant to serve:
 - desktop HUD workflows
 - voice-enabled control
 - future Telegram and remote surfaces
+
+### 6. Avatar and presence engine
+
+C.A.D.I.S. also treats identity, expression, and presence as first-class runtime
+concerns. The `cadis-avatar` crate is the renderer-neutral contract for Wulan
+avatar state so HUD, voice, and future remote clients can render a consistent
+presence without moving core orchestration out of `cadisd`.
 
 ## Quick start
 
