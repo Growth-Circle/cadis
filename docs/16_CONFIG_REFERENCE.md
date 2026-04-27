@@ -117,6 +117,11 @@ max_depth = 2
 max_children_per_parent = 4
 max_total_agents = 32
 
+[agent_runtime]
+# Applies to daemon-owned per-route AgentSession records.
+default_timeout_sec = 900
+max_steps_per_session = 1
+
 [orchestrator]
 # Enables explicit /worker, /spawn, /route, and /delegate message actions.
 worker_delegation_enabled = true

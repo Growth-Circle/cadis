@@ -354,6 +354,32 @@ The optional `task` field on `agent.status.changed` drives the current task
 summary. A separate `agent.task.changed` event is reserved for a later protocol
 version.
 
+### `agent.session.started` / `agent.session.updated` / terminal events
+
+Tracks daemon-owned per-route agent runtime state. HUD may display these as
+task details under the agent card, but it must treat `cadisd` as authoritative
+for timeout, budget, cancellation, result, and parent-child metadata.
+
+```json
+{
+  "type": "agent.session.started",
+  "agent_session_id": "ags_000001",
+  "session_id": "ses_123",
+  "route_id": "route_000001",
+  "agent_id": "coder",
+  "parent_agent_id": "main",
+  "task": "run focused tests",
+  "status": "running",
+  "timeout_at": "2026-04-26T00:15:00Z",
+  "budget_steps": 1,
+  "steps_used": 0
+}
+```
+
+Terminal events are `agent.session.completed`, `agent.session.failed`, and
+`agent.session.cancelled`. Status values are `started`, `running`, `completed`,
+`failed`, `cancelled`, `timed_out`, and `budget_exceeded`.
+
 ### `agent.renamed`
 
 Confirms rename and updates all surfaces.
@@ -446,7 +472,9 @@ Updates worker tree and optional transient worker card.
 
 `worker.log.delta` carries `worker_id`, `delta`, and optional `agent_id` /
 `parent_agent_id`. `worker.completed` carries the same metadata plus optional
-`summary`.
+`summary`. `worker.tail` returns recent daemon-owned log lines as
+`worker.log.delta` events for an existing worker; clients should apply those
+events through the same worker reducer used for live updates.
 
 ### `orchestrator.route`
 

@@ -129,8 +129,30 @@ Example:
 
 `events.snapshot` is a one-shot request for daemon-owned state. The desktop MVP
 snapshot is represented as normal event frames, currently including
-`agent.list.response`, `ui.preferences.updated`, and `session.updated` for known
-sessions.
+`agent.list.response`, `ui.preferences.updated`, `session.updated` for known
+sessions, and worker lifecycle snapshots for workers known to the in-memory
+daemon worker registry.
+
+`worker.tail` is a one-shot request for recent daemon-owned worker log lines.
+The desktop MVP replays log lines from the in-memory worker registry as
+`worker.log.delta` events. `lines` is optional; when absent the daemon returns
+up to 64 recent lines, capped at 1000. Unknown workers are rejected with
+`worker_not_found`.
+
+Example:
+
+```json
+{
+  "protocol_version": "0.1",
+  "request_id": "req_...",
+  "client_id": "cli_...",
+  "type": "worker.tail",
+  "payload": {
+    "worker_id": "worker_000001",
+    "lines": 20
+  }
+}
+```
 
 `session.subscribe` keeps the connection open after the immediate
 `request.accepted` response. The daemon sends the current `session.updated`
@@ -278,6 +300,11 @@ agent.renamed
 agent.model.changed
 agent.status.changed
 agent.completed
+agent.session.started
+agent.session.updated
+agent.session.completed
+agent.session.failed
+agent.session.cancelled
 workspace.list.response
 workspace.registered
 workspace.grant.created
@@ -305,6 +332,35 @@ voice.completed
 ```
 
 `models.list.response` payloads include conservative provider readiness metadata:
+
+`agent.session.*` events are emitted by the daemon-owned Agent Runtime baseline
+for each routed agent task. They are in-memory for the desktop MVP and carry the
+route, task, result, timeout, budget, cancellation, and parent-child metadata
+needed by clients to render lifecycle state without owning orchestration:
+
+```json
+{
+  "type": "agent.session.started",
+  "agent_session_id": "ags_000001",
+  "session_id": "ses_...",
+  "route_id": "route_000001",
+  "agent_id": "coder",
+  "parent_agent_id": "main",
+  "task": "run focused tests",
+  "status": "running",
+  "timeout_at": "2026-04-26T00:15:00Z",
+  "budget_steps": 1,
+  "steps_used": 0
+}
+```
+
+Allowed AgentSession statuses are `started`, `running`, `completed`, `failed`,
+`cancelled`, `timed_out`, and `budget_exceeded`. `agent.session.completed` adds
+an optional redacted `result`. Terminal failure/cancellation events add optional
+`error_code`, `error`, and `cancellation_requested_at` fields as applicable.
+The current baseline enforces a per-route step budget before provider execution
+and records timeout deadlines; model/tool-loop cancellation and async interrupt
+remain later runtime work.
 
 `workspace.list.response` payload:
 
@@ -602,6 +658,9 @@ The daemon assigns the new `agent_id` and confirms with `agent.spawned`.
 Client-requested spawning and explicit `/worker` or `/spawn` orchestration are
 bounded by daemon config. The desktop MVP defaults allow child depth 2, 4 direct
 children per parent, and 32 total registered agents including built-in agents.
+Explicit orchestration is daemon-owned: `/worker` and `/spawn` requests create
+an AgentSession, call the same core spawn path as `agent.spawn`, and enforce the
+same depth, child, and global caps before any provider response is produced.
 Rejections use:
 
 - `agent_spawn_depth_limit_exceeded`

@@ -254,6 +254,15 @@ default_timeout_sec = 900
 allow_recursive_spawn = false
 ```
 
+The desktop MVP now wraps each routed task in an in-memory daemon-owned
+`AgentSession`. The record carries the route ID, task summary, result/error
+summary, timeout deadline, step budget, cancellation timestamp, target agent,
+and parent agent. Clients observe it through `agent.session.started`,
+`agent.session.updated`, and terminal `agent.session.completed`,
+`agent.session.failed`, or `agent.session.cancelled` events. These records are a
+runtime boundary only; provider/tool-loop execution, durable AgentSession
+recovery, and implicit model-driven spawning remain later work.
+
 ## 10. Model Provider Layer
 
 Provider interface responsibilities:
