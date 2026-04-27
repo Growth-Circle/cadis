@@ -194,12 +194,13 @@ Example:
 `tool.call` requests daemon-owned native tool execution. Tool calls must resolve
 a registered workspace and an active workspace grant before execution or
 approval flow proceeds. `agent_id` is optional; when present, it lets daemon tool
-execution satisfy agent-scoped workspace grants. The initial baseline supports
-safe read-only execution
-for `file.read`, `file.search`, and `git.status`; risky placeholders such as
-`shell.run`, `file.write`, and `file.patch` create an approval request after the
-workspace grant check and do not execute until a later runtime implements the
-gated action.
+execution satisfy agent-scoped workspace grants. The current baseline supports
+safe read-only execution for `file.read`, `file.search`, `git.status`, and
+`git.diff`. `file.patch` requires an active write grant and approval, then
+executes a conservative structured replace/write patch. Other risky placeholders
+such as `shell.run` and `file.write` still create an approval request after the
+workspace grant check and remain blocked after approval until their execution
+backends are implemented.
 
 Example:
 
@@ -220,6 +221,38 @@ Example:
   }
 }
 ```
+
+`file.patch` accepts a structured patch object compatible with CLI `--input`
+JSON. Single-operation forms:
+
+```json
+{ "workspace_id": "example-project", "path": "README.md", "old": "before", "new": "after" }
+```
+
+```json
+{ "workspace_id": "example-project", "path": "README.md", "content": "full file contents\n" }
+```
+
+Multi-operation form:
+
+```json
+{
+  "workspace_id": "example-project",
+  "operations": [
+    { "op": "replace", "path": "README.md", "old": "before", "new": "after" },
+    { "op": "write", "path": "notes.txt", "content": "new file contents\n" }
+  ]
+}
+```
+
+Paths must be workspace-relative. Absolute paths, `..` escapes, protected
+workspace metadata paths such as `.git` and `.cadis`, and secret-like paths such
+as `.env`, key files, token files, credential files, and secret-named paths are
+rejected before approval. Unified diff application is intentionally not part of
+this slice; callers should submit the structured schema above. Approved
+execution context is in-memory for this slice; if the daemon restarts with a
+pending `file.patch` approval, approving that recovered request fails closed
+because the patch body is not persisted.
 
 `workspace.register` adds or replaces a profile-local project workspace registry
 entry. CADIS persists the registry under
@@ -575,17 +608,21 @@ tool.completed or tool.failed
 ```
 
 Safe-read tools emit `tool.requested`, `tool.started`, and then
-`tool.completed` or `tool.failed`. Approval-gated placeholders emit
-`tool.requested` and `approval.requested`; `approval.respond` emits
-`approval.resolved` and `tool.failed` because risky execution is intentionally
-blocked in this baseline.
+`tool.completed` or `tool.failed`. `file.patch` emits `tool.requested` and
+`approval.requested`; an approved `approval.respond` emits `approval.resolved`,
+`tool.started`, and then `tool.completed` or `tool.failed`. Other approval-gated
+placeholders emit `tool.requested` and `approval.requested`; `approval.respond`
+emits `approval.resolved` and `tool.failed` because those risky execution
+backends are intentionally blocked in this baseline.
 
 `tool.completed` may include a redacted structured `output` object. The current
-safe-read outputs are:
+tool outputs are:
 
 - `file.read`: `path`, `content`, `truncated`
 - `file.search`: `query`, `matches[]`, `truncated`
 - `git.status`: `cwd`, `status`
+- `git.diff`: `cwd`, `pathspec`, `diff`, `truncated`
+- `file.patch`: `schema`, `files[]`, `truncated`
 
 ## 8. Compatibility Rules
 
