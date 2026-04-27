@@ -97,6 +97,7 @@ workspace.revoke
 workspace.doctor
 worker.tail
 worker.result
+worker.cleanup
 models.list
 ui.preferences.get
 ui.preferences.set
@@ -154,6 +155,15 @@ event. It does not replay `worker.log.delta` lines. Unknown workers are
 rejected with `worker_not_found`; workers without a terminal result are rejected
 with `worker_result_unavailable`.
 
+`worker.cleanup` is a metadata-only cleanup planning request. The daemon accepts
+only terminal workers with a project-local CADIS-owned worker worktree record
+under `<project>/.cadis/worktrees/<worker-id>/`. If a caller supplies
+`worktree_path`, it must resolve to the daemon-recorded worker path. Unknown
+workers, missing project-local metadata, missing worktree paths, removed records,
+or non-CADIS paths are rejected and do not mutate metadata. Accepted requests
+move the worker worktree to `cleanup_pending`, emit
+`worker.cleanup.requested`, and do not delete files.
+
 `worker.started`, `worker.completed`, `worker.failed`, and `worker.cancelled`
 may include worktree and artifact metadata. Failed worker events include optional
 `error_code` and redacted `error`; cancelled worker events include optional
@@ -164,7 +174,8 @@ For session-bound project workspaces, the daemon worker runtime creates
 `worker.started`, and writes profile-scoped artifacts before `worker.completed`
 or `worker.failed`. Terminal worker events move active worktrees to
 `review_pending` or `cleanup_pending` according to cleanup policy; patch apply
-and cleanup remain separate approval-gated flows.
+and cleanup remain separate flows, and this cleanup slice records intent without
+removing files.
 
 Example:
 
@@ -448,6 +459,7 @@ worker.log.delta
 worker.completed
 worker.failed
 worker.cancelled
+worker.cleanup.requested
 patch.created
 test.result
 voice.preview.started

@@ -57,12 +57,16 @@ Implemented baseline:
   `profiles/<profile>/artifacts/workers/`, and let `workspace doctor` report
   stale worker worktree metadata or missing artifact roots.
 - Worker execution setup now creates a git worktree for session-bound project
-  workspaces, marks project-local worker worktree metadata `ready`, and writes
-  profile-scoped worker artifacts for review.
+  workspaces, moves project-local worker worktree metadata through `ready`,
+  `review_pending`, and `cleanup_pending`, and writes profile-scoped worker
+  artifacts for review.
+- `worker.cleanup` records cleanup intent for terminal CADIS-owned worker
+  worktrees without deleting files and rejects unknown, missing, or non-owned
+  paths.
 
 Still future:
 
-- Worker worktree cleanup.
+- Worker worktree file removal.
 - Real worker command/test execution and durable worker runtime logs.
 - Checkpoint and rollback manager.
 - Dedicated profile and agent doctor commands.
@@ -282,8 +286,10 @@ Project-local worker worktree metadata lives beside the project worktree root:
 
 `workspace doctor` treats these metadata files as diagnostics only. It warns
 when a recorded worktree path or profile artifact root is stale/missing; it does
-not create, remove, or mutate git worktrees. Worktree creation is owned by the
-daemon worker runtime when a session-bound worker starts.
+not create, remove, or mutate git worktrees. Worktree creation and cleanup
+planning are owned by the daemon worker runtime when a session-bound worker
+starts or reaches a terminal cleanup flow. Cleanup planning moves metadata to
+`cleanup_pending`; actual file removal remains a later explicit executor.
 
 Workers receive write/exec grants only for their worktree unless the user
 explicitly approves broader access. The parent project checkout remains

@@ -1097,8 +1097,12 @@ function readWorkerArtifacts(value: unknown): WorkerArtifactInfo | undefined {
   const summary = stringFrom(artifacts.summary);
   const patch = stringFrom(artifacts.patch);
   const testReport = stringFrom(artifacts.test_report);
-  if (!summary && !patch && !testReport) return undefined;
-  return { summary, patch, testReport };
+  const testReportStatus =
+    stringFrom(artifacts.test_report_status) ??
+    stringFrom(artifacts.test_status) ??
+    stringFrom(artifacts.tests_status);
+  if (!summary && !patch && !testReport && !testReportStatus) return undefined;
+  return { summary, patch, testReport, testReportStatus };
 }
 
 function readSessionId(envelope: CadisEnvelope): string | undefined {

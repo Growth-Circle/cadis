@@ -99,10 +99,11 @@ Still pending:
 - Risky tool execution after approval. Approval records now persist and pending
   approvals are replayed after daemon restart, but approved mutating/shell tools
   still fail closed until native execution backends are implemented.
-- Worker cancellation/cleanup, Telegram/mobile adapters, daemon-owned
-  production voice output, and code work window. The first worker execution
-  slice now creates git worktrees for session-bound project workspaces and
-  writes profile-scoped worker artifacts.
+- Worker file-removal cleanup, Telegram/mobile adapters, daemon-owned
+  production voice output, and code work window. The current worker execution
+  slice creates git worktrees for session-bound project workspaces, writes
+  profile-scoped worker artifacts, and records fail-closed cleanup planning
+  metadata without deleting worktree files.
 - Denied-path enforcement for all mutating tools, checkpoint/rollback manager,
   dedicated profile/agent doctor commands, and media asset manifests.
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
@@ -702,7 +703,10 @@ Tasks:
 - Add git worktree creation. Baseline now creates a project-local worktree for
   session-bound git workspaces before worker execution starts.
 - Add worker log stream.
-- Add worker cleanup.
+- Add worker cleanup. Baseline now exposes metadata-only `worker.cleanup`
+  planning, requires CADIS-owned project worktree metadata, rejects
+  missing/unknown/non-owned paths, and leaves actual file removal for a later
+  approved cleanup executor.
 - Add patch collection. Baseline now writes `patch.diff`, `changed-files.json`,
   `test-report.json`, `summary.md`, and `memory-candidates.jsonl` artifact files
   under the profile worker artifact root.

@@ -9,6 +9,7 @@ import { ConfigDialog } from "./ui/settings/ConfigDialog.js";
 import { AgentRenameDialog } from "./ui/settings/AgentRenameDialog.js";
 import { ApprovalStack } from "./ui/approvals/ApprovalStack.js";
 import { connect, disconnect } from "./ui/cadisActions.js";
+import { CodeWorkPanel } from "./ui/codework/CodeWorkPanel.js";
 
 export function App() {
   const theme = useHud((s) => s.theme);
@@ -39,6 +40,7 @@ export function App() {
       <main className="rama-shell__main">
         <OrbitalHUD />
         <ApprovalStack />
+        <CodeWorkPanel />
       </main>
       <ChatPanel />
       <ConfigDialog />
