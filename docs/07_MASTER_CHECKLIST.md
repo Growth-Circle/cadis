@@ -352,10 +352,13 @@
 - [ ] Enforce denied paths across file, shell, git, and worker tools.
 - [x] Reject broad workspace roots and enforce safe-read workspace path guards.
 - [x] Implement project `.cadis/workspace.toml` store support.
+- [x] Add project `.cadis/worktrees/` worker path and metadata helpers.
+- [x] Add profile `artifacts/workers/` worker artifact path helpers.
 - [ ] Implement worker worktree creation under project `.cadis/worktrees/`.
 - [ ] Persist worker artifacts under profile `artifacts/workers/`.
 - [ ] Add project `.cadis/media/` manifests for generated media.
 - [x] Add workspace doctor checks for project metadata mismatch and duplicate roots.
+- [x] Add workspace doctor checks for stale worker worktree metadata and missing artifact roots.
 - [x] Add profile/agent doctor checks for missing, corrupt, and oversized agent-home files.
 
 ## 16. Code Work Window

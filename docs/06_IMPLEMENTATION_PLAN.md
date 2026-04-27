@@ -298,13 +298,17 @@ Tasks:
   richer expiry UX, and denied-path checks for mutating tools.
 - Add project `.cadis/workspace.toml`, `.cadis/worktrees/`, `.cadis/artifacts/`,
   and `.cadis/media/` conventions. Store-level `.cadis/workspace.toml` support
-  and doctor checks for metadata mismatch now exist.
+  and doctor checks for metadata mismatch now exist. Store-level worker worktree
+  path/metadata helpers under project `.cadis/worktrees/` now exist.
 - Route coding workers into git worktrees and persist worker artifacts under the
-  profile home.
+  profile home. Profile-scoped worker artifact path helpers now point at
+  `profiles/<profile>/artifacts/workers/`; actual artifact production remains
+  future work.
 - Add doctor checks for duplicated roots, broad grants, symlink escapes, secret
   paths, stale worktrees, corrupt JSONL, and oversized memory/persona files.
   Workspace doctor now includes a baseline for missing, corrupt, and oversized
-  agent-home files.
+  agent-home files plus stale project worker worktree metadata and missing
+  artifact roots.
 
 Exit criteria:
 
