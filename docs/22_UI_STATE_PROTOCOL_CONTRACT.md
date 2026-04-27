@@ -8,7 +8,10 @@ This document defines the daemon-backed state contract required to adapt the Ram
 
 The HUD may cache state for rendering, but `cadisd` owns durable state and all authoritative operational state.
 
-The UI must never execute tools, approve actions locally, mutate agent runtime state directly, or treat local browser storage as the source of truth.
+The UI must never execute tools, approve actions locally, mutate agent runtime
+state directly, apply worker patches, delete worktrees, or treat local browser
+storage as the source of truth. The HUD and future code work window are protocol
+clients of `cadisd`, not execution surfaces.
 
 ## 3. View Model
 
@@ -503,7 +506,25 @@ Updates worker tree and optional transient worker card.
   "status": "running",
   "cli": "cadis",
   "cwd": "/home/user/Project/app",
-  "summary": "running cargo test"
+  "summary": "running cargo test",
+  "worktree": {
+    "workspace_id": "app",
+    "project_root": "/home/user/Project/app",
+    "worktree_root": "/home/user/Project/app/.cadis/worktrees",
+    "worktree_path": "/home/user/Project/app/.cadis/worktrees/worker_auth_01",
+    "branch_name": "cadis/worker_auth_01/fix-auth",
+    "base_ref": "HEAD",
+    "state": "active",
+    "cleanup_policy": "explicit"
+  },
+  "artifacts": {
+    "root": "/home/user/.cadis/profiles/default/artifacts/workers/worker_auth_01",
+    "patch": "/home/user/.cadis/profiles/default/artifacts/workers/worker_auth_01/patch.diff",
+    "test_report": "/home/user/.cadis/profiles/default/artifacts/workers/worker_auth_01/test-report.json",
+    "summary": "/home/user/.cadis/profiles/default/artifacts/workers/worker_auth_01/summary.md",
+    "changed_files": "/home/user/.cadis/profiles/default/artifacts/workers/worker_auth_01/changed-files.json",
+    "memory_candidates": "/home/user/.cadis/profiles/default/artifacts/workers/worker_auth_01/memory-candidates.jsonl"
+  }
 }
 ```
 
@@ -513,12 +534,24 @@ Updates worker tree and optional transient worker card.
 `worker.cancelled` may include `cancellation_requested_at`. `worker.tail` returns
 recent daemon-owned log lines as `worker.log.delta` events for an existing
 worker; clients should apply those events through the same worker reducer used
-for live updates.
+for live updates. Terminal worktree states such as `review_pending` and
+`cleanup_pending` are planning states; they do not authorize patch application
+or deletion by the UI.
 
 HUD worker progress is derived from daemon events only. The worker tree may
 combine `agent.session.*` progress (`steps_used` / `budget_steps`) with
 `worker.*` status, log tail, worktree metadata, and artifact paths, but it must
 not create, execute, cancel, or approve workers locally.
+
+The P14 code work window uses the same rule. Its first slice is a read-only
+artifact view over daemon worker events, bounded log summaries, and
+daemon-provided or profile-scoped artifact references. It may render
+`summary.md`, `patch.diff`, `changed-files.json`, `test-report.json`, and
+`memory-candidates.jsonl` previews only through daemon-sanctioned read-only
+projections. It must not run commands, invoke `shell.run` directly from the
+renderer, read arbitrary filesystem paths, edit files, apply patches, or remove
+worker worktrees. Apply and cleanup buttons send daemon requests and wait for
+approval-gated results.
 
 ### `orchestrator.route`
 
@@ -605,7 +638,7 @@ validate speech policy and emit lifecycle events without external API calls.
 | `agent.*.status` | `agent.status.changed` |
 | `agent.*.task` | `agent.task.changed` |
 | `session.*.message` | `message.delta` / `message.completed` |
-| `worker.*.event` | `worker.event` |
+| `worker.*.event` | `worker.started` / `worker.log.delta` / `worker.completed` / `worker.failed` / `worker.cancelled` |
 | `approval.requested` | `approval.requested` |
 | `approval.resolved` | `approval.resolved` |
 | `orchestrator.route` | `orchestrator.route` |
@@ -670,6 +703,8 @@ Protocol adaptation is valid when:
 - All RamaClaw UI features have CADIS request/event equivalents.
 - UI preferences persist through daemon config, not localStorage.
 - Approval card lifecycle is server-confirmed.
+- Code work artifact views are read-only and route apply/cleanup back through
+  daemon approvals.
 - Rename and model selection survive HUD restart.
 - Disconnection and reconnect behavior are visible and tested.
 - `apps/cadis-hud` passes pnpm lint, typecheck, unit tests, frontend build, and

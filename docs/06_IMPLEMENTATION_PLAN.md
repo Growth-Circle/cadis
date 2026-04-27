@@ -89,18 +89,21 @@ Implemented in the first runnable baseline:
 
 Still pending:
 
-- Native mutating file/shell tools.
+- Production hardening for native mutating file/shell tools. Approved
+  `shell.run` and structured `file.patch` execution now exist after daemon-side
+  approval plus workspace/input revalidation, but `shell.run` still needs a
+  minimal environment allowlist and typed async cancellation, while `file.patch`
+  still needs atomic temp-file writes and broader concurrent-edit hardening.
 - Agent runtime beyond the current route-and-answer path: model-driven spawn,
   multi-step budgets, full tool cancellation, and a provider/tool-call loop
   remain future work; existing `agent.spawn` is client-requested, not
   agent-driven.
-- Risky tool execution after approval. Approval records now persist and pending
-  approvals are replayed after daemon restart, but approved mutating/shell tools
-  still fail closed until native execution backends are implemented.
-- Worker cancellation/cleanup, Telegram/mobile adapters, daemon-owned
-  production voice output, and code work window. The first worker execution
-  slice now creates git worktrees for session-bound project workspaces and
-  writes profile-scoped worker artifacts.
+- Worker command/test orchestration, actual worktree cleanup removal,
+  Telegram/mobile adapters, daemon-owned production voice output, and code work
+  window. The first worker execution slice now creates git worktrees for
+  session-bound project workspaces, writes profile-scoped worker artifacts, and
+  moves terminal worktrees into review/cleanup planning states without parent
+  checkout patch application.
 - Denied-path enforcement for all mutating tools, checkpoint/rollback manager,
   dedicated profile/agent doctor commands, and media asset manifests.
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
@@ -199,8 +202,10 @@ Tasks:
   finalizing as failed or completed after the cancel event.
 - Create worker worktrees and profile-scoped worker artifacts for explicit
   daemon-planned workers. Baseline now creates session-bound project worktrees
-  and writes review artifacts; real command/test execution, cleanup, and patch
-  application remain future work.
+  and writes review artifacts; real worker command/test orchestration, result
+  collection from those commands, cleanup removal, and parent patch application
+  remain future work. Any command/test execution must go through daemon-owned
+  approved tool execution inside the worker worktree, not HUD logic.
 
 Exit criteria:
 
@@ -210,6 +215,9 @@ Exit criteria:
 - Worker logs can be tailed from CLI and HUD.
 - Cancelling a session stops the active provider stream at the next callback
   boundary and preserves the AgentSession as `cancelled`.
+- Worker command/test execution, when introduced, runs inside the CADIS-owned
+  worker worktree and produces review artifacts without touching the parent
+  checkout.
 
 ### Track D - Policy, Approval, and Tool Runtime
 
@@ -224,22 +232,31 @@ Tasks:
 - Add timeouts, cancellation, and redaction boundaries.
 - Baseline now includes tool contract metadata, safe-read `file.read` and
   `file.search`, `git.status`, `git.diff`, workspace grants, approval
-  summaries, approval persistence/recovery, and redaction boundaries. Mutating
-  tools, shell execution, and full policy-gated tool execution remain future
-  work.
+  summaries, approval persistence/recovery, redaction boundaries, approved
+  `shell.run` execution, and approved structured `file.patch` execution after
+  workspace/input revalidation.
+  Remaining Track D hardening includes minimal shell environment filtering,
+  typed async tool cancellation, atomic patch writes, and broader
+  concurrent-edit protection.
 
-Execution semantics for the next Track D slice:
+Execution semantics for the Track D execution baseline and next hardening
+slice:
 
 - Treat approval as authorization to attempt execution, not as execution
   itself. After an approval is granted, `cadisd` must revalidate approval
   expiry, workspace grant, normalized input, denied paths, secret-access policy,
   and current session/worker state before `tool.started`.
 - `shell.run` must execute only inside a registered workspace or CADIS-owned
-  worker worktree with `exec` or `admin` access, filtered environment, bounded
-  stdout/stderr, exit-code reporting, timeout, and cancellation cleanup.
+  worker worktree with `exec` or `admin` access, bounded stdout/stderr,
+  exit-code reporting, timeout, and cancellation cleanup. The current baseline
+  provides cwd resolution, bounded redacted output, exit code, and timeout
+  process cleanup; a minimal environment allowlist and typed async cancellation
+  remain required before broad worker command execution is complete.
 - `file.patch` must apply only to normalized workspace-relative paths, preserve
   unrelated user edits, fail closed on context mismatch, symlink escape, denied
-  path, or concurrent change, and write atomically where practical.
+  path, or concurrent change, and write atomically where practical. The current
+  baseline supports structured replace/write operations; atomic writes and
+  richer concurrent-edit detection remain hardening work.
 - Secret access fails closed by default. A tool that may read a secret-bearing
   path, environment value, config entry, or command output needs explicit policy
   support and approval metadata before execution.
@@ -250,14 +267,19 @@ Execution semantics for the next Track D slice:
 Worker integration sequence:
 
 1. Track C/I creates an isolated worker worktree and profile-scoped artifacts.
-2. Worker command/test execution runs only inside the worker worktree after
-   Track D policy approval and tool execution support exist.
-3. Worker output produces a review artifact, normally `patch.diff` plus
-   `summary.md`.
-4. Applying that patch to the parent workspace is a separate Track D
+2. Worker command/test execution uses daemon-owned `tool.call` /
+   approval-gated `shell.run` with cwd inside the worker worktree. The HUD,
+   Tauri shell, and code work window must not run commands directly.
+3. Worker output is collected into review artifacts, normally `summary.md`,
+   `patch.diff`, `changed-files.json`, `test-report.json`, and
+   `memory-candidates.jsonl`, with long stdout/stderr kept out of the main chat.
+4. Applying a worker artifact to the parent workspace is a separate Track D
    `file.patch` or future patch-apply tool call with its own approval request.
+   `worker.completed` never authorizes parent-checkout mutation.
 5. Worker cleanup is a separate approved flow and must not delete paths without
-   a CADIS-owned worker/worktree record.
+   a CADIS-owned worker/worktree record. Terminal worker events may move
+   worktrees to `review_pending` or `cleanup_pending`, but state planning is not
+   deletion.
 
 Exit criteria:
 
@@ -404,8 +426,16 @@ Tasks:
   worktree exists.
 - Write profile-scoped worker artifacts: `summary.md`, `patch.diff`,
   `changed-files.json`, `test-report.json`, and `memory-candidates.jsonl`.
+- Execute worker commands and tests only through daemon-owned approved
+  `shell.run` with cwd inside the active worker worktree; do not run commands
+  from HUD, the code work window, or the parent checkout.
+- Collect command/test results into worker artifacts and summarize long output
+  for `worker.log.delta`, `test.result`, and code work window display.
 - Emit `worker.failed` and `worker.cancelled` with durable failure,
   cancellation, and cleanup-planning metadata.
+- Move terminal worktree metadata to `review_pending` or `cleanup_pending`;
+  actual worktree removal remains a separate approved cleanup flow requiring a
+  CADIS-owned worker/worktree record.
 - Keep the parent checkout untouched; patch application remains gated by Track D
   policy/approval work.
 - Continue surfacing worker lifecycle and log events to CLI/HUD.
@@ -418,6 +448,8 @@ Exit criteria:
   terminal cleanup state.
 - Worker artifacts are written under the profile artifact root and are redacted
   before persistence.
+- Command/test result collection can be inspected from daemon events and worker
+  artifacts without mutating the parent checkout.
 
 ## 3. P0 - Repository Foundation
 
@@ -696,7 +728,9 @@ Tasks:
 - Add git worktree creation. Baseline now creates a project-local worktree for
   session-bound git workspaces before worker execution starts.
 - Add worker log stream.
-- Add worker cleanup.
+- Add worker command/test execution through approved `shell.run` with cwd inside
+  the worker worktree.
+- Add worker cleanup planning; actual removal is a separate approved flow.
 - Add patch collection. Baseline now writes `patch.diff`, `changed-files.json`,
   `test-report.json`, `summary.md`, and `memory-candidates.jsonl` artifact files
   under the profile worker artifact root.
@@ -706,7 +740,9 @@ Exit criteria:
 
 - Coding worker edits in separate worktree.
 - Diff can be generated.
+- Command output and test results are collected as worker artifacts.
 - Patch is not applied without approval.
+- Cleanup cannot delete a worktree without CADIS-owned metadata and approval.
 
 ## 13.1 Workspace Architecture Phases
 
@@ -715,9 +751,10 @@ Goal: implement the accepted profile, agent, workspace, and worktree design in
 
 Status: partially implemented. The current implementation initializes the
 default profile home, persists workspace registry/grants, exposes workspace
-protocol/CLI commands, and gates safe-read tools behind active grants. Agent
-homes, worker worktree creation, checkpoint rollback, and full denied-path
-coverage remain future phases.
+protocol/CLI commands, gates safe-read tools behind active grants, initializes
+daemon-known agent homes, creates worker worktrees, and writes worker artifacts.
+Worker command/test execution, cleanup removal, checkpoint rollback, and full
+denied-path coverage remain future phases.
 
 Tasks:
 
@@ -731,8 +768,8 @@ Tasks:
   Baseline complete for registry/grants, broad-root rejection, and safe-read
   path guards.
 - W5: add worker worktree creation, artifact storage, and cleanup rules.
-  Baseline worktree creation and artifact storage now exist; cleanup remains
-  future work.
+  Baseline worktree creation, artifact storage, and terminal cleanup planning
+  states now exist; approved cleanup removal remains future work.
 - W6: add checkpoint/rollback before destructive or mutating operations.
 - W7: integrate workspace, grant, worker, checkpoint, and rollback events.
 - W8: add deterministic channel and cwd/project routing.
@@ -814,18 +851,27 @@ Goal: keep coding work visual and separate from chat.
 
 Tasks:
 
+- First slice: open a read-only artifact view for worker output from daemon
+  events and profile-scoped artifact references.
 - Open/focus code work window for code-heavy tasks.
 - Show file tree.
-- Show diff.
-- Show terminal output.
-- Show test results.
-- Provide apply/discard actions.
+- Show diff from `patch.diff` or daemon-provided patch preview.
+- Show terminal output summaries and bounded logs from `worker.log.delta` /
+  artifact previews.
+- Show test results from `test-report.json` and `test.result` summaries.
+- Provide apply/discard request actions that route back through daemon
+  protocol; the window must not apply patches or delete worktrees directly.
 - Link to external editor.
 
 Exit criteria:
 
 - Coding output does not flood main chat.
-- User can inspect diff and approve patch.
+- User can inspect diff, command summaries, and test results in a read-only
+  view.
+- Parent checkout patch application still goes through approval-gated
+  `file.patch` or a future patch-apply tool.
+- The code work window does not execute tools; it is a protocol client of
+  `cadisd`.
 
 ## 18. P15 - Alpha Hardening
 

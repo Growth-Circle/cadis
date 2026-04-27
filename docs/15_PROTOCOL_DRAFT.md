@@ -156,6 +156,14 @@ before `worker.completed` or `worker.failed`. Terminal worker events move active
 worktrees to `review_pending` or `cleanup_pending` according to cleanup policy;
 patch apply and cleanup remain separate approval-gated flows.
 
+The next worker command/test slice uses this same event shape. Commands and
+tests must be executed by `cadisd` through approval-gated `shell.run` with cwd
+inside the CADIS-owned worker worktree. HUD, Tauri, and code work window clients
+must not spawn local shells, run tests, apply patches, or delete worktrees.
+Command/test output is collected as bounded `worker.log.delta` summaries and
+profile-scoped artifacts such as `summary.md`, `patch.diff`,
+`changed-files.json`, `test-report.json`, and `memory-candidates.jsonl`.
+
 Example:
 
 ```json
@@ -258,8 +266,10 @@ the checklist.
 
 `shell.run` input must resolve to a registered workspace or CADIS-owned worker
 worktree before execution. The execution backend must use an explicit cwd,
-filtered environment, bounded stdout/stderr, exit-code reporting, timeout, and
-cleanup on cancellation. It must not inject secrets implicitly.
+bounded stdout/stderr, exit-code reporting, timeout, and cleanup on
+cancellation. A minimal environment allowlist is required before broad worker
+command/test execution is considered complete; provider keys, auth tokens, SSH
+agent details, and CADIS secrets must not be passed implicitly.
 
 `file.patch` input must be previewable before approval and must apply only to
 daemon-normalized workspace-relative paths. The current supported schema is a
@@ -290,10 +300,18 @@ mismatches. Unified diff application is reserved for a later patch backend.
 Patch writes should be atomic where practical.
 
 Worker integration uses the same protocol flow. Worker command/test execution
-runs inside the worker worktree only after Track D tool approval support exists.
+runs inside the worker worktree through daemon-owned approved `shell.run`.
 Applying a worker artifact to the parent workspace is a separate `file.patch` or
 future patch-apply tool call with its own approval; `worker.completed` alone
-does not authorize parent-checkout mutation.
+does not authorize parent-checkout mutation. Cleanup/removal of a worker
+worktree is also a separate approval-gated flow and must require a CADIS-owned
+worker/worktree record.
+
+`patch.created` and `test.result` are summary events for code-work presentation.
+They do not carry authority to mutate the parent checkout. `patch.created`
+identifies a daemon-known patch or artifact summary; `test.result` carries a
+redacted status and summary. Full review details belong in worker artifacts or a
+future daemon read-only artifact projection, not direct HUD filesystem reads.
 
 `workspace.register` adds or replaces a profile-local project workspace registry
 entry. CADIS persists the registry under

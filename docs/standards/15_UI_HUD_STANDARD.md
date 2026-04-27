@@ -16,6 +16,8 @@ Rules:
 - The HUD may keep ephemeral render state.
 - The HUD must not execute tools.
 - The HUD must not approve actions locally.
+- The HUD and future code work window must not spawn shells, run tests, apply
+  patches, or remove worker worktrees directly.
 - The HUD must not treat browser local storage as authoritative.
 - All config writes must route through daemon protocol.
 - All agent, model, approval, and voice state must be derived from daemon responses and events.
@@ -264,7 +266,13 @@ message.delta
 message.completed
 approval.requested
 approval.resolved
-worker.event
+worker.started
+worker.log.delta
+worker.completed
+worker.failed
+worker.cancelled
+patch.created
+test.result
 orchestrator.route
 ui.preferences.updated
 voice.preview.started
@@ -272,7 +280,27 @@ voice.preview.completed
 voice.preview.failed
 ```
 
-## 14. Open-Source Cleanup
+## 14. Code Work Artifact View
+
+The P14 code work window is a protocol client and a read-only review surface for
+the first implementation slice.
+
+Rules:
+
+- Render worker status, worktree state, and artifact metadata from daemon
+  `worker.*`, `patch.created`, and `test.result` events.
+- Show `summary.md`, `patch.diff`, `changed-files.json`, `test-report.json`,
+  and bounded terminal log previews only through daemon-sanctioned read-only
+  projections.
+- Do not read arbitrary local filesystem paths from the renderer.
+- Do not execute `shell.run`, run tests, edit files, apply patches, or delete
+  worktrees from the UI process.
+- Apply actions must route to approval-gated `file.patch` or a future
+  patch-apply tool owned by `cadisd`.
+- Discard or cleanup actions must route to a separate approved cleanup flow that
+  verifies CADIS-owned worker/worktree metadata.
+
+## 15. Open-Source Cleanup
 
 Before public release:
 
@@ -283,7 +311,7 @@ Before public release:
 - recreate icons as CADIS assets when needed
 - verify no provider keys or local config values are committed
 
-## 15. Testing Requirements
+## 16. Testing Requirements
 
 Required HUD tests:
 
@@ -295,6 +323,7 @@ Required HUD tests:
 - approval card waits for resolved event
 - reconnect and backoff test
 - protocol event mapping tests
+- code work artifact view reducer/render tests
 - screenshot parity at 1600x1000
 - screenshot parity at 1920x1080
 - minimum size check at 1200x760
