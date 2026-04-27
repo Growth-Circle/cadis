@@ -26,11 +26,15 @@ Provider responsibilities:
 Initial provider options:
 
 - `edge`
-- `os`
-- `piper`
+- `openai`
+- `system`
 - `stub`
 
 The `stub` provider is required for deterministic tests.
+The first daemon-owned provider slice may implement `edge`, `openai`, and
+`system` as local stubs. Stubs must report provider identity, curated voices,
+and lifecycle success or structured failure without making external API calls,
+spawning compatibility helpers, or reading provider credentials.
 
 ## 4. Voice Preferences
 
@@ -99,6 +103,10 @@ CADIS must speak only content that is useful and safe to hear.
 
 Long answers must be summarized before speaking. Long code, diffs, logs, and raw command output must not be spoken.
 
+The daemon speech policy must run before provider dispatch. Policy rejection
+must prevent `voice.started`, `voice.completed`, provider calls, and logging of
+the blocked text body.
+
 ## 7. Auto-Speak Rules
 
 Auto-speak must:
@@ -111,6 +119,9 @@ Auto-speak must:
 - stop current speech before starting a new preview or explicit speech action
 
 Streaming deltas must not be spoken one by one.
+
+In the current daemon-owned slice, long content that requires summarization is
+blocked from direct speech until a summarization path exists.
 
 ## 8. Approval Speech
 
@@ -175,6 +186,9 @@ an encoder fallback path, not a failed microphone.
 Voice requests:
 
 ```text
+voice.status
+voice.doctor
+voice.preflight
 voice.preview
 voice.stop
 ui.preferences.set
@@ -183,6 +197,9 @@ ui.preferences.set
 Voice events:
 
 ```text
+voice.status.updated
+voice.doctor.response
+voice.preflight.response
 voice.preview.started
 voice.preview.completed
 voice.preview.failed
@@ -190,6 +207,9 @@ ui.preferences.updated
 ```
 
 Voice preview failure must be visible in the HUD and structured in logs.
+The HUD must report its local bridge doctor/preflight results to `cadisd`
+through `voice.preflight`, while still keeping microphone capture, WebAudio PCM
+fallback, whisper invocation, and native playback local to the HUD/Tauri bridge.
 
 ## 12. Privacy and Logging
 

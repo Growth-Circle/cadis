@@ -80,8 +80,12 @@ impl Default for HudConfig {
 pub struct VoiceConfig {
     /// Whether voice output is enabled.
     pub enabled: bool,
+    /// TTS provider identifier.
+    pub provider: String,
     /// Voice identifier.
     pub voice_id: String,
+    /// STT language, usually `auto` or an ISO 639-1 language code.
+    pub stt_language: String,
     /// Speaking rate adjustment.
     pub rate: i16,
     /// Pitch adjustment.
@@ -90,17 +94,22 @@ pub struct VoiceConfig {
     pub volume: i16,
     /// Whether completed assistant messages should be spoken.
     pub auto_speak: bool,
+    /// Maximum response length eligible for direct speech.
+    pub max_spoken_chars: usize,
 }
 
 impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: "edge".to_owned(),
             voice_id: "id-ID-GadisNeural".to_owned(),
+            stt_language: "auto".to_owned(),
             rate: 0,
             pitch: 0,
             volume: 0,
             auto_speak: false,
+            max_spoken_chars: 800,
         }
     }
 }
@@ -250,11 +259,14 @@ impl CadisConfig {
             },
             "voice": {
                 "enabled": self.voice.enabled,
+                "provider": self.voice.provider,
                 "voice_id": self.voice.voice_id,
+                "stt_language": self.voice.stt_language,
                 "rate": self.voice.rate,
                 "pitch": self.voice.pitch,
                 "volume": self.voice.volume,
-                "auto_speak": self.voice.auto_speak
+                "auto_speak": self.voice.auto_speak,
+                "max_spoken_chars": self.voice.max_spoken_chars
             },
             "agent_spawn": {
                 "max_depth": self.agent_spawn.max_depth,
@@ -1643,6 +1655,34 @@ mod tests {
         assert_eq!(
             config.ui_preferences()["agent_runtime"]["max_steps_per_session"],
             serde_json::json!(3)
+        );
+    }
+
+    #[test]
+    fn parses_daemon_owned_voice_config() {
+        let config = toml::from_str::<CadisConfig>(
+            r#"
+            [voice]
+            enabled = true
+            provider = "system"
+            voice_id = "en-US-AvaNeural"
+            stt_language = "id"
+            rate = 5
+            pitch = -5
+            volume = 10
+            auto_speak = true
+            max_spoken_chars = 500
+            "#,
+        )
+        .expect("voice config should parse");
+
+        assert!(config.voice.enabled);
+        assert_eq!(config.voice.provider, "system");
+        assert_eq!(config.voice.stt_language, "id");
+        assert_eq!(config.voice.max_spoken_chars, 500);
+        assert_eq!(
+            config.ui_preferences()["voice"]["provider"],
+            serde_json::json!("system")
         );
     }
 

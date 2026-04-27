@@ -22,7 +22,9 @@ use cadis_protocol::{
     ModelInvocationPayload, ModelReadiness, ModelsListPayload, OrchestratorRoutePayload,
     ProtocolVersion, RequestAcceptedPayload, RequestEnvelope, RequestId, ResponseEnvelope,
     SessionEventPayload, SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload,
-    ToolFailedPayload, UiPreferencesPayload, WorkerArtifactLocations, WorkerEventPayload,
+    ToolFailedPayload, UiPreferencesPayload, VoiceDoctorCheck, VoiceDoctorPayload,
+    VoicePreferences, VoicePreflightRequest, VoicePreflightSummary, VoicePreviewRequest,
+    VoiceRuntimeState, VoiceStatusPayload, WorkerArtifactLocations, WorkerEventPayload,
     WorkerLogDeltaPayload, WorkerTailRequest, WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent,
     WorkerWorktreeState, WorkspaceAccess, WorkspaceDoctorCheck, WorkspaceDoctorPayload,
     WorkspaceDoctorRequest, WorkspaceGrantId, WorkspaceGrantPayload, WorkspaceGrantRequest,
@@ -124,6 +126,84 @@ impl Default for AgentRuntimeConfig {
     }
 }
 
+/// Text-to-speech provider contract owned by the daemon runtime.
+pub trait TtsProvider: Send {
+    /// Stable provider identifier.
+    fn id(&self) -> &'static str;
+
+    /// Human-readable provider label.
+    fn label(&self) -> &'static str;
+
+    /// Curated voice IDs this provider can report without external calls.
+    fn supported_voices(&self) -> Vec<TtsVoice>;
+
+    /// Speaks or queues short speakable text.
+    fn speak(&mut self, request: TtsRequest<'_>) -> Result<TtsOutput, TtsError>;
+
+    /// Stops current speech where the provider supports cancellation.
+    fn stop(&mut self) -> Result<(), TtsError>;
+}
+
+/// Curated voice metadata exposed by TTS providers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtsVoice {
+    /// Provider voice identifier.
+    pub id: &'static str,
+    /// Display label.
+    pub label: &'static str,
+    /// BCP-47 locale.
+    pub locale: &'static str,
+    /// Display gender label from the provider catalog.
+    pub gender: &'static str,
+}
+
+/// TTS request after daemon speech policy has allowed the text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TtsRequest<'a> {
+    /// Redaction-checked speakable text.
+    pub text: &'a str,
+    /// Requested voice ID.
+    pub voice_id: &'a str,
+    /// Speaking rate adjustment.
+    pub rate: i16,
+    /// Pitch adjustment.
+    pub pitch: i16,
+    /// Volume adjustment.
+    pub volume: i16,
+}
+
+/// Successful TTS provider outcome.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtsOutput {
+    /// Provider that handled the request.
+    pub provider: String,
+    /// Voice selected for the request.
+    pub voice_id: String,
+    /// Character count accepted by the provider.
+    pub spoken_chars: usize,
+}
+
+/// Structured TTS provider error.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtsError {
+    /// Stable provider error code.
+    pub code: String,
+    /// Redacted human-readable message.
+    pub message: String,
+    /// Whether retrying may help.
+    pub retryable: bool,
+}
+
+impl TtsError {
+    fn new(code: impl Into<String>, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retryable,
+        }
+    }
+}
+
 /// Result of handling one client request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequestOutcome {
@@ -185,6 +265,7 @@ pub struct Runtime {
     pending_approvals: HashMap<ApprovalId, PendingApproval>,
     workspaces: HashMap<WorkspaceId, WorkspaceRecord>,
     workspace_grants: HashMap<WorkspaceGrantId, WorkspaceGrantRecord>,
+    last_voice_preflight: Option<VoicePreflightRecord>,
     next_tool: u64,
     next_approval: u64,
     next_workspace_grant: u64,
@@ -244,6 +325,7 @@ impl Runtime {
             pending_approvals: HashMap::new(),
             workspaces,
             workspace_grants,
+            last_voice_preflight: None,
             next_tool: 1,
             next_approval: 1,
             next_workspace_grant,
@@ -432,17 +514,24 @@ impl Runtime {
             ClientRequest::ApprovalRespond(request) => {
                 self.handle_approval_response(request_id, request)
             }
-            ClientRequest::VoicePreview(_) => {
-                let started = self.event(None, CadisEvent::VoicePreviewStarted(Default::default()));
-                let completed =
-                    self.event(None, CadisEvent::VoicePreviewCompleted(Default::default()));
-                self.accept(request_id, vec![started, completed])
+            ClientRequest::VoiceStatus(_) => {
+                let event = self.event(None, CadisEvent::VoiceStatusUpdated(self.voice_status()));
+                self.accept(request_id, vec![event])
             }
-            ClientRequest::VoiceStop(_) => {
-                let completed =
-                    self.event(None, CadisEvent::VoicePreviewCompleted(Default::default()));
-                self.accept(request_id, vec![completed])
+            ClientRequest::VoiceDoctor(request) => {
+                let event = self.event(
+                    None,
+                    CadisEvent::VoiceDoctorResponse(
+                        self.voice_doctor_payload(request.include_bridge),
+                    ),
+                );
+                self.accept(request_id, vec![event])
             }
+            ClientRequest::VoicePreflight(request) => {
+                self.handle_voice_preflight(request_id, request)
+            }
+            ClientRequest::VoicePreview(request) => self.handle_voice_preview(request_id, request),
+            ClientRequest::VoiceStop(_) => self.handle_voice_stop(request_id),
             ClientRequest::WorkerTail(request) => self.worker_tail(request_id, request),
             ClientRequest::SessionUnsubscribe(_) => self.reject(
                 request_id,
@@ -511,6 +600,7 @@ impl Runtime {
                     sessions: self.sessions.len(),
                     model_provider: self.options.model_provider.clone(),
                     uptime_seconds: self.started_at.elapsed().as_secs(),
+                    voice: self.voice_status(),
                 }),
             ),
             events: Vec::new(),
@@ -1083,18 +1173,18 @@ impl Runtime {
             return events;
         }
 
-        let agent_result = content.clone();
         events.push(self.session_event(
             context.session_id.clone(),
             CadisEvent::MessageCompleted(MessageCompletedPayload {
                 content_kind: context.content_kind,
-                content: Some(content),
+                content: Some(content.clone()),
                 agent_id: Some(context.agent_id.clone()),
                 agent_name: Some(context.agent_name.clone()),
                 model,
             }),
         ));
-        if let Some(event) = self.complete_agent_session(&context.agent_session_id, agent_result) {
+        events.extend(self.auto_speech_events(&context.session_id, context.content_kind, &content));
+        if let Some(event) = self.complete_agent_session(&context.agent_session_id, content) {
             events.push(event);
         }
         events.push(self.session_event(
@@ -1566,6 +1656,271 @@ impl Runtime {
         self.accept(request_id, vec![event])
     }
 
+    fn handle_voice_preflight(
+        &mut self,
+        request_id: RequestId,
+        request: VoicePreflightRequest,
+    ) -> RequestOutcome {
+        let checked_at = now_timestamp();
+        let checks = normalize_voice_checks(request.checks);
+        let status = voice_check_summary_status(&checks);
+        let summary = request
+            .summary
+            .map(|summary| redact(&summary))
+            .filter(|summary| !summary.trim().is_empty())
+            .unwrap_or_else(|| voice_checks_summary(&checks));
+        let surface = request
+            .surface
+            .map(|surface| redact(&surface))
+            .filter(|surface| !surface.trim().is_empty())
+            .unwrap_or_else(|| "local-bridge".to_owned());
+
+        self.last_voice_preflight = Some(VoicePreflightRecord {
+            surface,
+            status,
+            summary,
+            checked_at,
+            checks,
+        });
+
+        let status_event = self.event(None, CadisEvent::VoiceStatusUpdated(self.voice_status()));
+        let response_event = self.event(
+            None,
+            CadisEvent::VoicePreflightResponse(self.voice_doctor_payload(true)),
+        );
+        self.accept(request_id, vec![status_event, response_event])
+    }
+
+    fn handle_voice_preview(
+        &mut self,
+        request_id: RequestId,
+        request: VoicePreviewRequest,
+    ) -> RequestOutcome {
+        let prefs = VoiceRuntimePreferences::from_preview(&self.ui_preferences, request.prefs);
+        match speech_decision(
+            &prefs,
+            ContentKind::Chat,
+            &request.text,
+            SpeechMode::Preview,
+        ) {
+            SpeechDecision::Speak => {
+                let started = self.event(None, CadisEvent::VoicePreviewStarted(Default::default()));
+                match self.speak_with_provider(&prefs, request.text.trim()) {
+                    Ok(_) => {
+                        let completed =
+                            self.event(None, CadisEvent::VoicePreviewCompleted(Default::default()));
+                        self.accept(request_id, vec![started, completed])
+                    }
+                    Err(error) => {
+                        let failed = self.event(
+                            None,
+                            CadisEvent::VoicePreviewFailed(ErrorPayload {
+                                code: error.code,
+                                message: error.message,
+                                retryable: error.retryable,
+                            }),
+                        );
+                        self.accept(request_id, vec![started, failed])
+                    }
+                }
+            }
+            SpeechDecision::Blocked(reason) | SpeechDecision::RequiresSummary(reason) => {
+                let failed = self.event(
+                    None,
+                    CadisEvent::VoicePreviewFailed(ErrorPayload {
+                        code: reason.to_owned(),
+                        message: "voice preview text is not speakable by daemon policy".to_owned(),
+                        retryable: false,
+                    }),
+                );
+                self.accept(request_id, vec![failed])
+            }
+        }
+    }
+
+    fn handle_voice_stop(&mut self, request_id: RequestId) -> RequestOutcome {
+        let prefs = VoiceRuntimePreferences::from_options(&self.ui_preferences);
+        let mut provider = tts_provider_from_config(&prefs.provider);
+        let event = match provider.stop() {
+            Ok(()) => CadisEvent::VoicePreviewCompleted(Default::default()),
+            Err(error) => CadisEvent::VoicePreviewFailed(ErrorPayload {
+                code: error.code,
+                message: error.message,
+                retryable: error.retryable,
+            }),
+        };
+        let event = self.event(None, event);
+        self.accept(request_id, vec![event])
+    }
+
+    fn speak_with_provider(
+        &self,
+        prefs: &VoiceRuntimePreferences,
+        text: &str,
+    ) -> Result<TtsOutput, TtsError> {
+        let mut provider = tts_provider_from_config(&prefs.provider);
+        provider.speak(TtsRequest {
+            text,
+            voice_id: &prefs.voice_id,
+            rate: prefs.rate,
+            pitch: prefs.pitch,
+            volume: prefs.volume,
+        })
+    }
+
+    fn auto_speech_events(
+        &mut self,
+        session_id: &SessionId,
+        content_kind: ContentKind,
+        text: &str,
+    ) -> Vec<EventEnvelope> {
+        let prefs = VoiceRuntimePreferences::from_options(&self.ui_preferences);
+        if speech_decision(&prefs, content_kind, text, SpeechMode::AutoSpeak)
+            != SpeechDecision::Speak
+        {
+            return Vec::new();
+        }
+
+        match self.speak_with_provider(&prefs, text.trim()) {
+            Ok(_) => vec![
+                self.session_event(
+                    session_id.clone(),
+                    CadisEvent::VoiceStarted(Default::default()),
+                ),
+                self.session_event(
+                    session_id.clone(),
+                    CadisEvent::VoiceCompleted(Default::default()),
+                ),
+            ],
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn voice_status(&self) -> VoiceStatusPayload {
+        let prefs = VoiceRuntimePreferences::from_options(&self.ui_preferences);
+        let checks = self.voice_doctor_checks(true);
+        let state = if !prefs.enabled {
+            VoiceRuntimeState::Disabled
+        } else {
+            voice_runtime_state(&checks)
+        };
+
+        VoiceStatusPayload {
+            enabled: prefs.enabled,
+            state,
+            provider: prefs.provider,
+            voice_id: prefs.voice_id,
+            stt_language: prefs.stt_language,
+            max_spoken_chars: prefs.max_spoken_chars,
+            bridge: "hud-local".to_owned(),
+            last_preflight: self.last_voice_preflight.as_ref().map(|preflight| {
+                VoicePreflightSummary {
+                    surface: preflight.surface.clone(),
+                    status: preflight.status.clone(),
+                    summary: preflight.summary.clone(),
+                    checked_at: preflight.checked_at.clone(),
+                }
+            }),
+        }
+    }
+
+    fn voice_doctor_payload(&self, include_bridge: bool) -> VoiceDoctorPayload {
+        VoiceDoctorPayload {
+            status: self.voice_status(),
+            checks: self.voice_doctor_checks(include_bridge),
+        }
+    }
+
+    fn voice_doctor_checks(&self, include_bridge: bool) -> Vec<VoiceDoctorCheck> {
+        let prefs = VoiceRuntimePreferences::from_options(&self.ui_preferences);
+        let provider = tts_provider_from_config(&prefs.provider);
+        let voice_count = provider.supported_voices().len();
+        let mut checks = Vec::new();
+
+        checks.push(VoiceDoctorCheck {
+            name: "voice.config".to_owned(),
+            status: "ok".to_owned(),
+            message: if prefs.enabled {
+                "voice output is enabled".to_owned()
+            } else {
+                "voice output is disabled".to_owned()
+            },
+        });
+
+        checks.push(VoiceDoctorCheck {
+            name: "voice.provider".to_owned(),
+            status: if is_supported_voice_provider(&prefs.provider) {
+                "ok"
+            } else {
+                "error"
+            }
+            .to_owned(),
+            message: if is_supported_voice_provider(&prefs.provider) {
+                format!(
+                    "configured provider {} ({}, {} curated voices)",
+                    provider.id(),
+                    provider.label(),
+                    voice_count
+                )
+            } else {
+                format!(
+                    "unsupported provider {}; expected edge, openai, system, or stub",
+                    prefs.provider
+                )
+            },
+        });
+
+        checks.push(VoiceDoctorCheck {
+            name: "voice.tts_voice".to_owned(),
+            status: if prefs.voice_id.trim().is_empty() {
+                "error"
+            } else {
+                "ok"
+            }
+            .to_owned(),
+            message: if prefs.voice_id.trim().is_empty() {
+                "voice_id is empty".to_owned()
+            } else {
+                format!("configured voice {}", prefs.voice_id)
+            },
+        });
+
+        checks.push(VoiceDoctorCheck {
+            name: "voice.stt_language".to_owned(),
+            status: "ok".to_owned(),
+            message: format!("STT language {}", prefs.stt_language),
+        });
+
+        checks.push(VoiceDoctorCheck {
+            name: "voice.bridge".to_owned(),
+            status: "ok".to_owned(),
+            message: "HUD remains the local capture/playback bridge for microphone, MediaRecorder, WebAudio PCM fallback, and native audio playback".to_owned(),
+        });
+
+        if include_bridge {
+            if let Some(preflight) = &self.last_voice_preflight {
+                checks.push(VoiceDoctorCheck {
+                    name: "voice.preflight".to_owned(),
+                    status: preflight.status.clone(),
+                    message: format!(
+                        "{} from {} at {}",
+                        preflight.summary, preflight.surface, preflight.checked_at
+                    ),
+                });
+                checks.extend(preflight.checks.clone());
+            } else {
+                checks.push(VoiceDoctorCheck {
+                    name: "voice.preflight".to_owned(),
+                    status: "warn".to_owned(),
+                    message: "no local bridge preflight has been reported; run HUD voice doctor"
+                        .to_owned(),
+                });
+            }
+        }
+
+        checks
+    }
+
     fn agent_prompt(&self, agent_id: &AgentId, content: &str) -> String {
         let Some(agent) = self.agents.get(agent_id) else {
             return content.to_owned();
@@ -1631,6 +1986,7 @@ impl Runtime {
                     preferences: self.ui_preferences.clone(),
                 }),
             ),
+            self.event(None, CadisEvent::VoiceStatusUpdated(self.voice_status())),
         ];
 
         for (session_id, session) in self.session_records_sorted() {
@@ -2994,6 +3350,315 @@ struct PendingApproval {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct VoicePreflightRecord {
+    surface: String,
+    status: String,
+    summary: String,
+    checked_at: Timestamp,
+    checks: Vec<VoiceDoctorCheck>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VoiceRuntimePreferences {
+    enabled: bool,
+    provider: String,
+    voice_id: String,
+    stt_language: String,
+    rate: i16,
+    pitch: i16,
+    volume: i16,
+    auto_speak: bool,
+    max_spoken_chars: usize,
+}
+
+impl VoiceRuntimePreferences {
+    fn from_options(options: &serde_json::Value) -> Self {
+        let voice = options.get("voice").and_then(serde_json::Value::as_object);
+
+        Self {
+            enabled: voice
+                .and_then(|voice| voice.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            provider: voice
+                .and_then(|voice| voice.get("provider"))
+                .and_then(serde_json::Value::as_str)
+                .map(normalize_voice_config_string)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "edge".to_owned()),
+            voice_id: voice
+                .and_then(|voice| voice.get("voice_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(normalize_voice_config_string)
+                .unwrap_or_else(|| "id-ID-GadisNeural".to_owned()),
+            stt_language: voice
+                .and_then(|voice| voice.get("stt_language"))
+                .and_then(serde_json::Value::as_str)
+                .map(normalize_voice_config_string)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "auto".to_owned()),
+            rate: voice
+                .and_then(|voice| voice.get("rate"))
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i16::try_from(value).ok())
+                .map(clamp_voice_adjustment)
+                .unwrap_or_default(),
+            pitch: voice
+                .and_then(|voice| voice.get("pitch"))
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i16::try_from(value).ok())
+                .map(clamp_voice_adjustment)
+                .unwrap_or_default(),
+            volume: voice
+                .and_then(|voice| voice.get("volume"))
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i16::try_from(value).ok())
+                .map(clamp_voice_adjustment)
+                .unwrap_or_default(),
+            auto_speak: voice
+                .and_then(|voice| voice.get("auto_speak"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            max_spoken_chars: voice
+                .and_then(|voice| voice.get("max_spoken_chars"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(800),
+        }
+    }
+
+    fn from_preview(options: &serde_json::Value, prefs: Option<VoicePreferences>) -> Self {
+        let mut runtime_prefs = Self::from_options(options);
+        if let Some(prefs) = prefs {
+            runtime_prefs.voice_id = normalize_voice_config_string(&prefs.voice_id);
+            runtime_prefs.rate = clamp_voice_adjustment(prefs.rate);
+            runtime_prefs.pitch = clamp_voice_adjustment(prefs.pitch);
+            runtime_prefs.volume = clamp_voice_adjustment(prefs.volume);
+        }
+        runtime_prefs
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TtsProviderKind {
+    Edge,
+    OpenAi,
+    System,
+    Stub,
+    Unsupported,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StubbedTtsProvider {
+    kind: TtsProviderKind,
+    configured_id: String,
+}
+
+impl StubbedTtsProvider {
+    fn new(provider: &str) -> Self {
+        Self {
+            kind: tts_provider_kind(provider),
+            configured_id: normalize_voice_config_string(provider),
+        }
+    }
+}
+
+impl TtsProvider for StubbedTtsProvider {
+    fn id(&self) -> &'static str {
+        match self.kind {
+            TtsProviderKind::Edge => "edge",
+            TtsProviderKind::OpenAi => "openai",
+            TtsProviderKind::System => "system",
+            TtsProviderKind::Stub => "stub",
+            TtsProviderKind::Unsupported => "unsupported",
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self.kind {
+            TtsProviderKind::Edge => "Edge TTS daemon stub",
+            TtsProviderKind::OpenAi => "OpenAI TTS daemon stub",
+            TtsProviderKind::System => "System speech daemon stub",
+            TtsProviderKind::Stub => "Deterministic test TTS stub",
+            TtsProviderKind::Unsupported => "Unsupported TTS provider",
+        }
+    }
+
+    fn supported_voices(&self) -> Vec<TtsVoice> {
+        curated_tts_voices()
+    }
+
+    fn speak(&mut self, request: TtsRequest<'_>) -> Result<TtsOutput, TtsError> {
+        if self.kind == TtsProviderKind::Unsupported {
+            return Err(TtsError::new(
+                "unsupported_tts_provider",
+                format!("unsupported TTS provider '{}'", self.configured_id),
+                false,
+            ));
+        }
+        Ok(TtsOutput {
+            provider: self.id().to_owned(),
+            voice_id: request.voice_id.to_owned(),
+            spoken_chars: request.text.chars().count(),
+        })
+    }
+
+    fn stop(&mut self) -> Result<(), TtsError> {
+        if self.kind == TtsProviderKind::Unsupported {
+            return Err(TtsError::new(
+                "unsupported_tts_provider",
+                format!("unsupported TTS provider '{}'", self.configured_id),
+                false,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn tts_provider_from_config(provider: &str) -> Box<dyn TtsProvider> {
+    Box::new(StubbedTtsProvider::new(provider))
+}
+
+fn tts_provider_kind(provider: &str) -> TtsProviderKind {
+    match provider {
+        "edge" => TtsProviderKind::Edge,
+        "openai" => TtsProviderKind::OpenAi,
+        "system" => TtsProviderKind::System,
+        "stub" => TtsProviderKind::Stub,
+        _ => TtsProviderKind::Unsupported,
+    }
+}
+
+fn curated_tts_voices() -> Vec<TtsVoice> {
+    vec![
+        TtsVoice {
+            id: "id-ID-ArdiNeural",
+            label: "Ardi (Indonesian, Male)",
+            locale: "id-ID",
+            gender: "Male",
+        },
+        TtsVoice {
+            id: "id-ID-GadisNeural",
+            label: "Gadis (Indonesian, Female)",
+            locale: "id-ID",
+            gender: "Female",
+        },
+        TtsVoice {
+            id: "ms-MY-OsmanNeural",
+            label: "Osman (Malay, Male)",
+            locale: "ms-MY",
+            gender: "Male",
+        },
+        TtsVoice {
+            id: "ms-MY-YasminNeural",
+            label: "Yasmin (Malay, Female)",
+            locale: "ms-MY",
+            gender: "Female",
+        },
+        TtsVoice {
+            id: "en-US-AvaNeural",
+            label: "Ava (US, Female)",
+            locale: "en-US",
+            gender: "Female",
+        },
+        TtsVoice {
+            id: "en-US-AndrewNeural",
+            label: "Andrew (US, Male)",
+            locale: "en-US",
+            gender: "Male",
+        },
+        TtsVoice {
+            id: "en-US-EmmaNeural",
+            label: "Emma (US, Female)",
+            locale: "en-US",
+            gender: "Female",
+        },
+        TtsVoice {
+            id: "en-US-BrianNeural",
+            label: "Brian (US, Male)",
+            locale: "en-US",
+            gender: "Male",
+        },
+        TtsVoice {
+            id: "en-GB-SoniaNeural",
+            label: "Sonia (GB, Female)",
+            locale: "en-GB",
+            gender: "Female",
+        },
+        TtsVoice {
+            id: "en-GB-RyanNeural",
+            label: "Ryan (GB, Male)",
+            locale: "en-GB",
+            gender: "Male",
+        },
+    ]
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SpeechMode {
+    AutoSpeak,
+    Preview,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SpeechDecision {
+    Speak,
+    Blocked(&'static str),
+    RequiresSummary(&'static str),
+}
+
+fn speech_decision(
+    prefs: &VoiceRuntimePreferences,
+    content_kind: ContentKind,
+    text: &str,
+    mode: SpeechMode,
+) -> SpeechDecision {
+    let text = text.trim();
+    if text.is_empty() {
+        return SpeechDecision::Blocked("empty_text");
+    }
+
+    if mode == SpeechMode::AutoSpeak {
+        if !prefs.enabled {
+            return SpeechDecision::Blocked("voice_disabled");
+        }
+        if !prefs.auto_speak {
+            return SpeechDecision::Blocked("auto_speak_disabled");
+        }
+    }
+
+    match content_kind {
+        ContentKind::Code => return SpeechDecision::Blocked("code_not_speakable"),
+        ContentKind::Diff => return SpeechDecision::Blocked("diff_not_speakable"),
+        ContentKind::TerminalLog => return SpeechDecision::Blocked("terminal_log_not_speakable"),
+        ContentKind::TestResult if text.chars().count() > prefs.max_spoken_chars => {
+            return SpeechDecision::Blocked("long_tool_output_not_speakable");
+        }
+        ContentKind::TestResult if looks_like_raw_tool_output(text) => {
+            return SpeechDecision::Blocked("raw_tool_output_not_speakable");
+        }
+        _ => {}
+    }
+
+    if text.chars().count() > prefs.max_spoken_chars {
+        return SpeechDecision::RequiresSummary("content_exceeds_max_spoken_chars");
+    }
+
+    SpeechDecision::Speak
+}
+
+fn looks_like_raw_tool_output(text: &str) -> bool {
+    let line_count = text.lines().count();
+    line_count > 12
+        || text.contains("```")
+        || text.contains("diff --git")
+        || text.contains("thread '")
+        || text.contains("panicked at")
+        || text.contains("error[E")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct ToolRegistry {
     definitions: Vec<ToolDefinition>,
 }
@@ -3597,6 +4262,86 @@ fn input_usize(input: &serde_json::Value, key: &str) -> Option<usize> {
         .get(key)
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
+}
+
+fn normalize_voice_checks(checks: Vec<VoiceDoctorCheck>) -> Vec<VoiceDoctorCheck> {
+    checks
+        .into_iter()
+        .filter_map(|check| {
+            let name = check.name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            Some(VoiceDoctorCheck {
+                name: redact(name),
+                status: normalize_voice_check_status(&check.status),
+                message: redact(check.message.trim()),
+            })
+        })
+        .collect()
+}
+
+fn normalize_voice_check_status(status: &str) -> String {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "ok" | "pass" | "passed" | "ready" => "ok",
+        "warn" | "warning" | "degraded" | "unknown" => "warn",
+        "error" | "fail" | "failed" | "blocked" => "error",
+        _ => "warn",
+    }
+    .to_owned()
+}
+
+fn voice_check_summary_status(checks: &[VoiceDoctorCheck]) -> String {
+    if checks.iter().any(|check| check.status == "error") {
+        "error".to_owned()
+    } else if checks.is_empty() || checks.iter().any(|check| check.status == "warn") {
+        "warn".to_owned()
+    } else {
+        "ok".to_owned()
+    }
+}
+
+fn voice_checks_summary(checks: &[VoiceDoctorCheck]) -> String {
+    let errors = checks
+        .iter()
+        .filter(|check| check.status == "error")
+        .count();
+    let warnings = checks.iter().filter(|check| check.status == "warn").count();
+    if errors > 0 {
+        format!("{errors} blocking voice issue{}", plural(errors))
+    } else if warnings > 0 {
+        format!("{warnings} voice warning{}", plural(warnings))
+    } else if checks.is_empty() {
+        "no bridge checks reported".to_owned()
+    } else {
+        "voice bridge ready".to_owned()
+    }
+}
+
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+fn voice_runtime_state(checks: &[VoiceDoctorCheck]) -> VoiceRuntimeState {
+    if checks.iter().any(|check| check.status == "error") {
+        VoiceRuntimeState::Blocked
+    } else if checks.iter().any(|check| check.status == "warn") {
+        VoiceRuntimeState::Degraded
+    } else {
+        VoiceRuntimeState::Ready
+    }
+}
+
+fn normalize_voice_config_string(value: &str) -> String {
+    value.trim().to_owned()
+}
+
+fn is_supported_voice_provider(provider: &str) -> bool {
+    matches!(provider, "edge" | "openai" | "system" | "stub")
 }
 
 fn tool_workspace_summary(input: &serde_json::Value) -> Option<String> {
@@ -4220,6 +4965,10 @@ fn json_i64(value: &serde_json::Value, key: &str) -> Option<i64> {
     value.get(key).and_then(serde_json::Value::as_i64)
 }
 
+fn clamp_voice_adjustment(value: i16) -> i16 {
+    value.clamp(-50, 50)
+}
+
 fn merge_json(mut base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
     match (&mut base, patch) {
         (serde_json::Value::Object(base), serde_json::Value::Object(patch)) => {
@@ -4241,9 +4990,9 @@ mod tests {
         AgentModelSetRequest, AgentRenameRequest, AgentSpawnRequest, ApprovalResponseRequest,
         ClientId, ContentKind, EmptyPayload, EventSubscriptionRequest, EventsSnapshotRequest,
         MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest,
-        SessionSubscriptionRequest, SessionTargetRequest, ToolCallRequest, WorkerTailRequest,
-        WorkspaceAccess, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
-        WorkspaceRegisterRequest,
+        SessionSubscriptionRequest, SessionTargetRequest, ToolCallRequest, VoiceDoctorCheck,
+        VoiceDoctorRequest, VoicePreflightRequest, WorkerTailRequest, WorkspaceAccess,
+        WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceRegisterRequest,
     };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -4274,6 +5023,40 @@ mod tests {
             cadis_home,
             AgentSpawnLimits::default(),
             OrchestratorConfig::default(),
+        )
+    }
+
+    fn runtime_with_voice(enabled: bool, auto_speak: bool, max_spoken_chars: usize) -> Runtime {
+        Runtime::new(
+            RuntimeOptions {
+                cadis_home: test_workspace("cadis-home"),
+                profile_id: "default".to_owned(),
+                socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
+                model_provider: "echo".to_owned(),
+                ui_preferences: serde_json::json!({
+                    "voice": {
+                        "enabled": enabled,
+                        "provider": "stub",
+                        "voice_id": "id-ID-GadisNeural",
+                        "stt_language": "auto",
+                        "rate": 0,
+                        "pitch": 0,
+                        "volume": 0,
+                        "auto_speak": auto_speak,
+                        "max_spoken_chars": max_spoken_chars
+                    },
+                    "agent_spawn": {
+                        "max_depth": AgentSpawnLimits::default().max_depth,
+                        "max_children_per_parent": AgentSpawnLimits::default().max_children_per_parent,
+                        "max_total_agents": AgentSpawnLimits::default().max_total_agents
+                    },
+                    "orchestrator": {
+                        "worker_delegation_enabled": true,
+                        "default_worker_role": "Worker"
+                    }
+                }),
+            },
+            Box::<EchoProvider>::default(),
         )
     }
 
@@ -4446,6 +5229,23 @@ mod tests {
         ));
     }
 
+    fn send_message_with_kind(
+        runtime: &mut Runtime,
+        content_kind: ContentKind,
+        content: &str,
+    ) -> RequestOutcome {
+        runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_message"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: content.to_owned(),
+                content_kind,
+            }),
+        ))
+    }
+
     #[test]
     fn status_returns_typed_response() {
         let mut runtime = runtime();
@@ -4459,10 +5259,209 @@ mod tests {
             DaemonResponse::DaemonStatus(status) => {
                 assert_eq!(status.status, "ok");
                 assert_eq!(status.model_provider, "echo");
+                assert_eq!(status.voice.provider, "edge");
+                assert_eq!(status.voice.state, VoiceRuntimeState::Disabled);
             }
             other => panic!("unexpected response: {other:?}"),
         }
         assert!(outcome.events.is_empty());
+    }
+
+    #[test]
+    fn voice_doctor_reports_missing_local_bridge_preflight() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_voice_doctor"),
+            ClientId::from("cli_1"),
+            ClientRequest::VoiceDoctor(VoiceDoctorRequest::default()),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        let doctor = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::VoiceDoctorResponse(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("voice doctor event should be emitted");
+        assert!(doctor.checks.iter().any(|check| {
+            check.name == "voice.preflight"
+                && check.status == "warn"
+                && check.message.contains("no local bridge preflight")
+        }));
+    }
+
+    #[test]
+    fn voice_preflight_promotes_hud_checks_into_status() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_voice_preflight"),
+            ClientId::from("hud_1"),
+            ClientRequest::VoicePreflight(VoicePreflightRequest {
+                surface: Some("cadis-hud".to_owned()),
+                summary: Some("ready".to_owned()),
+                checks: vec![VoiceDoctorCheck {
+                    name: "microphone".to_owned(),
+                    status: "pass".to_owned(),
+                    message: "1 input visible".to_owned(),
+                }],
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        let status = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::VoiceStatusUpdated(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("voice status event should be emitted");
+        assert_eq!(status.last_preflight.as_ref().unwrap().surface, "cadis-hud");
+        assert_eq!(status.last_preflight.as_ref().unwrap().status, "ok");
+
+        let doctor = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::VoicePreflightResponse(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("voice preflight response should be emitted");
+        assert!(doctor.checks.iter().any(|check| {
+            check.name == "microphone" && check.status == "ok" && check.message == "1 input visible"
+        }));
+    }
+
+    #[test]
+    fn voice_provider_stubs_report_curated_catalog_without_external_calls() {
+        for provider_id in ["edge", "openai", "system", "stub"] {
+            let provider = tts_provider_from_config(provider_id);
+            assert_eq!(provider.id(), provider_id);
+            assert!(provider
+                .supported_voices()
+                .iter()
+                .any(|voice| voice.id == "id-ID-GadisNeural"));
+        }
+    }
+
+    #[test]
+    fn voice_preview_uses_daemon_provider_stub() {
+        let mut runtime = runtime_with_voice(false, false, 800);
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_voice_preview"),
+            ClientId::from("hud_1"),
+            ClientRequest::VoicePreview(VoicePreviewRequest {
+                text: "Halo, saya CADIS.".to_owned(),
+                prefs: Some(VoicePreferences {
+                    voice_id: "id-ID-GadisNeural".to_owned(),
+                    rate: 5,
+                    pitch: 0,
+                    volume: 0,
+                }),
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoicePreviewStarted(_))));
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoicePreviewCompleted(_))));
+    }
+
+    #[test]
+    fn auto_speak_speaks_short_final_chat_response() {
+        let mut runtime = runtime_with_voice(true, true, 10_000);
+        let outcome = send_message_with_kind(&mut runtime, ContentKind::Chat, "hello");
+
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoiceStarted(_))));
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoiceCompleted(_))));
+    }
+
+    #[test]
+    fn speech_policy_blocks_code_diff_and_terminal_log() {
+        for content_kind in [
+            ContentKind::Code,
+            ContentKind::Diff,
+            ContentKind::TerminalLog,
+        ] {
+            let mut runtime = runtime_with_voice(true, true, 10_000);
+            let outcome = send_message_with_kind(&mut runtime, content_kind, "unsafe to speak");
+
+            assert!(outcome
+                .events
+                .iter()
+                .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
+            assert!(!outcome
+                .events
+                .iter()
+                .any(|event| matches!(event.event, CadisEvent::VoiceStarted(_))));
+            assert!(!outcome
+                .events
+                .iter()
+                .any(|event| matches!(event.event, CadisEvent::VoiceCompleted(_))));
+        }
+    }
+
+    #[test]
+    fn speech_policy_blocks_long_tool_output() {
+        let prefs = VoiceRuntimePreferences {
+            enabled: true,
+            provider: "stub".to_owned(),
+            voice_id: "id-ID-GadisNeural".to_owned(),
+            stt_language: "auto".to_owned(),
+            rate: 0,
+            pitch: 0,
+            volume: 0,
+            auto_speak: true,
+            max_spoken_chars: 40,
+        };
+        let output = "running 42 tests\n".repeat(12);
+
+        assert_eq!(
+            speech_decision(
+                &prefs,
+                ContentKind::TestResult,
+                &output,
+                SpeechMode::AutoSpeak
+            ),
+            SpeechDecision::Blocked("long_tool_output_not_speakable")
+        );
+
+        let mut runtime = runtime_with_voice(true, true, 40);
+        let outcome = send_message_with_kind(&mut runtime, ContentKind::TestResult, &output);
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoiceStarted(_))));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::VoiceCompleted(_))));
     }
 
     #[test]

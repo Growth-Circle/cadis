@@ -1033,6 +1033,10 @@ fn print_check(config: &CadisConfig, socket_path: &Path) {
     println!("ollama_endpoint: {}", config.model.ollama_endpoint);
     println!("openai_model: {}", config.model.openai_model);
     println!("openai_base_url: {}", redact(&config.model.openai_base_url));
+    println!("voice_enabled: {}", config.voice.enabled);
+    println!("voice_provider: {}", config.voice.provider);
+    println!("voice_id: {}", config.voice.voice_id);
+    println!("voice_stt_language: {}", config.voice.stt_language);
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

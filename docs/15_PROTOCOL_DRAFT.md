@@ -99,6 +99,9 @@ worker.tail
 models.list
 ui.preferences.get
 ui.preferences.set
+voice.status
+voice.doctor
+voice.preflight
 voice.preview
 voice.stop
 config.reload
@@ -278,7 +281,16 @@ daemon.status.response
   "socket_path": "/run/user/1000/cadis/cadisd.sock",
   "sessions": 0,
   "model_provider": "auto",
-  "uptime_seconds": 3
+  "uptime_seconds": 3,
+  "voice": {
+    "enabled": false,
+    "state": "disabled",
+    "provider": "edge",
+    "voice_id": "id-ID-GadisNeural",
+    "stt_language": "auto",
+    "max_spoken_chars": 800,
+    "bridge": "hud-local"
+  }
 }
 ```
 
@@ -312,6 +324,9 @@ workspace.grant.revoked
 workspace.doctor.response
 models.list.response
 ui.preferences.updated
+voice.status.updated
+voice.doctor.response
+voice.preflight.response
 orchestrator.route
 tool.requested
 tool.started
@@ -683,6 +698,53 @@ Implicit model-driven spawning is reserved for a later runtime track.
   }
 }
 ```
+
+### `voice.status`, `voice.doctor`, and `voice.preflight`
+
+`voice.status` returns the daemon-visible voice state as a
+`voice.status.updated` event. `voice.doctor` returns `voice.doctor.response`
+with daemon checks plus the last local bridge preflight when one has been
+reported.
+
+The daemon remains the owner of voice preferences and policy state. HUD/Tauri
+remains the local capture/playback bridge for microphone permissions,
+`MediaRecorder`, WebAudio PCM fallback, whisper execution, and native audio
+playback.
+
+Supported daemon-visible TTS provider IDs are `edge`, `openai`, and `system`.
+The `stub` provider is available for deterministic tests. In this slice all
+provider implementations are daemon-local stubs: they validate policy and emit
+voice lifecycle events without calling external APIs or reading secrets.
+
+```json
+{
+  "type": "voice.preflight",
+  "surface": "cadis-hud",
+  "summary": "ready",
+  "checks": [
+    {
+      "name": "microphone",
+      "status": "ok",
+      "message": "1 input visible"
+    },
+    {
+      "name": "webaudio.pcm_fallback",
+      "status": "ok",
+      "message": "PCM fallback available when MediaRecorder emits zero chunks"
+    }
+  ]
+}
+```
+
+The daemon applies speech policy before provider dispatch. Final assistant
+messages may emit `voice.started` and `voice.completed` only after
+`message.completed`, only when `enabled` and `auto_speak` are true, and only for
+speakable content. Code, diffs, terminal logs, and long raw tool or test output
+must not produce voice playback events.
+
+`status` values are `ok`, `warn`, or `error`. The daemon also accepts HUD-local
+aliases such as `pass` and `fail` and normalizes them before emitting
+`voice.preflight.response`.
 
 ### `voice.preview`
 
