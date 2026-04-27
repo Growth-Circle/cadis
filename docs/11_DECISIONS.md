@@ -275,9 +275,62 @@ Consequence:
 - Generated or curated project media defaults to `<project>/.cadis/media/` with
   manifests and without secrets or raw transcripts.
 - Current code implements the first baseline for default profile initialization,
-  persistent workspace registry/grants, broad-root rejection, and safe-read grant
-  enforcement. Agent homes, worker worktree creation, checkpoint rollback, and
-  mutating-tool enforcement remain future work.
+  persistent workspace registry/grants, broad-root rejection, safe-read grant
+  enforcement, and session-bound worker worktree creation. Agent homes,
+  checkpoint rollback, worker cleanup, and mutating-tool enforcement remain
+  future work.
+
+### ADR-016: Approved Track D tool execution is daemon-revalidated
+
+Status: Accepted.
+
+Decision: Approval is authorization to attempt a risky tool action, not a
+client-side execution grant. After `approval.respond` approves a pending tool,
+`cadisd` must revalidate the request before execution: approval state, expiry,
+workspace grant, normalized input, denied paths, secret-access posture, current
+session/worker state, and the registered tool contract.
+
+Reason:
+
+- Approvals can be resolved minutes after the original request and after
+  workspace, policy, or session state changed.
+- Clients must never turn approval into local shell, patch, or git execution.
+- Worker patch application must preserve the parent checkout and remain
+  reviewable.
+- Secret access and denied paths need a final daemon-side fail-closed check,
+  not only UI warning text.
+
+Execution rules:
+
+- `shell.run` executes only inside a registered workspace or CADIS-owned worker
+  worktree with an active `exec` or `admin` grant, filtered environment, bounded
+  stdout/stderr, timeout, cancellation handling, and no implicit secret
+  injection.
+- `file.patch` applies only to daemon-normalized workspace-relative paths, must
+  preview affected files before approval, must fail closed on context mismatch,
+  symlink escape, denied path, or concurrent user edits, and must write
+  atomically where practical.
+- Secret access is denied by default. A tool that may read secrets must require
+  explicit policy support and approval metadata before any secret-bearing input,
+  environment value, file content, or output can cross the tool boundary.
+- Approved worker patches flow through Track D as a new `file.patch` or future
+  patch-apply tool call using the worker artifact as input; worker completion
+  alone does not modify the parent workspace.
+- Timeout emits a terminal failed result with timeout metadata. Cancellation
+  emits the protocol terminal cancellation path once that event is implemented;
+  until then, async tool cancellation remains pending and must not be marked
+  complete.
+
+Consequence:
+
+- The current implementation may persist approvals and fail closed after
+  approval for risky placeholders. That is correct until the `shell.run` and
+  `file.patch` execution backends implement the revalidation and lifecycle
+  rules above.
+- Worker cleanup, patch apply, and command/test execution must stay separate
+  approval-gated flows.
+- Protocol and standards docs must continue to separate implemented safe-read
+  tools from target approved execution semantics.
 
 ## Pending Decisions
 

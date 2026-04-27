@@ -490,7 +490,7 @@ Removes or updates approval card.
 }
 ```
 
-### `worker.started` / `worker.log.delta` / `worker.completed`
+### `worker.started` / `worker.log.delta` / `worker.completed` / `worker.failed` / `worker.cancelled`
 
 Updates worker tree and optional transient worker card.
 
@@ -508,12 +508,12 @@ Updates worker tree and optional transient worker card.
 ```
 
 `worker.log.delta` carries `worker_id`, `delta`, and optional `agent_id` /
-`parent_agent_id`. `worker.completed` carries the same metadata plus optional
-`summary`. `worker.failed` and `worker.cancelled`, when emitted by later daemon
-phases, must flow through the same reducer. `worker.tail` returns recent
-daemon-owned log lines as `worker.log.delta` events for an existing worker;
-clients should apply those events through the same worker reducer used for live
-updates.
+`parent_agent_id`. Terminal worker events carry the same metadata plus optional
+`summary`; `worker.failed` may include `error_code` and redacted `error`, while
+`worker.cancelled` may include `cancellation_requested_at`. `worker.tail` returns
+recent daemon-owned log lines as `worker.log.delta` events for an existing
+worker; clients should apply those events through the same worker reducer used
+for live updates.
 
 HUD worker progress is derived from daemon events only. The worker tree may
 combine `agent.session.*` progress (`steps_used` / `budget_steps`) with

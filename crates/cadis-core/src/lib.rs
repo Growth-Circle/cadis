@@ -403,7 +403,15 @@ impl Runtime {
             }
             ClientRequest::SessionCancel(request) => {
                 if self.sessions.remove(&request.session_id).is_some() {
-                    let mut events = self.cancel_agent_sessions_for_session(&request.session_id);
+                    let cancellation_requested_at = now_timestamp();
+                    let mut events = self.cancel_agent_sessions_for_session(
+                        &request.session_id,
+                        cancellation_requested_at.clone(),
+                    );
+                    events.extend(self.cancel_workers_for_session(
+                        &request.session_id,
+                        cancellation_requested_at,
+                    ));
                     let _ = self
                         .state_store
                         .remove_session_metadata(&request.session_id);
@@ -1214,9 +1222,9 @@ impl Runtime {
                 }),
             ));
             if let Some(worker) = &context.worker {
-                events.extend(self.complete_worker(
+                events.extend(self.fail_worker(
                     &worker.worker_id,
-                    "failed",
+                    "agent_timeout",
                     error_message.clone(),
                 ));
             }
@@ -1310,7 +1318,7 @@ impl Runtime {
             }),
         ));
         if let Some(worker) = &context.worker {
-            events.extend(self.complete_worker(&worker.worker_id, "failed", error_message.clone()));
+            events.extend(self.fail_worker(&worker.worker_id, error.code(), error_message.clone()));
         }
         events.push(self.session_event(
             context.session_id,
@@ -2101,13 +2109,8 @@ impl Runtime {
 
         for worker in self.worker_records_sorted() {
             let session_id = worker.session_id.clone();
-            let is_terminal = worker.is_terminal();
             let payload = worker.event_payload();
-            let event = if is_terminal {
-                CadisEvent::WorkerCompleted(payload)
-            } else {
-                CadisEvent::WorkerStarted(payload)
-            };
+            let event = worker_lifecycle_event(payload);
             events.push(self.session_event(session_id, event));
         }
 
@@ -2255,8 +2258,12 @@ impl Runtime {
             .is_some_and(|record| record.status == AgentSessionStatus::Cancelled)
     }
 
-    fn cancel_agent_sessions_for_session(&mut self, session_id: &SessionId) -> Vec<EventEnvelope> {
-        let agent_session_ids = self
+    fn cancel_agent_sessions_for_session(
+        &mut self,
+        session_id: &SessionId,
+        cancellation_requested_at: Timestamp,
+    ) -> Vec<EventEnvelope> {
+        let mut agent_session_ids = self
             .agent_sessions
             .iter()
             .filter(|(_, record)| {
@@ -2264,7 +2271,7 @@ impl Runtime {
             })
             .map(|(agent_session_id, _)| agent_session_id.clone())
             .collect::<Vec<_>>();
-        let cancellation_requested_at = now_timestamp();
+        agent_session_ids.sort();
 
         let mut events = Vec::new();
         for agent_session_id in agent_session_ids {
@@ -2298,6 +2305,26 @@ impl Runtime {
                     task: Some("session cancelled".to_owned()),
                 }),
             ));
+        }
+        events
+    }
+
+    fn cancel_workers_for_session(
+        &mut self,
+        session_id: &SessionId,
+        cancellation_requested_at: Timestamp,
+    ) -> Vec<EventEnvelope> {
+        let mut worker_ids = self
+            .workers
+            .iter()
+            .filter(|(_, record)| &record.session_id == session_id && !record.is_terminal())
+            .map(|(worker_id, _)| worker_id.clone())
+            .collect::<Vec<_>>();
+        worker_ids.sort();
+
+        let mut events = Vec::new();
+        for worker_id in worker_ids {
+            events.extend(self.cancel_worker(&worker_id, cancellation_requested_at.clone()));
         }
         events
     }
@@ -2336,16 +2363,84 @@ impl Runtime {
         status: &str,
         summary: String,
     ) -> Vec<EventEnvelope> {
+        self.finish_worker(
+            worker_id,
+            status,
+            summary,
+            WorkerFinishOptions {
+                error_code: None,
+                error: None,
+                cancellation_requested_at: None,
+                write_artifacts: true,
+            },
+        )
+    }
+
+    fn fail_worker(
+        &mut self,
+        worker_id: &str,
+        error_code: &str,
+        error_message: String,
+    ) -> Vec<EventEnvelope> {
+        self.finish_worker(
+            worker_id,
+            "failed",
+            error_message.clone(),
+            WorkerFinishOptions {
+                error_code: Some(error_code.to_owned()),
+                error: Some(error_message),
+                cancellation_requested_at: None,
+                write_artifacts: true,
+            },
+        )
+    }
+
+    fn cancel_worker(
+        &mut self,
+        worker_id: &str,
+        cancellation_requested_at: Timestamp,
+    ) -> Vec<EventEnvelope> {
+        let reason = "session was cancelled".to_owned();
+        self.finish_worker(
+            worker_id,
+            "cancelled",
+            reason.clone(),
+            WorkerFinishOptions {
+                error_code: Some("session_cancelled".to_owned()),
+                error: Some(reason),
+                cancellation_requested_at: Some(cancellation_requested_at),
+                write_artifacts: false,
+            },
+        )
+    }
+
+    fn finish_worker(
+        &mut self,
+        worker_id: &str,
+        status: &str,
+        summary: String,
+        options: WorkerFinishOptions,
+    ) -> Vec<EventEnvelope> {
         let mut events = Vec::new();
         if let Some(event) = self.append_worker_log(worker_id, format!("{status}: {summary}\n")) {
             events.push(event);
         }
-        for line in self.write_worker_artifacts(worker_id, status, &summary) {
-            if let Some(event) = self.append_worker_log(worker_id, line) {
-                events.push(event);
+        if options.write_artifacts {
+            for line in self.write_worker_artifacts(worker_id, status, &summary) {
+                if let Some(event) = self.append_worker_log(worker_id, line) {
+                    events.push(event);
+                }
             }
         }
-        if let Some(event) = self.update_worker_status(worker_id, status, Some(summary)) {
+        self.plan_worker_terminal_cleanup(worker_id, status);
+        if let Some(event) = self.update_worker_status(
+            worker_id,
+            status,
+            Some(summary),
+            options.error_code,
+            options.error,
+            options.cancellation_requested_at,
+        ) {
             events.push(event);
         }
         events
@@ -2361,6 +2456,16 @@ impl Runtime {
             return Vec::new();
         };
         write_worker_artifacts(worker, status, summary)
+    }
+
+    fn plan_worker_terminal_cleanup(&mut self, worker_id: &str, status: &str) {
+        if !worker_status_is_terminal(status) {
+            return;
+        }
+        let Some(worker) = self.workers.get_mut(worker_id) else {
+            return;
+        };
+        plan_worker_terminal_worktree(worker, status);
     }
 
     fn append_worker_log(
@@ -2391,19 +2496,25 @@ impl Runtime {
         worker_id: &str,
         status: &str,
         summary: Option<String>,
+        error_code: Option<String>,
+        error: Option<String>,
+        cancellation_requested_at: Option<Timestamp>,
     ) -> Option<EventEnvelope> {
         let (session_id, payload) = {
             let worker = self.workers.get_mut(worker_id)?;
             worker.status = status.to_owned();
             if let Some(summary) = summary {
-                worker.summary = Some(summary);
+                worker.summary = Some(redact(&summary));
             }
+            worker.error_code = error_code;
+            worker.error = error.map(|error| redact(&error));
+            worker.cancellation_requested_at = cancellation_requested_at;
             worker.updated_at = now_timestamp();
             (worker.session_id.clone(), worker.event_payload())
         };
         let _ = self.persist_worker_record(worker_id);
 
-        Some(self.session_event(session_id, CadisEvent::WorkerCompleted(payload)))
+        Some(self.session_event(session_id, worker_lifecycle_event(payload)))
     }
 
     fn next_tool_call_id(&mut self) -> ToolCallId {
@@ -3853,10 +3964,21 @@ struct WorkerRecord {
     cli: Option<String>,
     cwd: Option<String>,
     summary: Option<String>,
+    error_code: Option<String>,
+    error: Option<String>,
+    cancellation_requested_at: Option<Timestamp>,
     worktree: Option<WorkerWorktreeIntent>,
     artifacts: Option<WorkerArtifactLocations>,
     updated_at: Timestamp,
     log_lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkerFinishOptions {
+    error_code: Option<String>,
+    error: Option<String>,
+    cancellation_requested_at: Option<Timestamp>,
+    write_artifacts: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -3869,6 +3991,9 @@ struct WorkerMetadata {
     cli: Option<String>,
     cwd: Option<String>,
     summary: Option<String>,
+    error_code: Option<String>,
+    error: Option<String>,
+    cancellation_requested_at: Option<Timestamp>,
     worktree: Option<WorkerWorktreeIntent>,
     artifacts: Option<WorkerArtifactLocations>,
     updated_at: Timestamp,
@@ -3889,6 +4014,9 @@ impl WorkerRecord {
             cli: None,
             cwd: None,
             summary: Some(worker.summary.clone()),
+            error_code: None,
+            error: None,
+            cancellation_requested_at: None,
             worktree: Some(worker.worktree.clone()),
             artifacts: Some(worker.artifacts.clone()),
             updated_at: now_timestamp(),
@@ -3905,6 +4033,9 @@ impl WorkerRecord {
             cli: self.cli.clone(),
             cwd: self.cwd.clone(),
             summary: self.summary.clone(),
+            error_code: self.error_code.clone(),
+            error: self.error.clone(),
+            cancellation_requested_at: self.cancellation_requested_at.clone(),
             worktree: self.worktree.clone(),
             artifacts: self.artifacts.clone(),
         }
@@ -3926,6 +4057,9 @@ impl WorkerMetadata {
             cli: record.cli.clone(),
             cwd: record.cwd.clone(),
             summary: record.summary.clone(),
+            error_code: record.error_code.clone(),
+            error: record.error.clone(),
+            cancellation_requested_at: record.cancellation_requested_at.clone(),
             worktree: record.worktree.clone(),
             artifacts: record.artifacts.clone(),
             updated_at: record.updated_at.clone(),
@@ -3945,6 +4079,9 @@ impl WorkerMetadata {
                 cli: self.cli,
                 cwd: self.cwd,
                 summary: self.summary,
+                error_code: self.error_code,
+                error: self.error,
+                cancellation_requested_at: self.cancellation_requested_at,
                 worktree: self.worktree,
                 artifacts: self.artifacts,
                 updated_at: self.updated_at,
@@ -4776,12 +4913,16 @@ fn reconcile_recovered_workers(
         }
 
         worker.status = "failed".to_owned();
-        worker.summary = Some(match worker.summary.take() {
+        let summary = match worker.summary.take() {
             Some(summary) if !summary.trim().is_empty() => {
                 format!("{summary} (marked failed during daemon recovery)")
             }
             _ => "Worker was marked failed during daemon recovery".to_owned(),
-        });
+        };
+        worker.summary = Some(summary.clone());
+        worker.error_code = Some("worker_recovered_stale".to_owned());
+        worker.error = Some(summary);
+        plan_worker_terminal_worktree(worker, "failed");
         worker.updated_at = now_timestamp();
 
         match state_store.write_worker_metadata(
@@ -4962,6 +5103,50 @@ fn worker_status_is_terminal(status: &str) -> bool {
         status,
         "completed" | "failed" | "cancelled" | "canceled" | "expired"
     )
+}
+
+fn worker_lifecycle_event(payload: WorkerEventPayload) -> CadisEvent {
+    match payload.status.as_deref().map(worker_lifecycle_event_kind) {
+        Some(WorkerLifecycleEventKind::Completed) => CadisEvent::WorkerCompleted(payload),
+        Some(WorkerLifecycleEventKind::Failed) => CadisEvent::WorkerFailed(payload),
+        Some(WorkerLifecycleEventKind::Cancelled) => CadisEvent::WorkerCancelled(payload),
+        Some(WorkerLifecycleEventKind::Started) | None => CadisEvent::WorkerStarted(payload),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerLifecycleEventKind {
+    Started,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+fn worker_lifecycle_event_kind(status: &str) -> WorkerLifecycleEventKind {
+    match status {
+        "completed" => WorkerLifecycleEventKind::Completed,
+        "cancelled" | "canceled" => WorkerLifecycleEventKind::Cancelled,
+        status if worker_status_is_terminal(status) => WorkerLifecycleEventKind::Failed,
+        _ => WorkerLifecycleEventKind::Started,
+    }
+}
+
+fn plan_worker_terminal_worktree(record: &mut WorkerRecord, status: &str) {
+    if !worker_status_is_terminal(status) {
+        return;
+    }
+    let Some(worktree) = &mut record.worktree else {
+        return;
+    };
+    if worktree.state != WorkerWorktreeState::Active {
+        return;
+    }
+    worktree.state = match worktree.cleanup_policy {
+        WorkerWorktreeCleanupPolicy::OnCompletion => WorkerWorktreeState::CleanupPending,
+        WorkerWorktreeCleanupPolicy::Explicit | WorkerWorktreeCleanupPolicy::AfterApply => {
+            WorkerWorktreeState::ReviewPending
+        }
+    };
 }
 
 fn load_workspace_registry(profile_home: &ProfileHome) -> HashMap<WorkspaceId, WorkspaceRecord> {
@@ -6303,12 +6488,6 @@ fn write_worker_artifacts(record: &mut WorkerRecord, status: &str, summary: &str
 
     if let Err(error) = write_artifact(&artifacts.memory_candidates, "") {
         logs.push(format!("memory-candidates artifact failed: {error}\n"));
-    }
-
-    if let Some(worktree) = &mut record.worktree {
-        if worker_status_is_terminal(status) && worktree.state == WorkerWorktreeState::Active {
-            worktree.state = WorkerWorktreeState::ReviewPending;
-        }
     }
 
     logs.into_iter().map(|line| redact(&line)).collect()
@@ -7883,6 +8062,9 @@ mod tests {
                     cli: None,
                     cwd: None,
                     summary: Some("stale worker".to_owned()),
+                    error_code: None,
+                    error: None,
+                    cancellation_requested_at: None,
                     worktree: None,
                     artifacts: None,
                     updated_at: now_timestamp(),
@@ -7908,9 +8090,10 @@ mod tests {
         assert!(snapshot.events.iter().any(|event| {
             matches!(
                 &event.event,
-                CadisEvent::WorkerCompleted(payload)
+                CadisEvent::WorkerFailed(payload)
                     if payload.worker_id == "worker_000007"
                         && payload.status.as_deref() == Some("failed")
+                        && payload.error_code.as_deref() == Some("worker_recovered_stale")
                         && payload.summary.as_deref().is_some_and(|summary| {
                             summary.contains("marked failed during daemon recovery")
                         })
@@ -7922,6 +8105,137 @@ mod tests {
             .expect("worker metadata should recover");
         assert_eq!(recovered.records.len(), 1);
         assert_eq!(recovered.records[0].metadata.status, "failed");
+        assert_eq!(
+            recovered.records[0].metadata.error_code.as_deref(),
+            Some("worker_recovered_stale")
+        );
+    }
+
+    #[test]
+    fn failed_worker_generation_emits_worker_failed_event() {
+        let mut runtime = runtime();
+        let pending = runtime
+            .begin_message_request(RequestEnvelope::new(
+                RequestId::from("req_worker_failure"),
+                ClientId::from("hud_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "/route @codex run focused tests".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ))
+            .expect("worker route should prepare model generation");
+        let worker_id = pending
+            .context
+            .worker
+            .as_ref()
+            .expect("route should create a worker")
+            .worker_id
+            .clone();
+
+        let events = runtime.fail_message_generation(
+            pending,
+            cadis_models::ModelError::with_code(
+                "provider_client_error",
+                "provider request failed",
+                true,
+            ),
+        );
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerFailed(payload)
+                    if payload.worker_id == worker_id
+                        && payload.status.as_deref() == Some("failed")
+                        && payload.error_code.as_deref() == Some("provider_client_error")
+                        && payload.error.as_deref() == Some("provider request failed")
+            )
+        }));
+    }
+
+    #[test]
+    fn session_cancel_marks_running_worker_cancelled_and_recovers_metadata() {
+        let cadis_home = test_workspace("cancelled-worker-home");
+        let mut runtime = runtime_with_home(cadis_home.clone());
+        let pending = runtime
+            .begin_message_request(RequestEnvelope::new(
+                RequestId::from("req_worker_cancel"),
+                ClientId::from("hud_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "/route @codex wait for cancellation".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ))
+            .expect("worker route should prepare model generation");
+        let session_id = pending.context.session_id.clone();
+        let worker_id = pending
+            .context
+            .worker
+            .as_ref()
+            .expect("route should create a worker")
+            .worker_id
+            .clone();
+
+        let cancel = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_cancel_worker_session"),
+            ClientId::from("hud_1"),
+            ClientRequest::SessionCancel(SessionTargetRequest { session_id }),
+        ));
+
+        assert!(matches!(
+            cancel.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(cancel.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCancelled(payload)
+                    if payload.worker_id == worker_id
+                        && payload.status.as_deref() == Some("cancelled")
+                        && payload.error_code.as_deref() == Some("session_cancelled")
+                        && payload.cancellation_requested_at.is_some()
+            )
+        }));
+
+        let final_events = runtime.fail_message_generation(
+            pending,
+            cadis_models::ModelError::cancelled("model request was cancelled"),
+        );
+        assert!(final_events.is_empty());
+
+        let state_store = StateStore::new(&CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        });
+        let recovered = state_store
+            .recover_worker_metadata::<WorkerMetadata>()
+            .expect("worker metadata should recover");
+        assert_eq!(recovered.records.len(), 1);
+        assert_eq!(recovered.records[0].metadata.status, "cancelled");
+        assert!(recovered.records[0]
+            .metadata
+            .cancellation_requested_at
+            .is_some());
+
+        let mut restarted = runtime_with_home(cadis_home);
+        let snapshot = restarted.handle_request(RequestEnvelope::new(
+            RequestId::from("req_cancelled_worker_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCancelled(payload)
+                    if payload.worker_id == worker_id
+                        && payload.status.as_deref() == Some("cancelled")
+                        && payload.cancellation_requested_at.is_some()
+            )
+        }));
     }
 
     #[test]

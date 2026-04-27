@@ -167,6 +167,10 @@
 - [ ] Implement `shell.run`.
 - [x] Implement `git.status`.
 - [x] Implement `git.diff`.
+- [ ] Add approved execution continuation after `approval.resolved(approved)`.
+- [ ] Revalidate workspace grants, denied paths, secret posture, and session/worker state before approved execution.
+- [ ] Add `shell.run` cwd, env filtering, stdout/stderr, exit code, timeout, and cancellation cleanup.
+- [ ] Add `file.patch` preview, context validation, atomic write, symlink escape, and concurrent-edit checks.
 - [ ] Add timeouts.
 - [ ] Add cancellation.
 - [x] Add tests for success and failure.
@@ -182,6 +186,8 @@
 - [x] Gate shell execution.
 - [ ] Gate outside-workspace writes.
 - [ ] Gate secret access.
+- [ ] Fail closed on secret-bearing files, env vars, config values, and command output unless explicit policy allows access.
+- [ ] Recheck approval expiry and policy immediately before approved execution.
 - [ ] Gate dangerous delete.
 - [ ] Add race condition tests.
 - [x] Add denial tests.
@@ -237,12 +243,15 @@
 - [x] Implement daemon worker registry.
 - [x] Implement `worker.tail`.
 - [x] Create git worktree for session-bound project workers.
+- [x] Add worker failed/cancelled event and metadata baseline.
 - [ ] Stream worker logs.
 - [ ] Add worker cancellation.
 - [x] Generate worker diff artifact.
 - [ ] Run tests in worker.
 - [ ] Request patch approval.
 - [ ] Apply approved patch.
+- [ ] Route worker patch application through Track D `file.patch` or a future patch-apply tool.
+- [ ] Keep worker cleanup separate from patch approval and require CADIS-owned worktree metadata.
 - [ ] Cleanup worktree.
 - [x] Add worker isolation tests for worktree creation and artifact output.
 
@@ -337,6 +346,11 @@
 - [x] Track D baseline: tool contract metadata, safe-read `file.read` and
   `file.search`, `git.status`, `git.diff`, workspace grants, approval
   summaries, approval persistence/recovery, and redaction boundaries.
+- [x] Track D docs/protocol alignment: approved execution semantics,
+  `shell.run` and `file.patch` boundaries, timeout/cancellation expectations,
+  denied paths, secret fail-closed behavior, and worker handoff sequence.
+- [ ] Track D implementation: approved `shell.run` and `file.patch` execution
+  after daemon-side revalidation.
 - [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
 - [x] Track E baseline: daemon-visible voice status/doctor/preflight, separated
   STT language and TTS voice settings, TTS provider stubs, and speech policy
@@ -355,6 +369,9 @@
 - [x] Track I baseline: daemon worker execution setup creates git worktrees,
   persists project-local worktree metadata, and writes profile-scoped worker
   artifacts for review.
+- [x] Track I event baseline: worker failed/cancelled events carry durable
+  failure, cancellation, and cleanup-planning metadata without parent checkout
+  patch application.
 
 ## 15.2 Workspace Architecture
 
