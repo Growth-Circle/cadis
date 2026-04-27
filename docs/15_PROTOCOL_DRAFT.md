@@ -197,11 +197,12 @@ Example:
 `tool.call` requests daemon-owned native tool execution. Tool calls must resolve
 a registered workspace and an active workspace grant before execution or
 approval flow proceeds. `agent_id` is optional; when present, it lets daemon tool
-execution satisfy agent-scoped workspace grants. The initial baseline supports
+execution satisfy agent-scoped workspace grants. The current baseline supports
 safe read-only execution for `file.read`, `file.search`, `git.status`, and
-`git.diff`; risky placeholders such as `shell.run`, `file.write`, and
-`file.patch` create an approval request after the workspace grant check and fail
-closed after approval until a later runtime implements the gated action.
+`git.diff`. `shell.run` and `file.patch` create an approval request after the
+workspace grant check, then execute only after approval and daemon-side
+revalidation. Other risky placeholders such as `file.write` still fail closed
+after approval until a later runtime implements the gated action.
 
 Example:
 
@@ -246,11 +247,14 @@ denied, secret access is not explicitly authorized, the session was cancelled,
 or the execution backend is unavailable, the daemon emits `approval.resolved`
 followed by `tool.failed`.
 
-Current v0.1 behavior for approved risky placeholders is
-`tool.failed.error.code = "tool_execution_blocked"`. Denied approvals use
-`approval_denied`; expired approvals use `approval_expired`. Async tool
-cancellation is still future work; until a typed `tool.cancelled` event lands in
-the protocol crate, cancellation must not be marked complete in the checklist.
+Current v0.1 behavior for approved risky placeholders without an execution
+backend is `tool.failed.error.code = "tool_execution_blocked"`. Denied
+approvals use `approval_denied`; expired approvals use `approval_expired`.
+Pending approvals recovered after daemon restart do not contain process-local
+execution context; approving them fails closed with `tool_execution_unavailable`.
+Async tool cancellation is still future work; until a typed `tool.cancelled`
+event lands in the protocol crate, cancellation must not be marked complete in
+the checklist.
 
 `shell.run` input must resolve to a registered workspace or CADIS-owned worker
 worktree before execution. The execution backend must use an explicit cwd,
@@ -258,9 +262,32 @@ filtered environment, bounded stdout/stderr, exit-code reporting, timeout, and
 cleanup on cancellation. It must not inject secrets implicitly.
 
 `file.patch` input must be previewable before approval and must apply only to
-daemon-normalized workspace-relative paths. The backend must fail closed on path
-traversal, symlink escape, denied path, mismatched context, or concurrent user
-edits. Patch writes should be atomic where practical.
+daemon-normalized workspace-relative paths. The current supported schema is a
+conservative structured patch:
+
+```json
+{ "workspace_id": "example-project", "path": "README.md", "old": "before", "new": "after" }
+```
+
+```json
+{ "workspace_id": "example-project", "path": "README.md", "content": "full file contents\n" }
+```
+
+```json
+{
+  "workspace_id": "example-project",
+  "operations": [
+    { "op": "replace", "path": "README.md", "old": "before", "new": "after" },
+    { "op": "write", "path": "notes.txt", "content": "new file contents\n" }
+  ]
+}
+```
+
+The backend fails closed on absolute paths, path traversal, symlink escape,
+protected workspace metadata paths such as `.git` and `.cadis`, secret-like paths
+such as `.env`, key files, token files, credential files, and replace-context
+mismatches. Unified diff application is reserved for a later patch backend.
+Patch writes should be atomic where practical.
 
 Worker integration uses the same protocol flow. Worker command/test execution
 runs inside the worker worktree only after Track D tool approval support exists.
@@ -624,10 +651,13 @@ tool.completed or tool.failed
 ```
 
 Safe-read tools emit `tool.requested`, `tool.started`, and then
-`tool.completed` or `tool.failed`. Approval-gated placeholders emit
-`tool.requested` and `approval.requested`; `approval.respond` emits
-`approval.resolved` and `tool.failed` because risky execution is intentionally
-blocked in this baseline.
+`tool.completed` or `tool.failed`. Approved `shell.run` and `file.patch` emit
+`tool.requested` and `approval.requested`; approved `approval.respond` emits
+`approval.resolved`, performs daemon-side revalidation, emits `tool.started`,
+and then emits `tool.completed` or `tool.failed`. Other approval-gated
+placeholders emit `tool.requested` and `approval.requested`; approved
+`approval.respond` emits `approval.resolved` and `tool.failed` because those
+risky execution backends are intentionally unavailable in this baseline.
 
 The approved execution target keeps the same ordering, but inserts daemon-side
 revalidation after `approval.resolved` and before `tool.started`. A successful
@@ -636,12 +666,15 @@ approved tool emits exactly one terminal event. Timeout is represented as
 typed terminal cancellation event once the protocol crate supports it.
 
 `tool.completed` may include a redacted structured `output` object. The current
-safe-read outputs are:
+tool outputs are:
 
 - `file.read`: `path`, `content`, `truncated`
 - `file.search`: `query`, `matches[]`, `truncated`
 - `git.status`: `cwd`, `status`
 - `git.diff`: `cwd`, `pathspec`, `diff`, `truncated`
+- `shell.run`: `cwd`, `exit_code`, `stdout`, `stderr`, truncation flags,
+  `timeout_ms`
+- `file.patch`: `schema`, `files[]`, `truncated`
 
 ## 8. Compatibility Rules
 
