@@ -103,6 +103,21 @@ cargo clippy -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p
 cargo test -p cadis-protocol -p cadis-policy -p cadis-models -p cadis-avatar --all-targets --all-features
 ```
 
+## 4.2 Secret Scan
+
+Before pushing public branches, run a redacted secret scan against both Git
+history and the current working tree:
+
+```bash
+gitleaks detect --source . --redact=100
+gitleaks detect --no-git --source . --redact=100
+```
+
+The first command scans committed history. The second command scans local files
+that are present in the checkout, including ignored build output, so findings in
+`target/`, `node_modules/`, or other ignored artifact directories must be
+triaged separately from tracked repository leaks.
+
 ## 5. Daemon Commands
 
 ```bash

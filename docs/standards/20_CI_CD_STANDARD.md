@@ -43,6 +43,7 @@ Baseline checks:
 - repository hygiene check
 - Markdown and documentation path check where tooling exists
 - no committed secrets
+- redacted `gitleaks detect --source .` scan before public release branches
 - no generated artifacts unless expected
 - no forbidden runtime defaults such as OpenClaw paths
 

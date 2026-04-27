@@ -28,6 +28,8 @@ private/
 .tokens/
 .codex/
 **/.codex/
+.claude/
+**/.claude/
 .openai/
 *.pem
 *.key
