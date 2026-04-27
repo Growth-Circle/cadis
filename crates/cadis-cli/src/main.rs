@@ -398,14 +398,41 @@ fn render_models(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error
             {
                 for model in models {
                     println!(
-                        "{}\t{}\t{}",
-                        model.provider, model.model, model.display_name
+                        "{}\t{}\t{}\t{}\t{}\t{}",
+                        model.provider,
+                        model.model,
+                        model_readiness_label(model.readiness),
+                        effective_model_label(
+                            model.effective_provider.as_deref(),
+                            model.effective_model.as_deref()
+                        ),
+                        if model.fallback { "fallback" } else { "real" },
+                        model.display_name
                     );
                 }
             }
         }
     }
     Ok(())
+}
+
+fn model_readiness_label(readiness: Option<cadis_protocol::ModelReadiness>) -> &'static str {
+    match readiness {
+        Some(cadis_protocol::ModelReadiness::Ready) => "ready",
+        Some(cadis_protocol::ModelReadiness::Fallback) => "fallback",
+        Some(cadis_protocol::ModelReadiness::RequiresConfiguration) => "requires_configuration",
+        Some(cadis_protocol::ModelReadiness::Unavailable) => "unavailable",
+        None => "unknown",
+    }
+}
+
+fn effective_model_label(provider: Option<&str>, model: Option<&str>) -> String {
+    match (provider, model) {
+        (Some(provider), Some(model)) => format!("{provider}/{model}"),
+        (Some(provider), None) => provider.to_owned(),
+        (None, Some(model)) => model.to_owned(),
+        (None, None) => "-".to_owned(),
+    }
 }
 
 fn render_agents(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {

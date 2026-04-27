@@ -89,9 +89,15 @@ The daemon maps provider events into CADIS session events such as `message.delta
 Streaming rules:
 
 - Preserve token order.
-- Providers that do not support native upstream streaming must use the shared
+- Providers must emit normalized events through the shared callback interface.
+  Providers that do not support native upstream streaming must use the same
   callback interface to emit structured simulated deltas from chunked output.
-- Support cancellation where the upstream API permits it.
+- The callback returns `ModelStreamControl::Continue` to accept more events or
+  `ModelStreamControl::Cancel` to request provider-boundary cancellation.
+- On callback cancellation, providers must stop emitting deltas, return a
+  non-retryable `model_cancelled` error, and emit `model.cancelled` when they
+  can resolve invocation metadata.
+- Support upstream cancellation where the provider transport permits it.
 - Convert provider-specific stop reasons to CADIS stop metadata.
 - Bound memory usage for long streams.
 - Surface partial output carefully when errors occur.

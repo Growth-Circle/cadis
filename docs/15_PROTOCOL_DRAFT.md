@@ -358,6 +358,16 @@ voice.completed
 {
   "models": [
     {
+      "provider": "auto",
+      "model": "llama3.2",
+      "display_name": "Auto (Ollama llama3.2, then local fallback)",
+      "capabilities": ["streaming", "local_fallback"],
+      "readiness": "fallback",
+      "effective_provider": "ollama",
+      "effective_model": "llama3.2",
+      "fallback": true
+    },
+    {
       "provider": "echo",
       "model": "cadis-local-fallback",
       "display_name": "CADIS local fallback",
@@ -373,9 +383,11 @@ voice.completed
 
 `readiness` is one of `ready`, `fallback`, `requires_configuration`, or
 `unavailable`. `fallback: true` means the entry is not a real model provider.
-For `auto`, CADIS reports the primary effective provider as `ollama` and marks
-the entry as fallback-capable because runtime requests can still fall back to
-`echo` if Ollama is not ready.
+For `auto`, CADIS reports the configured Ollama model as the primary effective
+model and marks the entry as fallback-capable because runtime requests can still
+fall back to `echo` if Ollama is not ready. `models.list` uses daemon config so
+clients can display the configured Ollama/OpenAI model IDs instead of generic
+placeholders.
 
 Model-backed `message.delta` and `message.completed` payloads may include a
 `model` object:
@@ -405,6 +417,25 @@ agent status events, then runs provider generation outside the runtime mutex.
 Providers with stream callbacks cause `message.delta` events to be fanned out
 as callbacks arrive; providers without native streaming still produce the same
 typed events after their blocking response returns.
+
+Model provider failures use the normal `ErrorPayload` shape on `session.failed`
+events:
+
+```json
+{
+  "code": "provider_unavailable",
+  "message": "Ollama request failed",
+  "retryable": true
+}
+```
+
+Clients should treat `code` and `retryable` as the machine-readable fields.
+Provider error messages are for display only and must be redacted before they
+reach protocol events or logs. Common Track B provider codes are
+`model_auth_missing`, `model_auth_failed`, `provider_client_error`,
+`provider_unavailable`, `provider_rate_limited`, `provider_http_error`,
+`model_not_found`, `model_request_rejected`, `provider_response_invalid`,
+`provider_response_empty`, and `codex_cli_*`.
 
 ## 5. Content Kind
 

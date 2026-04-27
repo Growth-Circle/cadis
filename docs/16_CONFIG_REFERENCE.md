@@ -303,11 +303,22 @@ that model where the provider supports model overrides. Message events include
 the effective provider and model used for the response.
 
 The `models.list` protocol response exposes conservative readiness metadata for
-clients. `readiness = "fallback"` and `fallback = true` identify entries such as
-`echo` or fallback-capable `auto` behavior so clients can distinguish a real
-provider from the local fallback. Providers that need a daemon, login, API key,
-or local service are reported as `requires_configuration` until CADIS has active
-provider probing.
+clients and uses the configured `ollama_model` and `openai_model` as
+provider/model IDs. `readiness = "fallback"` and `fallback = true` identify
+entries such as `echo` or fallback-capable `auto` behavior so clients can
+distinguish a real provider from the local fallback. `openai` is reported as
+`ready` only when an OpenAI API key is present in the daemon environment.
+Providers that need a daemon, login, API key, or local service are otherwise
+reported as `requires_configuration` until CADIS has active provider probing.
+
+Provider failures are surfaced through the normal `ErrorPayload` fields on
+`session.failed` events. Clients should key off the stable `code` and
+`retryable` fields instead of parsing the display message. Current provider
+codes include `model_auth_missing`, `model_auth_failed`,
+`provider_client_error`, `provider_unavailable`, `provider_rate_limited`,
+`provider_http_error`, `model_not_found`, `model_request_rejected`,
+`provider_response_invalid`, `provider_response_empty`, and `codex_cli_*`.
+Messages are redacted for client display and must not include provider keys.
 
 The OpenAI API key is not a config key. Do not put API keys, bearer tokens, or
 auth headers in `~/.cadis/config.toml`, examples, or logs.

@@ -63,6 +63,10 @@ Implemented in the first runnable baseline:
   grants.
 - Voice debug baseline: HUD-local mic doctor, WebAudio analyser telemetry, and
   WebAudio PCM fallback when WebKit `MediaRecorder` produces zero audio chunks.
+- Model readiness/routing baseline: `models.list` exposes configured
+  provider/model IDs, conservative readiness, effective provider/model metadata,
+  and fallback flags; `agent.model.set` selections are used by daemon provider
+  routing for message generation instead of remaining HUD-only state.
 
 Still pending:
 
@@ -78,6 +82,9 @@ Still pending:
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
   memory records, scoped retrieval, provenance ledger, candidate promotion, and
   memory capsules.
+- Native provider streaming for providers that support token streams directly;
+  the current provider trait can stream normalized events, but OpenAI/Ollama
+  still use non-streaming request paths.
 
 ## 2.2 Next Execution Plan
 
@@ -128,6 +135,9 @@ Tasks:
 - Route agent-selected model IDs into provider selection instead of treating
   `agent.model.set` as UI-only state.
 - Add streaming callback support for providers that can stream.
+- Provider-boundary cancellation is defined as callback `Cancel` control,
+  `model.cancelled`, and a non-retryable `model_cancelled` error; native
+  upstream cancellation still needs per-provider integration.
 - Keep echo provider available only as an explicit fallback state.
 
 Exit criteria:
