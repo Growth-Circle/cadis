@@ -91,6 +91,7 @@ export const mockCadisDaemonWorkerStream: MockCadisFrame[] = [
           root: "/home/user/.cadis/artifacts/workers/worker_mock_001",
           patch: "/home/user/.cadis/artifacts/workers/worker_mock_001/patch.diff",
           test_report: "/home/user/.cadis/artifacts/workers/worker_mock_001/test-report.json",
+          test_report_status: "passed",
           summary: "/home/user/.cadis/artifacts/workers/worker_mock_001/summary.md",
           changed_files: "/home/user/.cadis/artifacts/workers/worker_mock_001/changed-files.json",
           memory_candidates: "/home/user/.cadis/artifacts/workers/worker_mock_001/memory-candidates.jsonl",
