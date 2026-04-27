@@ -89,13 +89,18 @@ The repository already includes a meaningful desktop MVP foundation:
 - daemon-visible voice status/doctor/preflight with HUD-local Edge TTS
   playback and `whisper-cli` voice input bridges
 
-Planned work still includes production-grade mutating tool execution, full
-policy coverage, richer worker isolation, Telegram/mobile clients,
-daemon-owned production voice, and code work windows. The workspace
-architecture is partially implemented; real worker worktree creation,
-profile-scoped worker artifacts, and review-pending worker metadata are now in
-place. Checkpoint rollback, dedicated profile/agent doctor commands, and
-project media manifests remain next.
+Approved `shell.run` and structured `file.patch` execution now have a
+daemon-side baseline after approval plus workspace/input revalidation. Worker
+execution now creates isolated worktrees, runs a bounded daemon-owned validation
+command in the worker worktree, writes profile-scoped artifacts, exposes
+read-only `worker.result`, and records cleanup intent without deleting files.
+The HUD includes a read-only code work panel for worker status, artifact paths,
+and recent log tail. Planned work still includes production hardening for shell
+environment filtering, async tool cancellation, atomic patch writes, full policy
+coverage, configurable worker test execution, parent-checkout patch apply,
+worktree file removal, Telegram/mobile clients, daemon-owned production voice,
+checkpoint rollback, dedicated profile/agent doctor commands, and project media
+manifests.
 
 ## Platform support
 

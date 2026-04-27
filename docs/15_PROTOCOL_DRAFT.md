@@ -177,6 +177,15 @@ or `worker.failed`. Terminal worker events move active worktrees to
 and cleanup remain separate flows, and this cleanup slice records intent without
 removing files.
 
+The worker command baseline uses this same event shape. When a worker reaches
+completion, `cadisd` runs a bounded validation command with cwd inside the
+CADIS-owned worker worktree and records the redacted command report in bounded
+`worker.log.delta` summaries plus profile-scoped artifacts such as
+`summary.md`, `patch.diff`, `changed-files.json`, `test-report.json`, and
+`memory-candidates.jsonl`. HUD, Tauri, and code work panel clients must not
+spawn local shells, run tests, apply patches, or delete worktrees. Future
+configurable worker commands/tests must stay daemon-owned and policy-gated.
+
 Example:
 
 ```json
@@ -293,8 +302,10 @@ the checklist.
 
 `shell.run` input must resolve to a registered workspace or CADIS-owned worker
 worktree before execution. The execution backend must use an explicit cwd,
-filtered environment, bounded stdout/stderr, exit-code reporting, timeout, and
-cleanup on cancellation. It must not inject secrets implicitly.
+bounded stdout/stderr, exit-code reporting, timeout, and cleanup on
+cancellation. A minimal environment allowlist is required before broad worker
+command/test execution is considered complete; provider keys, auth tokens, SSH
+agent details, and CADIS secrets must not be passed implicitly.
 
 `file.patch` input must be previewable before approval and must apply only to
 daemon-normalized workspace-relative paths. The current supported schema is a
@@ -324,11 +335,21 @@ such as `.env`, key files, token files, credential files, and replace-context
 mismatches. Unified diff application is reserved for a later patch backend.
 Patch writes should be atomic where practical.
 
-Worker integration uses the same protocol flow. Worker command/test execution
-runs inside the worker worktree only after Track D tool approval support exists.
-Applying a worker artifact to the parent workspace is a separate `file.patch` or
-future patch-apply tool call with its own approval; `worker.completed` alone
-does not authorize parent-checkout mutation.
+Worker integration uses the same protocol flow. The current worker command
+baseline runs only the daemon-owned validation command inside the active worker
+worktree and records bounded redacted output in events/artifacts. Future
+configurable worker commands/tests must use daemon-owned policy and cwd inside
+the worker worktree. Applying a worker artifact to the parent workspace is a
+separate `file.patch` or future patch-apply tool call with its own approval;
+`worker.completed` alone does not authorize parent-checkout mutation.
+Cleanup/removal of a worker worktree is also a separate approval-gated flow and
+must require a CADIS-owned worker/worktree record.
+
+`patch.created` and `test.result` are summary events for code-work presentation.
+They do not carry authority to mutate the parent checkout. `patch.created`
+identifies a daemon-known patch or artifact summary; `test.result` carries a
+redacted status and summary. Full review details belong in worker artifacts or a
+future daemon read-only artifact projection, not direct HUD filesystem reads.
 
 `workspace.register` adds or replaces a profile-local project workspace registry
 entry. CADIS persists the registry under

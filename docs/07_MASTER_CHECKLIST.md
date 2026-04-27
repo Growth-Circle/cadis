@@ -163,14 +163,16 @@
 - [x] Define tool lifecycle events.
 - [x] Implement `file.read`.
 - [x] Implement `file.search`.
-- [ ] Implement `file.patch`.
-- [ ] Implement `shell.run`.
+- [x] Implement `file.patch`.
+- [x] Implement `shell.run`.
 - [x] Implement `git.status`.
 - [x] Implement `git.diff`.
-- [ ] Add approved execution continuation after `approval.resolved(approved)`.
+- [x] Add approved execution continuation after `approval.resolved(approved)`.
 - [ ] Revalidate workspace grants, denied paths, secret posture, and session/worker state before approved execution.
-- [ ] Add `shell.run` cwd, env filtering, stdout/stderr, exit code, timeout, and cancellation cleanup.
-- [ ] Add `file.patch` preview, context validation, atomic write, symlink escape, and concurrent-edit checks.
+- [x] Add `shell.run` approved execution with cwd, bounded stdout/stderr, exit code, timeout failure, and process cleanup on timeout.
+- [ ] Add `shell.run` minimal environment filtering and typed async cancellation cleanup.
+- [x] Add `file.patch` structured replace/write execution with replace-context validation, symlink escape, protected-path, and secret-like path checks.
+- [ ] Add `file.patch` preview UX, atomic writes, and concurrent-edit hardening.
 - [ ] Add timeouts.
 - [ ] Add cancellation.
 - [x] Add tests for success and failure.
@@ -250,10 +252,16 @@
 - [ ] Add worker cancellation.
 - [x] Generate worker diff artifact.
 - [ ] Run tests in worker.
+- [x] Execute daemon-owned worker validation command with cwd inside the worker worktree.
+- [x] Collect worker command report into `summary.md` and `test-report.json` artifacts.
+- [ ] Add configurable worker command/test execution through daemon-owned policy.
 - [ ] Request patch approval.
 - [ ] Apply approved patch.
 - [ ] Route worker patch application through Track D `file.patch` or a future patch-apply tool.
+- [x] Plan terminal worker worktree states as `review_pending` or `cleanup_pending` without parent checkout patch application.
 - [x] Keep worker cleanup separate from patch approval and require CADIS-owned worktree metadata.
+- [x] Add metadata-only `worker.cleanup` planning for terminal CADIS-owned worker worktrees.
+- [ ] Remove worker worktrees only through an approved cleanup executor requiring CADIS-owned metadata.
 - [ ] Cleanup worktree.
 - [x] Add worker isolation tests for worktree creation and artifact output.
 
@@ -341,9 +349,10 @@
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
   Baselines landed: AgentSession state/events, explicit daemon-owned spawn,
   spawn limits, worker registry, worker tail, worker result collection,
-  worker failed/cancelled events, and provider-stream cancellation on
-  `session.cancel`. Remaining: implicit model-driven spawn and real
-  command/test execution inside worker worktrees.
+  worker failed/cancelled events, daemon-owned worker validation command
+  execution, and provider-stream cancellation on `session.cancel`. Remaining:
+  implicit model-driven spawn, configurable worker command/test execution, and
+  cleanup removal.
 - [ ] Track D: policy-backed tools and approval persistence.
 - [x] Track D baseline: tool contract metadata, safe-read `file.read` and
   `file.search`, `git.status`, `git.diff`, workspace grants, approval
@@ -351,8 +360,10 @@
 - [x] Track D docs/protocol alignment: approved execution semantics,
   `shell.run` and `file.patch` boundaries, timeout/cancellation expectations,
   denied paths, secret fail-closed behavior, and worker handoff sequence.
-- [ ] Track D implementation: approved `shell.run` and `file.patch` execution
-  after daemon-side revalidation.
+- [x] Track D approved execution baseline: approved `shell.run` and structured
+  `file.patch` execution after workspace/input revalidation.
+- [ ] Track D hardening: minimal shell environment allowlist, typed async tool
+  cancellation, atomic patch writes, and broader concurrent-edit protection.
 - [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
 - [x] Track E baseline: daemon-visible voice status/doctor/preflight, separated
   STT language and TTS voice settings, TTS provider stubs, and speech policy
@@ -374,9 +385,16 @@
 - [x] Track I event baseline: worker failed/cancelled events carry durable
   failure, cancellation, and cleanup-planning metadata without parent checkout
   patch application.
+- [x] Track I command execution baseline: daemon-owned validation command runs
+  in isolated worker worktrees, records result artifacts, and keeps parent
+  checkout untouched.
 - [x] Track I cleanup planning: `worker.cleanup` moves CADIS-owned terminal
   worker worktree metadata to `cleanup_pending`, rejects unknown/missing/non-owned
   paths, and does not delete files.
+- [x] Track P14 artifact view baseline: HUD code work panel renders worker
+  status, artifact references, and log tail read-only.
+- [ ] Track P14 apply/cleanup actions: route apply/discard through daemon
+  approvals instead of disabled placeholders.
 
 ## 15.2 Workspace Architecture
 
@@ -398,6 +416,11 @@
 - [x] Add profile `artifacts/workers/` worker artifact path helpers.
 - [x] Implement worker worktree creation under project `.cadis/worktrees/`.
 - [x] Persist worker artifacts under profile `artifacts/workers/`.
+- [x] Execute daemon-owned worker validation command inside CADIS-owned worker worktrees.
+- [x] Collect worker command result details into worker artifacts.
+- [x] Implement metadata-only worker worktree cleanup planning flow.
+- [ ] Implement approved worker worktree cleanup/removal executor.
+- [ ] Add configurable worker command/test runs inside CADIS-owned worker worktrees.
 - [ ] Add project `.cadis/media/` manifests for generated media.
 - [x] Add workspace doctor checks for project metadata mismatch and duplicate roots.
 - [x] Add workspace doctor checks for stale worker worktree metadata and missing artifact roots.
@@ -406,15 +429,19 @@
 ## 16. Code Work Window
 
 - [ ] Detect code-heavy task.
-- [ ] Open code work window.
-- [ ] Show diff viewer.
-- [ ] Show terminal logs.
-- [ ] Show test results.
+- [x] Open HUD code work panel from worker tree.
+- [x] Render read-only worker artifact view from daemon events/artifact metadata.
+- [ ] Show inline diff viewer.
+- [x] Show recent daemon worker log tail.
+- [x] Show test report artifact metadata/status.
+- [x] Show worker summary and patch artifact references.
+- [ ] Show changed-files artifact details.
 - [ ] Show file tree.
-- [ ] Add apply action.
-- [ ] Add discard action.
+- [ ] Add apply request action routed through approval-gated `file.patch` or a future patch-apply tool.
+- [ ] Add discard/cleanup request action routed through an approved cleanup flow.
 - [ ] Add external editor action.
-- [ ] Add code window routing tests.
+- [x] Confirm code work panel does not execute tools or read arbitrary filesystem paths directly.
+- [x] Add code window routing tests for worker tree opening and read-only artifact metadata.
 
 ## 17. Multi-Agent Tree
 

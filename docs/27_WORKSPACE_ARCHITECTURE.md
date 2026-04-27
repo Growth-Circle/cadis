@@ -59,7 +59,9 @@ Implemented baseline:
 - Worker execution setup now creates a git worktree for session-bound project
   workspaces, moves project-local worker worktree metadata through `ready`,
   `review_pending`, and `cleanup_pending`, and writes profile-scoped worker
-  artifacts for review.
+  artifacts for review. Worker completion runs a bounded daemon-owned
+  validation command inside the worker worktree and records the redacted command
+  report in worker artifacts.
 - `worker.cleanup` records cleanup intent for terminal CADIS-owned worker
   worktrees without deleting files and rejects unknown, missing, or non-owned
   paths.
@@ -67,7 +69,7 @@ Implemented baseline:
 Still future:
 
 - Worker worktree file removal.
-- Real worker command/test execution and durable worker runtime logs.
+- Configurable worker command/test execution and durable worker runtime logs.
 - Checkpoint and rollback manager.
 - Dedicated profile and agent doctor commands.
 - Workspace-local skills and project `.cadis/` metadata enforcement.

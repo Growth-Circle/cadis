@@ -35,14 +35,24 @@ Current implementation baseline:
 
 - `file.read`, `file.search`, `git.status`, and `git.diff` are native
   safe-read tools.
-- `shell.run`, `file.write`, `file.patch`, `git.worktree.create`, and
-  `git.worktree.remove` are classified and approval-gated placeholders.
+- `shell.run` is an approval-gated native execution backend with explicit cwd,
+  bounded redacted stdout/stderr, exit-code reporting, timeout failure, and
+  process cleanup on timeout.
+- `file.patch` is an approval-gated structured replace/write backend with
+  workspace-relative path checks, replace-context validation,
+  symlink/protected-path guards, and secret-like path rejection.
+- `file.write`, `git.worktree.create`, and `git.worktree.remove` are classified
+  and approval-gated placeholders.
 - Unknown tool names are denied before execution.
-- Approval-gated placeholders fail closed after approval resolution until their
-  execution backends are implemented.
+- Approval-gated placeholders without native execution backends fail closed
+  after approval resolution.
 - Worker orchestration may emit planned worktree and artifact metadata without
   invoking `git.worktree.create`; that event metadata is intent, not filesystem
   mutation.
+- Worker command execution baseline runs a bounded daemon-owned validation
+  command inside CADIS-owned worker worktrees and records result artifacts.
+  Configurable worker command/test execution remains future work and must stay
+  daemon-owned, policy-gated, and isolated to the worker worktree.
 
 ## 3. Naming
 
@@ -174,11 +184,19 @@ Requirements:
 Commands that mutate system state, use `sudo`, install packages, delete files, alter protected git refs, or access secrets must require approval.
 
 Track D implementation must keep `shell.run` inside a registered workspace or
-CADIS-owned worker worktree. The environment starts from a minimal allowlist;
-provider keys, auth tokens, SSH agent details, and CADIS secrets are not passed
-unless a later explicit secret-access policy permits it. Cancellation must stop
-the child process and clean up any process group or temporary files where the
-platform supports it.
+CADIS-owned worker worktree. The target environment starts from a minimal
+allowlist; provider keys, auth tokens, SSH agent details, and CADIS secrets are
+not passed unless a later explicit secret-access policy permits it.
+Cancellation must stop the child process and clean up any process group or
+temporary files where the platform supports it.
+
+Current baseline note: approved `shell.run` can execute after approval and
+daemon-side workspace/grant revalidation, captures bounded redacted output,
+reports exit code, and kills the process group on timeout. Worker completion
+also runs a fixed daemon-owned validation command inside the worker worktree and
+records its report in artifacts. Minimal environment filtering, typed async
+cancellation, and configurable worker command/test policy remain hardening
+requirements.
 
 ## 9. File Tools
 
@@ -206,7 +224,14 @@ Patch application must preserve user changes and should fail closed on mismatche
 Worker patch application is not implicit. A worker may create `patch.diff` and
 `summary.md` artifacts, but applying that patch to the parent workspace is a
 separate `file.patch` or future patch-apply tool call with its own policy
-decision and approval.
+decision and approval. `worker.completed` is never authorization to mutate the
+parent checkout.
+
+Current baseline note: approved `file.patch` supports structured `replace` and
+`write` operations after approval, validates workspace-relative targets,
+rejects protected metadata paths and secret-like paths, and fails closed when
+replace context is missing or ambiguous. Atomic temp-file writes, full preview
+UX, and broader concurrent-edit hardening remain required.
 
 ## 10. Git Tools
 
@@ -226,6 +251,9 @@ Rules:
   `planned` to `active` only after successful creation.
 - `git.worktree.remove` must require a CADIS-owned worker/worktree record and
   preserve artifacts unless an explicit cleanup policy says otherwise.
+- Terminal worker states such as `review_pending` and `cleanup_pending` are
+  cleanup planning metadata, not deletion. Actual worktree removal must be a
+  separate approval-gated flow.
 - Push, force-push, rebase, reset, and branch deletion are not initial native tool actions unless policy and approval coverage exist.
 
 ## 11. Cancellation and Timeouts
@@ -268,6 +296,9 @@ Required tests:
 - symlink boundary handling
 - shell timeout and cancellation
 - file patch conflict handling
+- worker command/test execution stays inside the worker worktree
+- worker result artifacts are redacted before persistence
+- worker cleanup refuses paths without CADIS-owned worktree metadata
 - tool lifecycle event ordering
 - redaction before persistence
 - policy denial prevents execution
