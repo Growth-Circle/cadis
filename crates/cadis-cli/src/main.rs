@@ -10,10 +10,11 @@ use cadis_protocol::{
     AgentEventPayload, AgentId, AgentSpawnRequest, ApprovalDecision, ApprovalId,
     ApprovalResponseRequest, ClientId, ClientRequest, ContentKind, DaemonResponse, EmptyPayload,
     ErrorPayload, EventId, EventSubscriptionRequest, EventsSnapshotRequest, MessageSendRequest,
-    ModelsListPayload, RequestEnvelope, RequestId, ServerFrame, SessionId, ToolCallRequest,
-    WorkspaceAccess, WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantPayload,
-    WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest,
-    WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
+    ModelsListPayload, RequestEnvelope, RequestId, ServerFrame, SessionId,
+    SessionSubscriptionRequest, ToolCallRequest, WorkspaceAccess, WorkspaceDoctorPayload,
+    WorkspaceDoctorRequest, WorkspaceGrantPayload, WorkspaceGrantRequest, WorkspaceId,
+    WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest, WorkspaceRecordPayload,
+    WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
 use cadis_store::load_config;
 
@@ -52,6 +53,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             render_agents(&frames, cli.json)
         }
         Command::Workspace(command) => run_workspace(&cli, command),
+        Command::Session(command) => run_session(&cli, command),
         Command::Events {
             replay_limit,
             since_event_id,
@@ -273,6 +275,27 @@ fn run_workspace(cli: &Cli, command: &WorkspaceCommand) -> Result<(), Box<dyn Er
     render_workspace(&frames, cli.json)
 }
 
+fn run_session(cli: &Cli, command: &SessionCommand) -> Result<(), Box<dyn Error>> {
+    match command {
+        SessionCommand::Subscribe {
+            session_id,
+            replay_limit,
+            since_event_id,
+            include_snapshot,
+        } => stream_subscription(
+            cli,
+            ClientRequest::SessionSubscribe(SessionSubscriptionRequest {
+                session_id: SessionId::from(session_id.clone()),
+                since_event_id: since_event_id
+                    .as_ref()
+                    .map(|value| EventId::from(value.clone())),
+                replay_limit: *replay_limit,
+                include_snapshot: *include_snapshot,
+            }),
+        ),
+    }
+}
+
 fn send_request(cli: &Cli, request: ClientRequest) -> Result<Vec<ServerFrame>, Box<dyn Error>> {
     let socket_path = cli.socket_path()?;
     let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
@@ -304,6 +327,10 @@ fn send_request(cli: &Cli, request: ClientRequest) -> Result<Vec<ServerFrame>, B
 }
 
 fn stream_events(cli: &Cli, request: EventSubscriptionRequest) -> Result<(), Box<dyn Error>> {
+    stream_subscription(cli, ClientRequest::EventsSubscribe(request))
+}
+
+fn stream_subscription(cli: &Cli, request: ClientRequest) -> Result<(), Box<dyn Error>> {
     let socket_path = cli.socket_path()?;
     let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
         io::Error::new(
@@ -315,11 +342,7 @@ fn stream_events(cli: &Cli, request: EventSubscriptionRequest) -> Result<(), Box
         )
     })?;
 
-    let envelope = RequestEnvelope::new(
-        next_request_id(),
-        client_id(),
-        ClientRequest::EventsSubscribe(request),
-    );
+    let envelope = RequestEnvelope::new(next_request_id(), client_id(), request);
     serde_json::to_writer(&mut stream, &envelope)?;
     stream.write_all(b"\n")?;
     stream.shutdown(std::net::Shutdown::Write)?;
@@ -763,6 +786,7 @@ impl Cli {
             Some("models") => Command::Models,
             Some("agents") => Command::Agents,
             Some("workspace") => Command::Workspace(parse_workspace(args.collect())?),
+            Some("session") => Command::Session(parse_session(args.collect())?),
             Some("events") => parse_events(args.collect())?,
             Some("spawn") => parse_spawn(args.collect())?,
             Some("chat") => {
@@ -807,6 +831,7 @@ enum Command {
     Models,
     Agents,
     Workspace(WorkspaceCommand),
+    Session(SessionCommand),
     Events {
         replay_limit: Option<u32>,
         since_event_id: Option<String>,
@@ -834,6 +859,16 @@ enum Command {
     },
     Approve(String),
     Deny(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SessionCommand {
+    Subscribe {
+        session_id: String,
+        replay_limit: Option<u32>,
+        since_event_id: Option<String>,
+        include_snapshot: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1124,6 +1159,61 @@ fn parse_workspace_access_list(value: &str) -> Result<Vec<WorkspaceAccess>, Box<
     Ok(access)
 }
 
+fn parse_session(args: Vec<String>) -> Result<SessionCommand, Box<dyn Error>> {
+    let mut args = args.into_iter();
+    match args.next().as_deref() {
+        Some("subscribe") => parse_session_subscribe(args.collect()),
+        Some(other) => Err(invalid_input(format!("unknown session command: {other}")).into()),
+        None => Err(invalid_input("session requires a subcommand").into()),
+    }
+}
+
+fn parse_session_subscribe(args: Vec<String>) -> Result<SessionCommand, Box<dyn Error>> {
+    let mut replay_limit = Some(128);
+    let mut since_event_id = None;
+    let mut include_snapshot = true;
+    let mut positionals = Vec::new();
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--replay" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| invalid_input("--replay requires a count"))?;
+                replay_limit = Some(value.parse::<u32>().map_err(|error| {
+                    invalid_input(format!("--replay requires a non-negative integer: {error}"))
+                })?);
+            }
+            "--since" => {
+                since_event_id = Some(
+                    args.next()
+                        .ok_or_else(|| invalid_input("--since requires an event ID"))?,
+                );
+            }
+            "--no-snapshot" => include_snapshot = false,
+            value if value.starts_with("--") => {
+                return Err(
+                    invalid_input(format!("unknown session subscribe option: {value}")).into(),
+                );
+            }
+            value => positionals.push(value.to_owned()),
+        }
+    }
+
+    let session_id = positionals
+        .first()
+        .ok_or_else(|| invalid_input("session subscribe requires a session ID"))?
+        .clone();
+
+    Ok(SessionCommand::Subscribe {
+        session_id,
+        replay_limit,
+        since_event_id,
+        include_snapshot,
+    })
+}
+
 fn parse_events(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
     let mut replay_limit = Some(128);
     let mut since_event_id = None;
@@ -1330,7 +1420,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn print_help() {
     println!(
-        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  workspace <COMMAND>    Manage registered workspaces and grants\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
+        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  workspace <COMMAND>    Manage registered workspaces and grants\n  session <COMMAND>      Manage session event streams\n  events [OPTIONS]       Subscribe to all daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
         env!("CARGO_PKG_VERSION")
     );
 }

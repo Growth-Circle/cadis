@@ -15,6 +15,9 @@ The format follows Keep a Changelog style, and the project will use Semantic Ver
 - Desktop MVP runtime with `cadisd`, `cadis`, Unix socket NDJSON frames, status/chat/doctor commands, optional Ollama model adapter, local fallback responses, JSONL event logs, and redaction.
 - Native `cadis-hud` prototype with orbital HUD shell, status bar, chat command panel, config tabs, theme controls, model controls, voice preview hooks, rename dialog, and approval stack UI.
 - Example desktop MVP config at `config/cadis.example.toml`.
+- Daemon Unix socket integration coverage for live `session.subscribe` fan-out to
+  two clients while status and agent-list requests remain responsive during
+  paused message generation.
 - Runtime tool definitions now declare richer contract metadata (description, side effects, timeout, workspace scope, cancellation behavior, and secret/network posture), with approval summaries reflecting that contract.
 
 ### Changed

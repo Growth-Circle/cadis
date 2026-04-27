@@ -132,6 +132,29 @@ snapshot is represented as normal event frames, currently including
 `agent.list.response`, `ui.preferences.updated`, and `session.updated` for known
 sessions.
 
+`session.subscribe` keeps the connection open after the immediate
+`request.accepted` response. The daemon sends the current `session.updated`
+snapshot when `include_snapshot` is true, then bounded replay and live events
+whose event envelope has the requested `session_id`. It does not deliver
+daemon-global events such as agent rosters or UI preferences.
+
+Example:
+
+```json
+{
+  "protocol_version": "0.1",
+  "request_id": "req_...",
+  "client_id": "cli_...",
+  "type": "session.subscribe",
+  "payload": {
+    "session_id": "ses_...",
+    "since_event_id": "evt_000120",
+    "replay_limit": 128,
+    "include_snapshot": true
+  }
+}
+```
+
 `tool.call` requests daemon-owned native tool execution. Tool calls must resolve
 a registered workspace and an active workspace grant before execution or
 approval flow proceeds. `agent_id` is optional; when present, it lets daemon tool
@@ -377,6 +400,12 @@ Model-backed `message.delta` and `message.completed` payloads may include a
 actually served the request. When fallback occurs, `fallback` is true and
 `fallback_reason` may contain a redacted reason suitable for logs and clients.
 
+For `message.send`, `cadisd` first publishes daemon-owned session, route, and
+agent status events, then runs provider generation outside the runtime mutex.
+Providers with stream callbacks cause `message.delta` events to be fanned out
+as callbacks arrive; providers without native streaming still produce the same
+typed events after their blocking response returns.
+
 ## 5. Content Kind
 
 ```text
@@ -445,6 +474,7 @@ Initial:
 
 - Unix socket NDJSON request/response frames
 - `events.subscribe` over the same socket for long-lived local event streams
+- `session.subscribe` over the same socket for session-filtered event streams
 
 The desktop daemon keeps an in-memory bounded replay buffer for recent runtime
 events. The baseline buffer is process-local and is not a durable event store.

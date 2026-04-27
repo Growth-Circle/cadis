@@ -111,6 +111,25 @@ Sent when the HUD needs a one-shot daemon-owned state snapshot.
 The current desktop MVP snapshot is encoded as event frames, including
 `agent.list.response`, `ui.preferences.updated`, and `session.updated`.
 
+### `session.subscribe`
+
+Sent when a client wants only one session's events rather than the daemon-wide
+event stream.
+
+```json
+{
+  "type": "session.subscribe",
+  "session_id": "ses_...",
+  "replay_limit": 128,
+  "include_snapshot": true
+}
+```
+
+The daemon responds with `request.accepted`, then sends the current
+`session.updated` event, bounded replay, and live events whose envelope
+`session_id` matches the request. The HUD may use this for focused session panes
+while keeping daemon-wide `events.subscribe` as the main state feed.
+
 ### `message.send`
 
 Sent when the user submits text in the chat panel.
@@ -240,6 +259,18 @@ Drives connection and status bar.
   "state": "connected",
   "latency_ms": 3,
   "version": "0.1.0"
+}
+```
+
+### `session.started`
+
+Creates a visible session progress row before model output arrives.
+
+```json
+{
+  "type": "session.started",
+  "session_id": "ses_123",
+  "title": "Fix auth test"
 }
 ```
 
@@ -526,6 +557,9 @@ The HUD must speak only speakable content:
 Protocol adaptation is valid when:
 
 - HUD can render from a mock CADIS event stream.
+- HUD shows `session.started`, `orchestrator.route`,
+  `agent.status.changed`, and `message.delta` progress before
+  `message.completed`.
 - All RamaClaw UI features have CADIS request/event equivalents.
 - UI preferences persist through daemon config, not localStorage.
 - Approval card lifecycle is server-confirmed.

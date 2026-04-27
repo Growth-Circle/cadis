@@ -76,6 +76,12 @@ pnpm build
 cargo check --manifest-path src-tauri/Cargo.toml --locked
 ```
 
+The Track A live-progress acceptance fixture is
+`src/ui/hudLiveProgress.acceptance.test.tsx`. It renders the chat panel and
+orbital HUD from mock daemon frames and verifies that `session.started`,
+`orchestrator.route`, `agent.status.changed`, and `message.delta` are visible
+before `message.completed`.
+
 No credentials are stored in this app. ChatGPT Plus/Pro access is delegated to
 the official Codex CLI login used by `cadisd` when the model provider is
 `codex-cli`. OpenAI API access uses environment variables handled by the daemon.

@@ -109,15 +109,19 @@
 - [x] Add daemon config loader.
 - [x] Add daemon health status.
 - [x] Add local transport listener.
-- [ ] Add event bus.
-- [ ] Add event fan-out to multiple clients.
+- [x] Add event bus.
+- [x] Add event fan-out to multiple clients.
 - [x] Add `session.subscribe` protocol/request baseline.
-- [ ] Add live persistent `session.subscribe` stream.
-- [ ] Avoid blocking daemon mutex during model generation.
+- [x] Add live persistent `session.subscribe` stream.
+- [x] Avoid blocking daemon mutex during model generation.
+- [x] Publish daemon-owned route/status progress before model completion.
+- [x] Publish `message.delta` events from provider stream callbacks.
 - [x] Add session registry.
 - [ ] Add shutdown handling.
 - [x] Add structured logging.
-- [ ] Add daemon integration test.
+- [x] Add focused daemon runtime mutex regression test.
+- [x] Add full daemon socket integration test for two session subscribers and
+  non-blocked status/agent-list requests during in-flight generation.
 
 ## 6. CLI
 
@@ -281,7 +285,7 @@
 - [x] Add status bar.
 - [x] Add desktop packaging notes.
 - [ ] Validate HUD prototype against RamaClaw adaptation contract.
-- [ ] Render HUD from a mock CADIS daemon event stream.
+- [x] Render HUD from a mock CADIS daemon event stream.
 - [x] Confirm HUD is protocol-client only and does not execute tools directly.
 - [ ] Confirm durable HUD preferences are daemon-backed, not browser/local UI storage.
 - [x] Confirm disconnected state references CADIS daemon, not OpenClaw.
@@ -305,7 +309,9 @@
 
 ## 15.1 Next Multi-Agent Execution Tracks
 
-- [ ] Track A: daemon event bus and live session subscription.
+- [x] Track A: daemon event bus, live session subscription, and non-blocking generation path.
+- [x] Track A HUD acceptance: live session, route, agent status, delta, and
+  completion frames render visible progress before model completion.
 - [ ] Track B: provider readiness, effective model metadata, and provider streaming.
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
 - [ ] Track D: policy-backed tools and approval persistence.

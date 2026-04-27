@@ -217,9 +217,9 @@ message completed, and agent status events as follow-up frames for a request.
 It also supports request-driven `agent.spawn` with configured depth, child, and
 total-agent limits.
 
-The `session.subscribe` and worker-tail protocol surfaces exist, but live
-multi-client event fan-out, persistent subscriptions, and daemon worker
-execution are not implemented yet.
+`events.subscribe` streams daemon-wide events. `session.subscribe` streams the
+current session snapshot, bounded replay, and live events filtered to one
+session ID. Worker-tail and daemon worker execution are not implemented yet.
 
 ## 13. Durable State Notes
 

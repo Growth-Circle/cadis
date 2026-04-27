@@ -101,6 +101,7 @@ sequenceDiagram
   D->>B: SessionStarted
   B->>C: SessionStarted
   B->>L: append event
+  D->>B: OrchestratorRoute / AgentStatusChanged
   D->>M: stream response
   M-->>D: delta
   D->>B: MessageDelta
@@ -109,6 +110,11 @@ sequenceDiagram
   M-->>D: complete
   D->>B: MessageCompleted
 ```
+
+`cadisd` prepares message routing and session state under the runtime mutex, but
+model provider generation runs outside that mutex. The daemon reacquires the
+runtime only to create authoritative event envelopes, so unrelated status and
+agent-list requests can proceed while a slow provider is generating.
 
 ## 5. Approval Flow
 
