@@ -146,6 +146,9 @@ The Rust state engine currently exposes:
   interruption, and reduced-motion metadata.
 - `BodyPose`, `FacePose`, and `AvatarMaterial` as renderer-neutral pose and
   shader hints.
+- `AvatarFallbackContract` and `AvatarFallbackState` so renderer failures can
+  degrade to the CADIS orb or a static Wulan texture without blocking HUD
+  launch.
 - `HeadlessAvatarRenderer` for tests and non-graphical planning.
 
 ## 6. Body Gesture Set
