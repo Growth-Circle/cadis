@@ -1,6 +1,8 @@
 //! Core CADIS request handling and event production.
 
 use std::collections::HashMap;
+#[cfg(test)]
+use std::cell::Cell;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -11,8 +13,6 @@ use std::time::{Duration as StdDuration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use cadis_models::{
     provider_catalog_for_config, ModelCatalogConfig, ModelInvocation, ModelProvider, ModelRequest,
@@ -69,7 +69,9 @@ const WORKER_COMMAND_LOG_LIMIT_BYTES: usize = 4 * 1024;
 const WORKER_COMMAND_SUMMARY_LIMIT_BYTES: usize = 512;
 
 #[cfg(test)]
-static FILE_PATCH_COMMIT_FAIL_AFTER: AtomicUsize = AtomicUsize::new(usize::MAX);
+thread_local! {
+    static FILE_PATCH_COMMIT_FAIL_AFTER: Cell<usize> = const { Cell::new(usize::MAX) };
+}
 
 /// Runtime options supplied by the daemon process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6852,7 +6854,7 @@ fn commit_file_patch_transaction(staged: &[StagedFilePatch]) -> Result<(), Error
 fn should_fail_file_patch_commit(committed_count: usize) -> bool {
     #[cfg(test)]
     {
-        let fail_after = FILE_PATCH_COMMIT_FAIL_AFTER.load(AtomicOrdering::Relaxed);
+        let fail_after = FILE_PATCH_COMMIT_FAIL_AFTER.with(Cell::get);
         fail_after != usize::MAX && committed_count >= fail_after
     }
     #[cfg(not(test))]
@@ -8636,15 +8638,22 @@ mod tests {
         ))
     }
 
-    fn set_file_patch_commit_failure_after(value: Option<usize>) -> usize {
-        FILE_PATCH_COMMIT_FAIL_AFTER.swap(
-            value.unwrap_or(usize::MAX),
-            AtomicOrdering::SeqCst,
-        )
+    struct FilePatchCommitFailureGuard {
+        previous: usize,
     }
 
-    fn restore_file_patch_commit_failure_after(previous: usize) {
-        FILE_PATCH_COMMIT_FAIL_AFTER.store(previous, AtomicOrdering::SeqCst);
+    impl FilePatchCommitFailureGuard {
+        fn new(value: Option<usize>) -> Self {
+            let previous = FILE_PATCH_COMMIT_FAIL_AFTER
+                .with(|fail_after| fail_after.replace(value.unwrap_or(usize::MAX)));
+            Self { previous }
+        }
+    }
+
+    impl Drop for FilePatchCommitFailureGuard {
+        fn drop(&mut self) {
+            FILE_PATCH_COMMIT_FAIL_AFTER.with(|fail_after| fail_after.set(self.previous));
+        }
     }
 
     fn assert_no_file_patch_temp_files(root: &Path) {
@@ -9495,7 +9504,7 @@ mod tests {
             vec![WorkspaceAccess::Write],
         );
 
-        let previous = set_file_patch_commit_failure_after(Some(2));
+        let _failure_guard = FilePatchCommitFailureGuard::new(Some(2));
         let request = runtime.handle_request(RequestEnvelope::new(
             RequestId::from("req_file_patch_rollback_runtime"),
             ClientId::from("cli_1"),
@@ -9522,7 +9531,6 @@ mod tests {
             }),
         ));
         let outcome = approve(&mut runtime, approval_id_from(&request));
-        restore_file_patch_commit_failure_after(previous);
 
         assert!(outcome.events.iter().any(|event| {
             matches!(
