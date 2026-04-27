@@ -3333,16 +3333,8 @@ impl Runtime {
     ) -> Result<ToolExecutionResult, ErrorPayload> {
         let operations = parse_file_patch_operations(input)?;
         let prepared = prepare_file_patch(workspace, &operations)?;
-
-        for change in &prepared {
-            fs::write(&change.path, change.content.as_bytes()).map_err(|error| {
-                tool_error(
-                    "file_patch_write_failed",
-                    format!("could not write {}: {error}", change.display_path),
-                    false,
-                )
-            })?;
-        }
+        let staged = stage_file_patch_transaction(&prepared)?;
+        commit_file_patch_transaction(&staged)?;
 
         let output_files = prepared
             .iter()
@@ -5272,6 +5264,16 @@ struct PreparedFilePatch {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct StagedFilePatch {
+    path: PathBuf,
+    display_path: String,
+    action: &'static str,
+    staged_path: PathBuf,
+    backup_path: Option<PathBuf>,
+    had_original: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct BoundedOutput {
     bytes: Vec<u8>,
     truncated: bool,
@@ -6719,6 +6721,172 @@ fn prepare_file_patch(
     }
 
     Ok(prepared)
+}
+
+fn stage_file_patch_transaction(
+    prepared: &[PreparedFilePatch],
+) -> Result<Vec<StagedFilePatch>, ErrorPayload> {
+    let mut staged = Vec::with_capacity(prepared.len());
+    for (index, change) in prepared.iter().enumerate() {
+        let staged_path = match allocate_file_patch_temp_path(&change.path, "tmp", index) {
+            Ok(path) => path,
+            Err(error) => {
+                cleanup_staged_file_patch_paths(&staged);
+                return Err(error);
+            }
+        };
+        if let Err(error) = fs::write(&staged_path, change.content.as_bytes()) {
+            cleanup_staged_file_patch_paths(&staged);
+            let _ = fs::remove_file(&staged_path);
+            return Err(tool_error(
+                "file_patch_write_failed",
+                format!("could not stage {}: {error}", change.display_path),
+                false,
+            ));
+        }
+
+        let had_original = change.path.is_file();
+        let backup_path = if had_original {
+            match allocate_file_patch_temp_path(&change.path, "bak", index) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    cleanup_staged_file_patch_paths(&staged);
+                    let _ = fs::remove_file(&staged_path);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+
+        staged.push(StagedFilePatch {
+            path: change.path.clone(),
+            display_path: change.display_path.clone(),
+            action: change.action,
+            staged_path,
+            backup_path,
+            had_original,
+        });
+    }
+    Ok(staged)
+}
+
+fn commit_file_patch_transaction(staged: &[StagedFilePatch]) -> Result<(), ErrorPayload> {
+    let mut moved_backups = Vec::<(PathBuf, PathBuf)>::new();
+    let mut committed_targets = Vec::<PathBuf>::new();
+    let mut failed = false;
+    let mut failure_message = String::new();
+
+    for change in staged {
+        if change.had_original {
+            let Some(backup_path) = &change.backup_path else {
+                failed = true;
+                failure_message = format!(
+                    "transactional file.patch backup path missing for {}",
+                    change.display_path
+                );
+                break;
+            };
+
+            if let Err(error) = fs::rename(&change.path, backup_path) {
+                failed = true;
+                failure_message =
+                    format!("could not move {} to backup: {error}", change.display_path);
+                break;
+            }
+            moved_backups.push((change.path.clone(), backup_path.clone()));
+        }
+
+        if let Err(error) = fs::rename(&change.staged_path, &change.path) {
+            failed = true;
+            failure_message = format!(
+                "could not commit staged {} {}: {error}",
+                change.action, change.display_path
+            );
+            break;
+        }
+        committed_targets.push(change.path.clone());
+    }
+
+    if failed {
+        rollback_file_patch_transaction(staged, &moved_backups, &committed_targets);
+        return Err(tool_error(
+            "file_patch_write_failed",
+            format!("transactional file.patch commit failed: {failure_message}"),
+            false,
+        ));
+    }
+
+    for (_, backup_path) in moved_backups {
+        let _ = fs::remove_file(backup_path);
+    }
+    cleanup_staged_file_patch_paths(staged);
+
+    Ok(())
+}
+
+fn rollback_file_patch_transaction(
+    staged: &[StagedFilePatch],
+    moved_backups: &[(PathBuf, PathBuf)],
+    committed_targets: &[PathBuf],
+) {
+    for target in committed_targets.iter().rev() {
+        let _ = fs::remove_file(target);
+    }
+
+    for (target, backup_path) in moved_backups.iter().rev() {
+        let _ = fs::rename(backup_path, target);
+    }
+
+    cleanup_staged_file_patch_paths(staged);
+    for (_, backup_path) in moved_backups {
+        let _ = fs::remove_file(backup_path);
+    }
+}
+
+fn cleanup_staged_file_patch_paths(staged: &[StagedFilePatch]) {
+    for change in staged {
+        let _ = fs::remove_file(&change.staged_path);
+    }
+}
+
+fn allocate_file_patch_temp_path(
+    target: &Path,
+    suffix: &str,
+    index: usize,
+) -> Result<PathBuf, ErrorPayload> {
+    let parent = target.parent().ok_or_else(|| {
+        tool_error(
+            "path_resolution_failed",
+            "file.patch target has no parent directory",
+            false,
+        )
+    })?;
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("target");
+    let pid = std::process::id();
+    let now = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+
+    for attempt in 0..64_usize {
+        let nonce = now.wrapping_add(i64::try_from(attempt).unwrap_or_default());
+        let candidate = parent.join(format!(
+            ".cadis_file_patch_{suffix}_{pid}_{index}_{nonce}_{file_name}"
+        ));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(tool_error(
+        "file_patch_write_failed",
+        format!(
+            "could not allocate temporary file for {}",
+            target.display()
+        ),
+        false,
+    ))
 }
 
 fn read_patch_target(path: &Path) -> Result<String, ErrorPayload> {
@@ -9247,6 +9415,32 @@ mod tests {
             fs::read_to_string(workspace.join("README.md")).expect("file should read"),
             "hello cadis\n"
         );
+    }
+
+    #[test]
+    fn file_patch_transaction_rolls_back_on_commit_failure() {
+        let workspace = test_workspace("file-patch-rollback");
+        let target = workspace.join("README.md");
+        fs::write(&target, "hello\n").expect("test file should write");
+        let staged_path = workspace.join(".missing_staged_file_patch");
+        let backup_path = workspace.join(".file_patch_backup");
+        let staged = vec![StagedFilePatch {
+            path: target.clone(),
+            display_path: "README.md".to_owned(),
+            action: "write",
+            staged_path,
+            backup_path: Some(backup_path.clone()),
+            had_original: true,
+        }];
+
+        let error =
+            commit_file_patch_transaction(&staged).expect_err("transaction should fail closed");
+        assert_eq!(error.code, "file_patch_write_failed");
+        assert_eq!(
+            fs::read_to_string(&target).expect("target should be restored"),
+            "hello\n"
+        );
+        assert!(!backup_path.exists());
     }
 
     #[test]
