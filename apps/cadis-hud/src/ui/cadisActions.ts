@@ -354,6 +354,10 @@ function handleMessage(type: string, payload: unknown, sessionId?: string): void
     handlePreferences(payload);
     return;
   }
+  if (type === "session.started") {
+    handleSessionStarted(payload, sessionId);
+    return;
+  }
   if (type === "message.delta") {
     handleMessageDelta(payload, sessionId);
     return;
@@ -460,6 +464,21 @@ function handlePreferences(payload: unknown): void {
   if (typeof chat.thinking === "boolean") chatPatch.thinking = chat.thinking;
   if (typeof chat.fast === "boolean") chatPatch.fast = chat.fast;
   if (Object.keys(chatPatch).length) useHud.getState().setChatPreferences(chatPatch);
+}
+
+function handleSessionStarted(payload: unknown, sessionId?: string): void {
+  const p = asRecord(payload);
+  const sid = stringFrom(p.session_id) ?? sessionId;
+  const title = stringFrom(p.title);
+  const label = title ?? sid;
+  if (!label) return;
+  useHud.getState().upsertChat({
+    id: `session-${sid ?? label}`,
+    who: "system",
+    text: `(session started: ${label})`,
+    ts: Date.now(),
+    final: true,
+  });
 }
 
 function handleMessageDelta(payload: unknown, sessionId?: string): void {

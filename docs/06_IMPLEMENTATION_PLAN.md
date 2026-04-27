@@ -110,6 +110,10 @@ Tasks:
 Exit criteria:
 
 - HUD receives visible progress before model completion.
+  Completed by the HUD live-progress acceptance fixture, which renders live
+  `session.started`, `orchestrator.route`, `agent.status.changed`,
+  `message.delta`, and `message.completed` frames through the React HUD before
+  final completion.
 - CLI can subscribe to a live session.
 - One slow request does not block unrelated status or agent list requests.
 

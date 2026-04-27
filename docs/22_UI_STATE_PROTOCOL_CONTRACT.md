@@ -262,6 +262,18 @@ Drives connection and status bar.
 }
 ```
 
+### `session.started`
+
+Creates a visible session progress row before model output arrives.
+
+```json
+{
+  "type": "session.started",
+  "session_id": "ses_123",
+  "title": "Fix auth test"
+}
+```
+
 ### `agent.list.response`
 
 Replaces the seeded roster with daemon-owned agent state.
@@ -545,6 +557,9 @@ The HUD must speak only speakable content:
 Protocol adaptation is valid when:
 
 - HUD can render from a mock CADIS event stream.
+- HUD shows `session.started`, `orchestrator.route`,
+  `agent.status.changed`, and `message.delta` progress before
+  `message.completed`.
 - All RamaClaw UI features have CADIS request/event equivalents.
 - UI preferences persist through daemon config, not localStorage.
 - Approval card lifecycle is server-confirmed.

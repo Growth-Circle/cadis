@@ -285,7 +285,7 @@
 - [x] Add status bar.
 - [x] Add desktop packaging notes.
 - [ ] Validate HUD prototype against RamaClaw adaptation contract.
-- [ ] Render HUD from a mock CADIS daemon event stream.
+- [x] Render HUD from a mock CADIS daemon event stream.
 - [x] Confirm HUD is protocol-client only and does not execute tools directly.
 - [ ] Confirm durable HUD preferences are daemon-backed, not browser/local UI storage.
 - [x] Confirm disconnected state references CADIS daemon, not OpenClaw.
@@ -310,6 +310,8 @@
 ## 15.1 Next Multi-Agent Execution Tracks
 
 - [x] Track A: daemon event bus, live session subscription, and non-blocking generation path.
+- [x] Track A HUD acceptance: live session, route, agent status, delta, and
+  completion frames render visible progress before model completion.
 - [ ] Track B: provider readiness, effective model metadata, and provider streaming.
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
 - [ ] Track D: policy-backed tools and approval persistence.
