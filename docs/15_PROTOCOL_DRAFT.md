@@ -146,12 +146,15 @@ The desktop MVP replays log lines from the in-memory worker registry as
 up to 64 recent lines, capped at 1000. Unknown workers are rejected with
 `worker_not_found`.
 
-`worker.started` and `worker.completed` may include worktree and artifact
-metadata. For session-bound project workspaces, the daemon worker runtime creates
-`<project>/.cadis/worktrees/<worker-id>/`, emits the active worktree path in
-`worker.started`, and writes profile-scoped artifacts before `worker.completed`.
-Terminal worker events move active worktrees to `review_pending`; patch apply and
-cleanup remain separate approval-gated flows.
+`worker.started`, `worker.completed`, `worker.failed`, and `worker.cancelled`
+may include worktree and artifact metadata. Failed worker events include optional
+`error_code` and redacted `error`; cancelled worker events include optional
+`cancellation_requested_at`. For session-bound project workspaces, the daemon
+worker runtime creates `<project>/.cadis/worktrees/<worker-id>/`, emits the
+active worktree path in `worker.started`, and writes profile-scoped artifacts
+before `worker.completed` or `worker.failed`. Terminal worker events move active
+worktrees to `review_pending` or `cleanup_pending` according to cleanup policy;
+patch apply and cleanup remain separate approval-gated flows.
 
 Example:
 
@@ -348,6 +351,8 @@ approval.resolved
 worker.started
 worker.log.delta
 worker.completed
+worker.failed
+worker.cancelled
 patch.created
 test.result
 voice.preview.started

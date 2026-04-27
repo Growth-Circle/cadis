@@ -886,6 +886,12 @@ pub enum CadisEvent {
     /// Worker completed.
     #[serde(rename = "worker.completed")]
     WorkerCompleted(WorkerEventPayload),
+    /// Worker failed.
+    #[serde(rename = "worker.failed")]
+    WorkerFailed(WorkerEventPayload),
+    /// Worker was cancelled.
+    #[serde(rename = "worker.cancelled")]
+    WorkerCancelled(WorkerEventPayload),
     /// Patch was created.
     #[serde(rename = "patch.created")]
     PatchCreated(PatchCreatedPayload),
@@ -1391,6 +1397,15 @@ pub struct WorkerEventPayload {
     /// Redacted worker summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Stable failure code for failed workers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Redacted failure or cancellation message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Timestamp when cancellation was requested, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancellation_requested_at: Option<Timestamp>,
     /// Non-destructive worktree intent and path planning metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorkerWorktreeIntent>,
@@ -1988,6 +2003,9 @@ mod tests {
                 cli: None,
                 cwd: None,
                 summary: Some("implement worktree baseline".to_owned()),
+                error_code: None,
+                error: None,
+                cancellation_requested_at: None,
                 worktree: Some(WorkerWorktreeIntent {
                     workspace_id: Some("cadis".to_owned()),
                     project_root: Some("/home/user/Project/cadis".to_owned()),
@@ -2084,6 +2102,65 @@ mod tests {
             CadisEvent::WorkerCompleted(payload) => {
                 assert_eq!(payload.worktree, None);
                 assert_eq!(payload.artifacts, None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worker_terminal_events_carry_failure_and_cancellation_metadata() {
+        let failed = EventEnvelope::new(
+            EventId::from("evt_worker_failed"),
+            Timestamp::new_utc("2026-04-26T00:00:00Z").expect("timestamp should be UTC"),
+            "cadisd",
+            Some(SessionId::from("ses_1")),
+            CadisEvent::WorkerFailed(WorkerEventPayload {
+                worker_id: "worker_000001".to_owned(),
+                agent_id: Some(AgentId::from("coder")),
+                parent_agent_id: Some(AgentId::from("main")),
+                status: Some("failed".to_owned()),
+                cli: None,
+                cwd: None,
+                summary: Some("provider failed".to_owned()),
+                error_code: Some("provider_client_error".to_owned()),
+                error: Some("provider failed".to_owned()),
+                cancellation_requested_at: None,
+                worktree: None,
+                artifacts: None,
+            }),
+        );
+
+        let value = serde_json::to_value(&failed).expect("event should serialize");
+        assert_eq!(value["type"], "worker.failed");
+        assert_eq!(
+            value["payload"]["error_code"],
+            json!("provider_client_error")
+        );
+
+        let cancelled = json!({
+            "protocol_version": CURRENT_PROTOCOL_VERSION,
+            "event_id": "evt_worker_cancelled",
+            "timestamp": "2026-04-26T00:00:01Z",
+            "source": "cadisd",
+            "session_id": "ses_1",
+            "type": "worker.cancelled",
+            "payload": {
+                "worker_id": "worker_000001",
+                "agent_id": "coder",
+                "status": "cancelled",
+                "summary": "session was cancelled",
+                "error_code": "session_cancelled",
+                "error": "session was cancelled",
+                "cancellation_requested_at": "2026-04-26T00:00:01Z"
+            }
+        });
+        let envelope = serde_json::from_value::<EventEnvelope>(cancelled)
+            .expect("cancelled event should deserialize");
+        match envelope.event {
+            CadisEvent::WorkerCancelled(payload) => {
+                assert_eq!(payload.worker_id, "worker_000001");
+                assert_eq!(payload.status.as_deref(), Some("cancelled"));
+                assert!(payload.cancellation_requested_at.is_some());
             }
             other => panic!("unexpected event: {other:?}"),
         }

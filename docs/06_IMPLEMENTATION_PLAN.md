@@ -65,7 +65,8 @@ Implemented in the first runnable baseline:
   provider response cannot later overwrite a cancelled AgentSession.
 - Track C worker baseline: in-memory daemon worker registry, route-time
   `worker.log.delta` lifecycle logs, `events.snapshot` worker lifecycle
-  snapshots, and one-shot `worker.tail` replay.
+  snapshots, `worker.failed` / `worker.cancelled` terminal metadata, and
+  one-shot `worker.tail` replay.
 - P13 HUD subset: Tauri + React `apps/cadis-hud` desktop app, orbital shell,
   chat command panel, agent cards, mention picker, config dialog, six themes,
   model controls, rename dialog, local mic debug, HUD-local voice doctor,
@@ -368,6 +369,8 @@ Tasks:
   worktree exists.
 - Write profile-scoped worker artifacts: `summary.md`, `patch.diff`,
   `changed-files.json`, `test-report.json`, and `memory-candidates.jsonl`.
+- Emit `worker.failed` and `worker.cancelled` with durable failure,
+  cancellation, and cleanup-planning metadata.
 - Keep the parent checkout untouched; patch application remains gated by Track D
   policy/approval work.
 - Continue surfacing worker lifecycle and log events to CLI/HUD.
@@ -376,7 +379,8 @@ Exit criteria:
 
 - A routed coding worker with a git workspace receives an isolated worktree.
 - `worker.started` includes active worktree metadata, and `worker.completed`
-  moves it to review-pending state.
+  / `worker.failed` / `worker.cancelled` move active worktrees to their planned
+  terminal cleanup state.
 - Worker artifacts are written under the profile artifact root and are redacted
   before persistence.
 

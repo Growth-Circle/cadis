@@ -237,6 +237,7 @@
 - [x] Implement daemon worker registry.
 - [x] Implement `worker.tail`.
 - [x] Create git worktree for session-bound project workers.
+- [x] Add worker failed/cancelled event and metadata baseline.
 - [ ] Stream worker logs.
 - [ ] Add worker cancellation.
 - [x] Generate worker diff artifact.
@@ -355,6 +356,9 @@
 - [x] Track I baseline: daemon worker execution setup creates git worktrees,
   persists project-local worktree metadata, and writes profile-scoped worker
   artifacts for review.
+- [x] Track I event baseline: worker failed/cancelled events carry durable
+  failure, cancellation, and cleanup-planning metadata without parent checkout
+  patch application.
 
 ## 15.2 Workspace Architecture
 
