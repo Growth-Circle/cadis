@@ -264,6 +264,9 @@ allow_face_identity = false
 Rules:
 
 - Face tracking is off by default.
+- The current `wgpu-renderer` crate feature is a native adapter spike that builds
+  render plans from `AvatarFrame`; the desktop MVP config loader does not yet
+  instantiate a GPU surface from these keys.
 - Native Wulan renderer failure falls back to the CADIS orb by default and must
   not block HUD launch.
 - Enabling face tracking requires explicit permission, a visible camera-active

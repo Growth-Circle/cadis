@@ -305,13 +305,13 @@
 - [x] Confirm avatar style changes route through `ui.preferences.set`.
 - [x] Define renderer-neutral Wulan avatar render state.
 - [ ] Connect native Wulan renderer to `cadis-avatar` frames.
-- [ ] Spike focused Rust/wgpu Wulan renderer.
+- [x] Spike focused Rust/wgpu Wulan renderer contract as feature-gated render plans.
 - [ ] Reconsider Bevy only through a decision record if wgpu is insufficient.
 - [ ] Port Wulan portrait shader, particles, reticles, eye overlay, and mouth overlay from the Three.js prototype.
 - [ ] Add Wulan body gesture set: idle breath, listening lean, nod, gaze shift, approval hand cue, speaking emphasis, coding focus, thinking scan, and error recoil.
-- [ ] Add reduced-motion behavior for Wulan gestures.
+- [x] Add reduced-motion behavior for Wulan gestures and wgpu render plans.
 - [ ] Keep optional face tracking off by default, local-only, permission-gated, and visibly indicated when active.
-- [ ] Confirm Wulan native renderer failure falls back to the CADIS orb.
+- [x] Confirm Wulan native renderer failure falls back to the CADIS orb in avatar crate tests.
 - [ ] Capture HUD screenshot parity at 1200x760, 1600x1000, and 1920x1080.
 - [ ] Confirm no overlapping cards, status text, chat panel, approval stack, or central orb text.
 

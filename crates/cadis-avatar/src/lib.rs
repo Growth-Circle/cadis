@@ -11,6 +11,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "wgpu-renderer")]
+pub mod wgpu_renderer;
+
 /// Identifier used by the Wulan avatar prototype and native engine.
 pub const WULAN_AVATAR_ID: &str = "wulan_arc";
 
