@@ -387,8 +387,11 @@ an optional redacted `result`. Terminal failure/cancellation events add optional
 The current baseline enforces a per-route step budget before provider execution
 and records timeout deadlines. AgentSession metadata is written atomically under
 `state/agent-sessions/` and recovered on daemon restart so snapshots can replay
-the current AgentSession state. Model/tool-loop cancellation and async
-interrupt remain later runtime work.
+the current AgentSession state. `session.cancel` marks active AgentSessions as
+`cancelled` and daemon provider callbacks now return provider-boundary
+`Cancel` for that pending generation, preventing a later provider response from
+turning the AgentSession back into `failed` or `completed`. Tool-loop
+cancellation and broader async interrupts remain later runtime work.
 
 `workspace.list.response` payload:
 

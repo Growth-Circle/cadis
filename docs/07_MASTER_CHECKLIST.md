@@ -222,7 +222,8 @@
 - [x] Add per-route AgentSession step budget baseline.
 - [x] Add per-route AgentSession timeout deadline baseline.
 - [x] Add session-cancel AgentSession cancellation baseline.
-- [ ] Add async provider/tool cancellation.
+- [x] Add async provider cancellation at the daemon callback boundary.
+- [ ] Add async tool cancellation.
 - [ ] Add tool-call loop.
 - [ ] Add model fallback behavior.
 
@@ -325,9 +326,10 @@
 - [x] Track B: provider readiness, effective model metadata, selected-model routing, and provider streaming/cancellation contract.
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
   Baselines landed: AgentSession state/events, explicit daemon-owned spawn,
-  spawn limits, worker registry, and worker tail. Remaining: implicit
-  model-driven spawn, worker failed/cancelled events, and real command/test
-  execution inside worker worktrees.
+  spawn limits, worker registry, worker tail, and provider-stream cancellation
+  on `session.cancel`. Remaining: implicit model-driven spawn, worker
+  failed/cancelled events, and real command/test execution inside worker
+  worktrees.
 - [ ] Track D: policy-backed tools and approval persistence.
 - [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
 - [ ] Track F: durable metadata and restart recovery for sessions, agents, AgentSessions, workers, and approvals.

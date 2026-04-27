@@ -1141,6 +1141,11 @@ impl Runtime {
         )
     }
 
+    /// Returns whether a prepared model generation has been cancelled by the runtime.
+    pub fn message_generation_cancelled(&self, pending: &PendingMessageGeneration) -> bool {
+        self.agent_session_cancelled(&pending.context.agent_session_id)
+    }
+
     /// Finalizes a successful streamed model generation.
     pub fn complete_message_generation(
         &mut self,
@@ -1149,6 +1154,10 @@ impl Runtime {
         final_content: String,
         emitted_delta: bool,
     ) -> Vec<EventEnvelope> {
+        if self.message_generation_cancelled(&pending) {
+            return Vec::new();
+        }
+
         let mut events = Vec::new();
         let model = Some(model_invocation_payload(&response.invocation));
         let mut content = final_content;
@@ -1255,6 +1264,10 @@ impl Runtime {
         pending: PendingMessageGeneration,
         error: cadis_models::ModelError,
     ) -> Vec<EventEnvelope> {
+        if error.is_cancelled() && self.message_generation_cancelled(&pending) {
+            return Vec::new();
+        }
+
         let context = pending.context;
         let error_message = error.message().to_owned();
         let mut events = Vec::new();
@@ -2194,6 +2207,12 @@ impl Runtime {
         self.agent_sessions
             .get(agent_session_id)
             .is_some_and(|record| timestamp_is_past(&record.timeout_at))
+    }
+
+    fn agent_session_cancelled(&self, agent_session_id: &AgentSessionId) -> bool {
+        self.agent_sessions
+            .get(agent_session_id)
+            .is_some_and(|record| record.status == AgentSessionStatus::Cancelled)
     }
 
     fn cancel_agent_sessions_for_session(&mut self, session_id: &SessionId) -> Vec<EventEnvelope> {
@@ -7501,6 +7520,51 @@ mod tests {
             .initial_events
             .iter()
             .any(|event| matches!(event.event, CadisEvent::MessageCompleted(_))));
+    }
+
+    #[test]
+    fn pending_message_generation_observes_session_cancel() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = CountingProvider {
+            calls: Arc::clone(&calls),
+        };
+        let mut runtime = runtime_with_provider(Box::new(provider), "counting");
+
+        let pending = runtime
+            .begin_message_request(RequestEnvelope::new(
+                RequestId::from("req_1"),
+                ClientId::from("cli_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: None,
+                    content: "cancel me".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ))
+            .expect("message request should be prepared");
+        let session_id = pending.context.session_id.clone();
+
+        assert!(!runtime.message_generation_cancelled(&pending));
+
+        let cancel = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_cancel"),
+            ClientId::from("cli_2"),
+            ClientRequest::SessionCancel(SessionTargetRequest {
+                session_id: session_id.clone(),
+            }),
+        ));
+
+        assert!(matches!(
+            cancel.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(runtime.message_generation_cancelled(&pending));
+
+        let final_events = runtime.fail_message_generation(
+            pending,
+            cadis_models::ModelError::cancelled("model request was cancelled"),
+        );
+        assert!(final_events.is_empty());
     }
 
     #[test]

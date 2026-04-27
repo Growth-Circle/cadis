@@ -411,6 +411,12 @@ Terminal events are `agent.session.completed`, `agent.session.failed`, and
 `agent.session.cancelled`. Status values are `started`, `running`, `completed`,
 `failed`, `cancelled`, `timed_out`, and `budget_exceeded`.
 
+When a client sends `session.cancel`, `cadisd` marks active AgentSessions as
+`cancelled` and active model-provider callbacks return provider-boundary
+`Cancel` at the next stream callback. HUD should keep rendering the
+`agent.session.cancelled` state and must not convert a later closed stream into
+an error unless a distinct `session.failed` event is received.
+
 ### `agent.renamed`
 
 Confirms rename and updates all surfaces.
