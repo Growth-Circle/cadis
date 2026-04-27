@@ -11,8 +11,8 @@ CI do not overstate current support.
 | Platform | Current status | CI baseline | Runtime claim |
 | --- | --- | --- | --- |
 | Linux desktop | Primary runtime and HUD target | Full Ubuntu CI, Rust workspace checks, HUD frontend checks, and Tauri native shell check | Supported source-built MVP target |
-| macOS | Source validation and baseline only | Rust workspace format, clippy, and tests on `macos-latest` | No packaged runtime or HUD support claim yet |
-| Windows | Portable crate validation only | Selected portable crates check, clippy, and tests on `windows-latest` | No daemon, CLI transport, HUD, shell, or audio runtime claim yet |
+| macOS | Source validation and baseline only | Rust workspace format and clippy, plus selected portable/core crate tests on `macos-latest` | No packaged runtime or HUD support claim yet |
+| Windows | Portable crate validation only | Selected portable crates check and clippy, plus pure portable crate tests on `windows-latest` | No daemon, CLI transport, HUD, shell, storage permission, or audio runtime claim yet |
 | Android | Future remote controller target | None | Not a local runtime target |
 
 Linux remains the first platform for `cadisd`, the CLI, local Unix socket
@@ -20,13 +20,16 @@ transport, the Tauri HUD, HUD voice capture/playback bridges, and desktop
 runtime behavior.
 
 macOS validation proves that the Rust workspace remains source-portable enough
-to compile and test under Unix-like desktop conditions. It does not mean the
-daemon, CLI, HUD packaging, voice bridge, sandboxing, or shell behavior is
-supported for users on macOS.
+to format, compile, lint, and run selected portable/core tests under Unix-like
+desktop conditions. It intentionally avoids the Linux-first daemon socket
+integration tests until local transport paths are platform-adapted. It does not
+mean the daemon, CLI, HUD packaging, voice bridge, sandboxing, or shell behavior
+is supported for users on macOS.
 
 Windows validation is deliberately narrower. Until CADIS has Windows transport,
-shell, path, sandbox, and audio adapters, Windows CI must not build or test the
-daemon, CLI, core runtime, HUD crates, or Tauri app as a supported runtime path.
+shell, path, sandbox, storage permission, and audio adapters, Windows CI must
+not build or test the daemon, CLI, core runtime, HUD crates, Tauri app, or
+state-store permission behavior as a supported runtime path.
 
 ## 3. Portable Windows Crate Set
 
@@ -62,7 +65,7 @@ macOS source baseline:
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-targets --all-features
+cargo test -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar -p cadis-core --all-targets --all-features
 ```
 
 Windows portable crate baseline:
@@ -70,7 +73,7 @@ Windows portable crate baseline:
 ```bash
 cargo check -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features
 cargo clippy -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features -- -D warnings
-cargo test -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features
+cargo test -p cadis-protocol -p cadis-policy -p cadis-models -p cadis-avatar --all-targets --all-features
 ```
 
 ## 5. Promotion Requirements

@@ -58,16 +58,16 @@ Platform baseline checks:
 
 - macOS may run Rust workspace source validation with `cargo fmt --all --check`,
   `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and
-  `cargo test --workspace --all-targets --all-features`.
+  selected portable/core crate tests.
 - Windows must check only portable crates until daemon/CLI transport, shell,
-  path, sandbox, HUD, and audio adapters exist.
+  path, sandbox, state-store permission, HUD, and audio adapters exist.
 
 Current Windows portable crate commands:
 
 ```text
 cargo check -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features
 cargo clippy -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features -- -D warnings
-cargo test -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features
+cargo test -p cadis-protocol -p cadis-policy -p cadis-models -p cadis-avatar --all-targets --all-features
 ```
 
 Security and dependency checks once tooling is configured:

@@ -150,8 +150,9 @@ frontend dependency failure is visible:
 - HUD checks run from `apps/cadis-hud` with pnpm: `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build`
 - HUD native shell check runs `cargo check --manifest-path apps/cadis-hud/src-tauri/Cargo.toml --locked`
 - platform baseline checks run separately: macOS validates Rust workspace source
-  with format, clippy, and tests; Windows validates only portable crates until
-  runtime adapters exist
+  with format, clippy, and selected portable/core tests; Windows validates only
+  portable crate check/clippy and pure portable crate tests until runtime and
+  storage adapters exist
 - browser preview and Playwright E2E are local or later-stage checks until stable enough for required CI
 - current orchestrator coverage should include route events, agent status events,
   request-driven spawn limits, and live `session.subscribe` fan-out to multiple
