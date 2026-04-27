@@ -263,6 +263,20 @@ fn serve_pending_message_generation<W: Write>(
     let stream_result = provider.stream_chat(
         ModelRequest::new(&pending.prompt).with_selected_model(pending.selected_model.as_deref()),
         &mut |event| {
+            if runtime
+                .lock()
+                .map_err(|_| {
+                    ModelError::with_code(
+                        "runtime_lock_failed",
+                        "runtime mutex was poisoned",
+                        false,
+                    )
+                })?
+                .message_generation_cancelled(&pending)
+            {
+                return Ok(ModelStreamControl::Cancel);
+            }
+
             match event {
                 ModelStreamEvent::Started(started) | ModelStreamEvent::Completed(started) => {
                     invocation = Some(started);
@@ -475,7 +489,8 @@ mod tests {
     use cadis_models::{ModelInvocation, ModelProvider, ModelResponse};
     use cadis_protocol::{
         CadisEvent, ClientId, ContentKind, DaemonResponse, EmptyPayload, MessageSendRequest,
-        RequestEnvelope, ServerFrame, SessionCreateRequest, SessionEventPayload, Timestamp,
+        RequestEnvelope, ServerFrame, SessionCreateRequest, SessionEventPayload,
+        SessionTargetRequest, Timestamp,
     };
     use std::sync::Condvar;
     use std::time::{Duration, Instant};
@@ -805,6 +820,107 @@ mod tests {
         assert_eq!(completed_one.event_id, completed_two.event_id);
     }
 
+    #[test]
+    fn session_cancel_propagates_to_active_provider_stream() {
+        let cadis_home = test_workspace("cadis-daemon-provider-cancel");
+        let socket_path = cadis_home.join("run").join("cadisd-test.sock");
+        let first_delta = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let cancel_seen = Arc::new((Mutex::new(false), Condvar::new()));
+        let config = CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        };
+        ensure_layout(&config).expect("test CADIS layout should be created");
+
+        let runtime = Arc::new(Mutex::new(Runtime::new(
+            RuntimeOptions {
+                cadis_home,
+                profile_id: "default".to_owned(),
+                socket_path: Some(socket_path.clone()),
+                model_provider: "cancellable".to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
+                ui_preferences: serde_json::json!({}),
+            },
+            Box::new(CancellableProvider {
+                first_delta: Arc::clone(&first_delta),
+                release: Arc::clone(&release),
+                cancel_seen: Arc::clone(&cancel_seen),
+            }),
+        )));
+        let event_log = EventLog::new(&config);
+        let event_bus = EventBus::new(32);
+        let listener = UnixListener::bind(&socket_path).expect("test socket should bind");
+        let accept_runtime = Arc::clone(&runtime);
+        let accept_event_log = event_log.clone();
+        let accept_event_bus = event_bus.clone();
+        let accept_thread = thread::spawn(move || {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().expect("test client should connect");
+                let runtime = Arc::clone(&accept_runtime);
+                let event_log = accept_event_log.clone();
+                let event_bus = accept_event_bus.clone();
+                thread::spawn(move || {
+                    let _ = serve_unix_stream(stream, runtime, event_log, event_bus);
+                });
+            }
+        });
+
+        let mut messenger = TestClient::connect(&socket_path);
+        let mut control = TestClient::connect(&socket_path);
+        accept_thread
+            .join()
+            .expect("test accept thread should not panic");
+
+        messenger.send(RequestEnvelope::new(
+            RequestId::from("req_message"),
+            ClientId::from("cli_message"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: "cancel active provider".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+        assert_accepted_response(&mut messenger);
+
+        let session_id = match messenger
+            .read_event_matching(|event| matches!(event.event, CadisEvent::SessionStarted(_)))
+            .event
+        {
+            CadisEvent::SessionStarted(payload) => payload.session_id,
+            other => panic!("expected session.started event, got {other:?}"),
+        };
+        messenger.read_event_matching(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::MessageDelta(payload) if payload.delta == "first"
+            )
+        });
+        wait_for_flag(&first_delta);
+
+        control.send(RequestEnvelope::new(
+            RequestId::from("req_cancel"),
+            ClientId::from("cli_control"),
+            ClientRequest::SessionCancel(SessionTargetRequest {
+                session_id: session_id.clone(),
+            }),
+        ));
+        assert_accepted_response(&mut control);
+        control.read_event_matching(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionCancelled(payload)
+                    if payload.session_id == session_id
+            )
+        });
+
+        set_flag(&release);
+        wait_for_flag_timeout(&cancel_seen, Duration::from_secs(2));
+    }
+
     #[derive(Clone, Debug)]
     struct WaitingProvider {
         entered: Arc<(Mutex<bool>, Condvar)>,
@@ -844,6 +960,52 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct CancellableProvider {
+        first_delta: Arc<(Mutex<bool>, Condvar)>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+        cancel_seen: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl ModelProvider for CancellableProvider {
+        fn name(&self) -> &str {
+            "cancellable"
+        }
+
+        fn chat(&self, _prompt: &str) -> Result<Vec<String>, ModelError> {
+            Ok(vec!["done".to_owned()])
+        }
+
+        fn stream_chat(
+            &self,
+            request: ModelRequest<'_>,
+            callback: &mut cadis_models::ModelStreamCallback<'_>,
+        ) -> Result<ModelResponse, ModelError> {
+            let invocation = ModelInvocation {
+                requested_model: request.selected_model.map(ToOwned::to_owned),
+                effective_provider: "cancellable".to_owned(),
+                effective_model: "unit-test".to_owned(),
+                fallback: false,
+                fallback_reason: None,
+            };
+            callback(ModelStreamEvent::Started(invocation.clone()))?;
+            callback(ModelStreamEvent::Delta("first".to_owned()))?;
+            set_flag(&self.first_delta);
+            wait_for_flag(&self.release);
+            if callback(ModelStreamEvent::Delta("second".to_owned()))? == ModelStreamControl::Cancel
+            {
+                set_flag(&self.cancel_seen);
+                return Err(ModelError::cancelled("model request was cancelled")
+                    .with_invocation(invocation));
+            }
+            callback(ModelStreamEvent::Completed(invocation.clone()))?;
+            Ok(ModelResponse {
+                deltas: vec!["first".to_owned(), "second".to_owned()],
+                invocation,
+            })
+        }
+    }
+
     fn wait_for_flag(flag: &Arc<(Mutex<bool>, Condvar)>) {
         let (lock, condvar) = &**flag;
         let mut ready = lock.lock().expect("flag mutex should lock");
@@ -858,6 +1020,22 @@ mod tests {
         let (lock, condvar) = &**flag;
         *lock.lock().expect("flag mutex should lock") = true;
         condvar.notify_all();
+    }
+
+    fn wait_for_flag_timeout(flag: &Arc<(Mutex<bool>, Condvar)>, timeout: Duration) {
+        let (lock, condvar) = &**flag;
+        let deadline = Instant::now() + timeout;
+        let mut ready = lock.lock().expect("flag mutex should lock");
+        while !*ready {
+            let now = Instant::now();
+            assert!(now < deadline, "timed out waiting for flag");
+            let wait_for = deadline.saturating_duration_since(now);
+            let (guard, result) = condvar
+                .wait_timeout(ready, wait_for)
+                .expect("flag mutex should not be poisoned");
+            ready = guard;
+            assert!(!result.timed_out() || *ready, "timed out waiting for flag");
+        }
     }
 
     struct TestClient {

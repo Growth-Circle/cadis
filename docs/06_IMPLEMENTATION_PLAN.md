@@ -56,7 +56,9 @@ Implemented in the first runnable baseline:
 - Agent Runtime baseline: durable per-route `AgentSession` records with route,
   task, result, timeout deadline, step budget, cancellation, and parent-child
   metadata exposed through `agent.session.*` lifecycle events and replayed in
-  snapshot responses after daemon restart.
+  snapshot responses after daemon restart. `session.cancel` now propagates into
+  active model provider streams through callback cancellation, so an in-flight
+  provider response cannot later overwrite a cancelled AgentSession.
 - Track C worker baseline: in-memory daemon worker registry, route-time
   `worker.log.delta` lifecycle logs, `events.snapshot` worker lifecycle
   snapshots, and one-shot `worker.tail` replay.
@@ -83,9 +85,10 @@ Implemented in the first runnable baseline:
 Still pending:
 
 - Native mutating file/shell tools.
-- Agent runtime beyond the current route-and-answer path: async cancellation,
-  model-driven spawn, multi-step budgets, and a provider/tool-call loop remain
-  future work; existing `agent.spawn` is client-requested, not agent-driven.
+- Agent runtime beyond the current route-and-answer path: model-driven spawn,
+  multi-step budgets, full tool cancellation, and a provider/tool-call loop
+  remain future work; existing `agent.spawn` is client-requested, not
+  agent-driven.
 - Daemon startup wiring for pending approval recovery. Store-level atomic write
   and fail-safe recovery helpers exist, and the daemon now recovers durable
   session, agent, AgentSession, and worker metadata.
@@ -185,6 +188,10 @@ Tasks:
 - Add a worker registry with `worker.started`, `worker.log.delta`,
   `worker.completed`, `worker.failed`, and `worker.cancelled`.
 - Implement `worker.tail` from daemon-owned worker logs.
+- Propagate `session.cancel` into active provider streams. Baseline now checks
+  pending AgentSession cancellation inside daemon provider callbacks, returns
+  `ModelStreamControl::Cancel`, and prevents cancelled generations from
+  finalizing as failed or completed after the cancel event.
 
 Exit criteria:
 
@@ -192,6 +199,8 @@ Exit criteria:
   limits.
 - HUD worker tree is driven by daemon worker events.
 - Worker logs can be tailed from CLI and HUD.
+- Cancelling a session stops the active provider stream at the next callback
+  boundary and preserves the AgentSession as `cancelled`.
 
 ### Track D - Policy, Approval, and Tool Runtime
 

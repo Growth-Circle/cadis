@@ -45,6 +45,7 @@ Use for:
 Use for:
 
 - model provider contract
+- daemon provider-stream cancellation on `session.cancel`
 - tool registry contract
 - local protocol compatibility
 - event schema compatibility
