@@ -10,7 +10,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use cadis_core::{PendingMessageGeneration, Runtime, RuntimeOptions};
-use cadis_models::{provider_from_config, ModelError, ModelRequest, ModelStreamEvent};
+use cadis_models::{
+    provider_from_config, ModelError, ModelRequest, ModelStreamControl, ModelStreamEvent,
+};
 use cadis_protocol::{
     ClientRequest, DaemonResponse, ErrorPayload, EventEnvelope, EventId, EventSubscriptionRequest,
     RequestEnvelope, RequestId, ResponseEnvelope, ServerFrame, SessionId,
@@ -282,9 +284,9 @@ fn serve_pending_message_generation<W: Write>(
                         ModelError::with_code("event_write_failed", error.to_string(), false)
                     })?;
                 }
-                ModelStreamEvent::Failed(_) => {}
+                ModelStreamEvent::Failed(_) | ModelStreamEvent::Cancelled(_) => {}
             }
-            Ok(())
+            Ok(ModelStreamControl::Continue)
         },
     );
 
@@ -588,6 +590,9 @@ mod tests {
                 profile_id: "default".to_owned(),
                 socket_path: None,
                 model_provider: "waiting".to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
                 ui_preferences: serde_json::json!({}),
             },
             Box::new(WaitingProvider {
@@ -616,7 +621,7 @@ mod tests {
             provider
                 .stream_chat(
                     ModelRequest::new(&prompt).with_selected_model(selected_model.as_deref()),
-                    &mut |_event| Ok(()),
+                    &mut |_event| Ok(ModelStreamControl::Continue),
                 )
                 .expect("waiting provider should complete")
         });
@@ -658,6 +663,9 @@ mod tests {
                 profile_id: "default".to_owned(),
                 socket_path: Some(socket_path.clone()),
                 model_provider: "waiting".to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
                 ui_preferences: serde_json::json!({}),
             },
             Box::new(WaitingProvider {

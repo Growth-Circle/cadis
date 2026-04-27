@@ -4103,6 +4103,7 @@ impl ToolDefinition {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn approval_placeholder(
         name: &'static str,
         description: &'static str,
@@ -5604,6 +5605,9 @@ mod tests {
                 profile_id: "default".to_owned(),
                 socket_path: Some(PathBuf::from("/tmp/cadis-test.sock")),
                 model_provider: "echo".to_owned(),
+                ollama_model: "llama3.2".to_owned(),
+                openai_model: "gpt-5.2".to_owned(),
+                openai_api_key_configured: false,
                 ui_preferences: serde_json::json!({
                     "voice": {
                         "enabled": enabled,
