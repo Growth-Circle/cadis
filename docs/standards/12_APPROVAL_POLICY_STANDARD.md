@@ -28,6 +28,7 @@ evaluate policy
 auto-allow, auto-deny, or request approval
 persist approval request when needed
 wait for resolution
+revalidate policy, workspace, denied paths, and secret posture if approved
 execute only after approved
 persist resolution and execution result
 ```
@@ -77,6 +78,8 @@ Resolution rules:
 - Later responses must be rejected or reported as already resolved.
 - Denied approvals must prevent execution.
 - Expired approvals must prevent execution.
+- Approved responses must still pass final daemon-side revalidation before
+  execution.
 - Approval state must not depend on UI-local state.
 - Clients must remove approval cards only after `approval.resolved`.
 
@@ -109,8 +112,8 @@ Open-source defaults should be conservative and understandable.
 
 Current implementation baseline:
 
-- `file.read`, `file.search`, and `git.status` are auto-allowed only after
-  daemon-side tool classification and workspace path validation.
+- `file.read`, `file.search`, `git.status`, and `git.diff` are auto-allowed
+  only after daemon-side tool classification and workspace path validation.
 - `shell.run`, write tools, and mutating git/worktree placeholders require
   approval and are persisted under daemon-owned state.
 - Unknown tools are denied.
@@ -118,6 +121,22 @@ Current implementation baseline:
   corresponding execution backend is implemented.
 - `approval.respond` uses daemon state and persisted approval records; the first
   valid pending response wins, later responses are rejected as already resolved.
+
+Approved execution target:
+
+- Approval records the user's decision; it does not let CLI, HUD, Telegram,
+  voice, or any worker run a local action directly.
+- `cadisd` must revalidate approval expiry, tool contract, normalized input,
+  workspace grant, denied paths, secret-access policy, and session/worker state
+  immediately before emitting `tool.started`.
+- If revalidation fails, the daemon emits `tool.failed` and does not execute.
+- `shell.run` requires an `exec` or `admin` workspace grant and a filtered
+  environment with secrets excluded by default.
+- `file.patch` requires write access, a previewable patch, context validation,
+  atomic write behavior where practical, and fail-closed handling for denied
+  paths, symlinks, and concurrent edits.
+- Worker patch application is a separate approval-gated tool call; worker
+  completion does not authorize mutation of the parent workspace.
 
 ## 8. Configuration
 
@@ -165,6 +184,11 @@ The baseline persists one JSON approval record per approval under
 `~/.cadis/state/approvals`. Records include request metadata, risk class,
 expiration, decision, redacted reason, and resolution timestamp.
 
+Secret access is fail-closed by default. A request that targets secret-looking
+paths, secret-bearing environment variables, credential config, auth headers, or
+unredacted command output must be denied unless a future explicit
+`secret-access` policy and approval metadata authorizes that exact access.
+
 ## 11. UX Requirements
 
 Approval prompts must be concise but complete.
@@ -191,7 +215,7 @@ Required tests:
 - dangerous delete requires approval
 - sudo/system change requires approval
 - protected git write requires approval
-- approval allow executes action
+- approval allow executes action after backend support and final revalidation
 - approval deny prevents action
 - expiry prevents action
 - duplicate responses are first-response-wins
