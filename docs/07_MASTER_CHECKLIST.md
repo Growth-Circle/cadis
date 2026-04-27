@@ -251,7 +251,7 @@
 - [ ] Request patch approval.
 - [ ] Apply approved patch.
 - [ ] Route worker patch application through Track D `file.patch` or a future patch-apply tool.
-- [ ] Keep worker cleanup separate from patch approval and require CADIS-owned worktree metadata.
+- [x] Keep worker cleanup separate from patch approval and require CADIS-owned worktree metadata.
 - [ ] Cleanup worktree.
 - [x] Add worker isolation tests for worktree creation and artifact output.
 
@@ -372,6 +372,9 @@
 - [x] Track I event baseline: worker failed/cancelled events carry durable
   failure, cancellation, and cleanup-planning metadata without parent checkout
   patch application.
+- [x] Track I cleanup planning: `worker.cleanup` moves CADIS-owned terminal
+  worker worktree metadata to `cleanup_pending`, rejects unknown/missing/non-owned
+  paths, and does not delete files.
 
 ## 15.2 Workspace Architecture
 

@@ -29,12 +29,12 @@ use cadis_protocol::{
     SessionEventPayload, SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload,
     ToolFailedPayload, UiPreferencesPayload, VoiceDoctorCheck, VoiceDoctorPayload,
     VoicePreferences, VoicePreflightRequest, VoicePreflightSummary, VoicePreviewRequest,
-    VoiceRuntimeState, VoiceStatusPayload, WorkerArtifactLocations, WorkerEventPayload,
-    WorkerLogDeltaPayload, WorkerTailRequest, WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent,
-    WorkerWorktreeState, WorkspaceAccess, WorkspaceDoctorCheck, WorkspaceDoctorPayload,
-    WorkspaceDoctorRequest, WorkspaceGrantId, WorkspaceGrantPayload, WorkspaceGrantRequest,
-    WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest, WorkspaceRecordPayload,
-    WorkspaceRegisterRequest, WorkspaceRevokeRequest,
+    VoiceRuntimeState, VoiceStatusPayload, WorkerArtifactLocations, WorkerCleanupRequest,
+    WorkerEventPayload, WorkerLogDeltaPayload, WorkerTailRequest, WorkerWorktreeCleanupPolicy,
+    WorkerWorktreeIntent, WorkerWorktreeState, WorkspaceAccess, WorkspaceDoctorCheck,
+    WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantId, WorkspaceGrantPayload,
+    WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest,
+    WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
 use cadis_store::{
     redact, AgentHomeDiagnostic, AgentHomeDoctorOptions, AgentHomeTemplate, ApprovalRecord,
@@ -577,6 +577,7 @@ impl Runtime {
             ClientRequest::VoicePreview(request) => self.handle_voice_preview(request_id, request),
             ClientRequest::VoiceStop(_) => self.handle_voice_stop(request_id),
             ClientRequest::WorkerTail(request) => self.worker_tail(request_id, request),
+            ClientRequest::WorkerCleanup(request) => self.worker_cleanup(request_id, request),
             ClientRequest::SessionUnsubscribe(_) => self.reject(
                 request_id,
                 "not_implemented",
@@ -1427,6 +1428,41 @@ impl Runtime {
             .collect();
 
         self.accept(request_id, events)
+    }
+
+    fn worker_cleanup(
+        &mut self,
+        request_id: RequestId,
+        request: WorkerCleanupRequest,
+    ) -> RequestOutcome {
+        let Some(worker) = self.workers.get(&request.worker_id) else {
+            return self.reject(
+                request_id,
+                "worker_not_found",
+                format!("worker '{}' was not found", request.worker_id),
+                false,
+            );
+        };
+        if !worker.is_terminal() {
+            return self.reject(
+                request_id,
+                "worker_not_terminal",
+                format!(
+                    "worker '{}' is not terminal and cannot be cleaned up",
+                    request.worker_id
+                ),
+                false,
+            );
+        }
+
+        match self.plan_worker_worktree_cleanup(
+            &request.worker_id,
+            request.worktree_path.as_deref(),
+            "explicit cleanup request",
+        ) {
+            Ok(events) => self.accept(request_id, events),
+            Err(error) => self.reject(request_id, error.code, error.message, false),
+        }
     }
 
     fn spawn_agent(&mut self, request_id: RequestId, request: AgentSpawnRequest) -> RequestOutcome {
@@ -2450,7 +2486,7 @@ impl Runtime {
                 }
             }
         }
-        self.plan_worker_terminal_cleanup(worker_id, status);
+        events.extend(self.plan_worker_terminal_cleanup(worker_id, status));
         if let Some(event) = self.update_worker_status(
             worker_id,
             status,
@@ -2476,14 +2512,287 @@ impl Runtime {
         write_worker_artifacts(worker, status, summary)
     }
 
-    fn plan_worker_terminal_cleanup(&mut self, worker_id: &str, status: &str) {
+    fn plan_worker_terminal_cleanup(
+        &mut self,
+        worker_id: &str,
+        status: &str,
+    ) -> Vec<EventEnvelope> {
         if !worker_status_is_terminal(status) {
-            return;
+            return Vec::new();
         }
-        let Some(worker) = self.workers.get_mut(worker_id) else {
-            return;
+        let Some(target_state) = self
+            .workers
+            .get(worker_id)
+            .and_then(|worker| worker_terminal_worktree_state(worker, status))
+        else {
+            return Vec::new();
         };
-        plan_worker_terminal_worktree(worker, status);
+
+        match target_state {
+            WorkerWorktreeState::CleanupPending => {
+                match self.transition_worker_worktree_state(
+                    worker_id,
+                    None,
+                    WorkerWorktreeState::CleanupPending,
+                ) {
+                    Ok(()) => self
+                        .append_worker_log(
+                            worker_id,
+                            "cleanup pending: terminal worker state; files were not removed\n",
+                        )
+                        .into_iter()
+                        .collect(),
+                    Err(error) => self.worker_cleanup_failed_events(worker_id, error),
+                }
+            }
+            WorkerWorktreeState::ReviewPending => {
+                match self.transition_worker_worktree_state(
+                    worker_id,
+                    None,
+                    WorkerWorktreeState::ReviewPending,
+                ) {
+                    Ok(()) => Vec::new(),
+                    Err(error) => self.worker_cleanup_failed_events(worker_id, error),
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn plan_worker_worktree_cleanup(
+        &mut self,
+        worker_id: &str,
+        requested_path: Option<&str>,
+        reason: &str,
+    ) -> Result<Vec<EventEnvelope>, RuntimeError> {
+        self.transition_worker_worktree_state(
+            worker_id,
+            requested_path,
+            WorkerWorktreeState::CleanupPending,
+        )?;
+
+        let mut events = Vec::new();
+        if let Some(event) = self.append_worker_log(
+            worker_id,
+            format!("cleanup requested: {reason}; files were not removed\n"),
+        ) {
+            events.push(event);
+        }
+        if let Some((session_id, payload)) = self
+            .workers
+            .get(worker_id)
+            .map(|worker| (worker.session_id.clone(), worker.event_payload()))
+        {
+            events
+                .push(self.session_event(session_id, CadisEvent::WorkerCleanupRequested(payload)));
+        }
+        Ok(events)
+    }
+
+    fn transition_worker_worktree_state(
+        &mut self,
+        worker_id: &str,
+        requested_path: Option<&str>,
+        target_state: WorkerWorktreeState,
+    ) -> Result<(), RuntimeError> {
+        let verified = self.verify_cadis_worker_worktree(worker_id, requested_path)?;
+        let project_state = project_worker_worktree_state_for_worker_state(target_state);
+
+        let mut metadata = verified.metadata;
+        metadata.state = project_state;
+        verified
+            .store
+            .save_worker_worktree_metadata(&metadata)
+            .map_err(|error| RuntimeError {
+                code: "worker_worktree_metadata_persist_failed",
+                message: format!(
+                    "worker '{}' worktree metadata could not be updated: {error}",
+                    worker_id
+                ),
+            })?;
+
+        if let Some(worker) = self.workers.get_mut(worker_id) {
+            if let Some(worktree) = &mut worker.worktree {
+                worktree.state = target_state;
+            }
+            worker.updated_at = now_timestamp();
+        }
+        self.persist_worker_record(worker_id)
+            .map_err(|error| RuntimeError {
+                code: "worker_metadata_persist_failed",
+                message: format!("worker '{worker_id}' metadata could not be updated: {error}"),
+            })?;
+
+        Ok(())
+    }
+
+    fn verify_cadis_worker_worktree(
+        &self,
+        worker_id: &str,
+        requested_path: Option<&str>,
+    ) -> Result<VerifiedWorkerWorktree, RuntimeError> {
+        let worker = self.workers.get(worker_id).ok_or(RuntimeError {
+            code: "worker_not_found",
+            message: format!("worker '{worker_id}' was not found"),
+        })?;
+        let worktree = worker.worktree.as_ref().ok_or(RuntimeError {
+            code: "worker_worktree_not_owned",
+            message: format!("worker '{worker_id}' has no daemon-owned worktree metadata"),
+        })?;
+        let Some(project_root) = worktree.project_root.as_deref() else {
+            return Err(RuntimeError {
+                code: "worker_worktree_not_owned",
+                message: format!("worker '{worker_id}' is not bound to a CADIS project worktree"),
+            });
+        };
+
+        let project_root = fs::canonicalize(project_root).map_err(|error| RuntimeError {
+            code: "worker_workspace_missing",
+            message: format!(
+                "worker '{worker_id}' project root '{}' is unavailable: {error}",
+                project_root
+            ),
+        })?;
+        let store = ProjectWorkspaceStore::new(&project_root);
+        let workspace_metadata = store.load().map_err(|error| RuntimeError {
+            code: "worker_worktree_metadata_unreadable",
+            message: format!(
+                "worker '{worker_id}' project workspace metadata could not be read: {error}"
+            ),
+        })?;
+        let paths = store.worker_worktree_paths(worker_id, workspace_metadata.as_ref());
+        let cadis_worktree_root =
+            fs::canonicalize(project_root.join(".cadis/worktrees")).map_err(|error| {
+                RuntimeError {
+                    code: "worker_worktree_not_owned",
+                    message: format!(
+                        "worker '{worker_id}' CADIS worktree root is unavailable: {error}"
+                    ),
+                }
+            })?;
+        let expected_path =
+            fs::canonicalize(&paths.worktree_path).map_err(|error| RuntimeError {
+                code: "worker_worktree_missing",
+                message: format!(
+                    "worker '{worker_id}' worktree '{}' is unavailable: {error}",
+                    paths.worktree_path.display()
+                ),
+            })?;
+        if expected_path == cadis_worktree_root || !expected_path.starts_with(&cadis_worktree_root)
+        {
+            return Err(RuntimeError {
+                code: "worker_worktree_not_owned",
+                message: format!(
+                    "worker '{worker_id}' worktree '{}' is outside the CADIS worktree root",
+                    expected_path.display()
+                ),
+            });
+        }
+
+        let record_path = resolve_project_path(&project_root, &worktree.worktree_path);
+        let record_path = fs::canonicalize(&record_path).map_err(|error| RuntimeError {
+            code: "worker_worktree_missing",
+            message: format!(
+                "worker '{worker_id}' recorded worktree '{}' is unavailable: {error}",
+                record_path.display()
+            ),
+        })?;
+        if record_path != expected_path {
+            return Err(RuntimeError {
+                code: "worker_worktree_not_owned",
+                message: format!(
+                    "worker '{worker_id}' recorded worktree '{}' does not match CADIS path '{}'",
+                    record_path.display(),
+                    expected_path.display()
+                ),
+            });
+        }
+
+        if let Some(requested_path) = requested_path {
+            let requested_path = resolve_project_path(&project_root, requested_path);
+            let requested_path =
+                fs::canonicalize(&requested_path).map_err(|error| RuntimeError {
+                    code: "worker_worktree_missing",
+                    message: format!(
+                        "worker '{worker_id}' requested worktree '{}' is unavailable: {error}",
+                        requested_path.display()
+                    ),
+                })?;
+            if requested_path != expected_path {
+                return Err(RuntimeError {
+                    code: "worker_worktree_not_owned",
+                    message: format!(
+                        "worker '{worker_id}' requested worktree '{}' does not match CADIS path '{}'",
+                        requested_path.display(),
+                        expected_path.display()
+                    ),
+                });
+            }
+        }
+
+        let metadata = store
+            .load_worker_worktree_metadata(worker_id)
+            .map_err(|error| RuntimeError {
+                code: "worker_worktree_metadata_unreadable",
+                message: format!(
+                    "worker '{worker_id}' worktree metadata could not be read: {error}"
+                ),
+            })?
+            .ok_or(RuntimeError {
+                code: "worker_worktree_metadata_missing",
+                message: format!("worker '{worker_id}' has no project-local worktree metadata"),
+            })?;
+        if metadata.worker_id != worker_id {
+            return Err(RuntimeError {
+                code: "worker_worktree_not_owned",
+                message: format!(
+                    "worker '{worker_id}' metadata belongs to worker '{}'",
+                    metadata.worker_id
+                ),
+            });
+        }
+        let metadata_path = resolve_project_path(&project_root, &metadata.worktree_path);
+        let metadata_path = fs::canonicalize(&metadata_path).map_err(|error| RuntimeError {
+            code: "worker_worktree_missing",
+            message: format!(
+                "worker '{worker_id}' metadata worktree '{}' is unavailable: {error}",
+                metadata_path.display()
+            ),
+        })?;
+        if metadata_path != expected_path {
+            return Err(RuntimeError {
+                code: "worker_worktree_not_owned",
+                message: format!(
+                    "worker '{worker_id}' metadata worktree '{}' does not match CADIS path '{}'",
+                    metadata_path.display(),
+                    expected_path.display()
+                ),
+            });
+        }
+        if metadata.state == ProjectWorkerWorktreeState::Removed {
+            return Err(RuntimeError {
+                code: "worker_worktree_not_owned",
+                message: format!("worker '{worker_id}' worktree metadata is already removed"),
+            });
+        }
+
+        Ok(VerifiedWorkerWorktree { store, metadata })
+    }
+
+    fn worker_cleanup_failed_events(
+        &mut self,
+        worker_id: &str,
+        error: RuntimeError,
+    ) -> Vec<EventEnvelope> {
+        self.append_worker_log(
+            worker_id,
+            format!(
+                "cleanup planning failed closed: {}: {}\n",
+                error.code, error.message
+            ),
+        )
+        .into_iter()
+        .collect()
     }
 
     fn append_worker_log(
@@ -4864,6 +5173,12 @@ struct RuntimeError {
     message: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedWorkerWorktree {
+    store: ProjectWorkspaceStore,
+    metadata: ProjectWorkerWorktreeMetadata,
+}
+
 fn model_descriptor_from_catalog_entry(entry: ProviderCatalogEntry) -> ModelDescriptor {
     ModelDescriptor {
         provider: entry.provider,
@@ -5227,22 +5542,57 @@ fn worker_lifecycle_event_kind(status: &str) -> WorkerLifecycleEventKind {
     }
 }
 
-fn plan_worker_terminal_worktree(record: &mut WorkerRecord, status: &str) {
+fn worker_terminal_worktree_state(
+    record: &WorkerRecord,
+    status: &str,
+) -> Option<WorkerWorktreeState> {
     if !worker_status_is_terminal(status) {
-        return;
+        return None;
     }
-    let Some(worktree) = &mut record.worktree else {
-        return;
-    };
+    let worktree = record.worktree.as_ref()?;
     if worktree.state != WorkerWorktreeState::Active {
-        return;
+        return None;
     }
-    worktree.state = match worktree.cleanup_policy {
+    if worker_lifecycle_event_kind(status) == WorkerLifecycleEventKind::Cancelled {
+        return Some(WorkerWorktreeState::CleanupPending);
+    }
+
+    Some(match worktree.cleanup_policy {
         WorkerWorktreeCleanupPolicy::OnCompletion => WorkerWorktreeState::CleanupPending,
         WorkerWorktreeCleanupPolicy::Explicit | WorkerWorktreeCleanupPolicy::AfterApply => {
             WorkerWorktreeState::ReviewPending
         }
+    })
+}
+
+fn plan_worker_terminal_worktree(record: &mut WorkerRecord, status: &str) {
+    let Some(state) = worker_terminal_worktree_state(record, status) else {
+        return;
     };
+    if let Some(worktree) = &mut record.worktree {
+        worktree.state = state;
+    }
+}
+
+fn project_worker_worktree_state_for_worker_state(
+    state: WorkerWorktreeState,
+) -> ProjectWorkerWorktreeState {
+    match state {
+        WorkerWorktreeState::Planned => ProjectWorkerWorktreeState::Planned,
+        WorkerWorktreeState::Active => ProjectWorkerWorktreeState::Ready,
+        WorkerWorktreeState::ReviewPending => ProjectWorkerWorktreeState::ReviewPending,
+        WorkerWorktreeState::CleanupPending => ProjectWorkerWorktreeState::CleanupPending,
+        WorkerWorktreeState::Removed => ProjectWorkerWorktreeState::Removed,
+    }
+}
+
+fn resolve_project_path(project_root: &Path, path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    }
 }
 
 fn load_workspace_registry(profile_home: &ProfileHome) -> HashMap<WorkspaceId, WorkspaceRecord> {
@@ -7490,6 +7840,57 @@ mod tests {
         ));
     }
 
+    fn complete_worker_in_workspace(
+        runtime: &mut Runtime,
+        workspace: &Path,
+        title: &str,
+    ) -> (SessionId, String, String) {
+        let session_id = runtime
+            .handle_request(RequestEnvelope::new(
+                RequestId::from(format!("req_worker_session_{title}")),
+                ClientId::from("cli_1"),
+                ClientRequest::SessionCreate(SessionCreateRequest {
+                    title: Some(title.to_owned()),
+                    cwd: Some(workspace.display().to_string()),
+                }),
+            ))
+            .events
+            .into_iter()
+            .find_map(|event| match event.event {
+                CadisEvent::SessionStarted(payload) => Some(payload.session_id),
+                _ => None,
+            })
+            .expect("session.started should be emitted");
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from(format!("req_worker_execution_{title}")),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: Some(session_id.clone()),
+                target_agent_id: None,
+                content: "/route @codex run focused tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        let completed = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::WorkerCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("worker.completed should be emitted");
+        let worktree_path = completed
+            .worktree
+            .as_ref()
+            .expect("worker.completed should include worktree metadata")
+            .worktree_path
+            .clone();
+
+        (session_id, completed.worker_id.clone(), worktree_path)
+    }
+
     fn grant_workspace(runtime: &mut Runtime, workspace_id: &str, access: Vec<WorkspaceAccess>) {
         grant_workspace_for_agent(runtime, workspace_id, access, None)
     }
@@ -9239,7 +9640,240 @@ mod tests {
             .expect("worker worktree metadata should load")
             .expect("worker worktree metadata should exist");
         assert_eq!(project_metadata.workspace_id, "worker-git");
-        assert_eq!(project_metadata.state, ProjectWorkerWorktreeState::Ready);
+        assert_eq!(
+            project_metadata.state,
+            ProjectWorkerWorktreeState::ReviewPending
+        );
+    }
+
+    #[test]
+    fn worker_cleanup_request_marks_review_worktree_cleanup_pending_without_deleting() {
+        let cadis_home = test_workspace("worker-cleanup-home");
+        let workspace = test_workspace("worker-cleanup-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home.clone());
+        register_workspace(&mut runtime, "worker-cleanup", &workspace);
+        let (_session_id, worker_id, worktree_path) =
+            complete_worker_in_workspace(&mut runtime, &workspace, "cleanup_request");
+
+        let cleanup = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_cleanup"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerCleanup(WorkerCleanupRequest {
+                worker_id: worker_id.clone(),
+                worktree_path: Some(worktree_path.clone()),
+            }),
+        ));
+
+        assert!(matches!(
+            cleanup.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(Path::new(&worktree_path).is_dir());
+        assert!(!cleanup
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+        assert!(cleanup.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCleanupRequested(payload)
+                    if payload.worker_id == worker_id
+                        && payload.worktree.as_ref().is_some_and(|worktree|
+                            worktree.state == WorkerWorktreeState::CleanupPending
+                        )
+            )
+        }));
+
+        let project_metadata = ProjectWorkspaceStore::new(&workspace)
+            .load_worker_worktree_metadata(&worker_id)
+            .expect("worker worktree metadata should load")
+            .expect("worker worktree metadata should exist");
+        assert_eq!(
+            project_metadata.state,
+            ProjectWorkerWorktreeState::CleanupPending
+        );
+
+        let state_store = StateStore::new(&CadisConfig {
+            cadis_home,
+            ..CadisConfig::default()
+        });
+        let recovered = state_store
+            .recover_worker_metadata::<WorkerMetadata>()
+            .expect("worker metadata should recover");
+        let worker = recovered
+            .records
+            .iter()
+            .find(|record| record.metadata.worker_id == worker_id)
+            .expect("worker metadata should exist");
+        assert_eq!(
+            worker
+                .metadata
+                .worktree
+                .as_ref()
+                .expect("worker metadata should include worktree")
+                .state,
+            WorkerWorktreeState::CleanupPending
+        );
+    }
+
+    #[test]
+    fn session_cancel_marks_cadis_worktree_cleanup_pending_metadata() {
+        let cadis_home = test_workspace("cancelled-worker-worktree-home");
+        let workspace = test_workspace("cancelled-worker-worktree-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home.clone());
+        register_workspace(&mut runtime, "cancel-cleanup", &workspace);
+        let session_id = runtime
+            .handle_request(RequestEnvelope::new(
+                RequestId::from("req_cancel_cleanup_session"),
+                ClientId::from("cli_1"),
+                ClientRequest::SessionCreate(SessionCreateRequest {
+                    title: Some("Worker cancellation cleanup".to_owned()),
+                    cwd: Some(workspace.display().to_string()),
+                }),
+            ))
+            .events
+            .into_iter()
+            .find_map(|event| match event.event {
+                CadisEvent::SessionStarted(payload) => Some(payload.session_id),
+                _ => None,
+            })
+            .expect("session.started should be emitted");
+        let pending = runtime
+            .begin_message_request(RequestEnvelope::new(
+                RequestId::from("req_cancel_cleanup_worker"),
+                ClientId::from("hud_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: Some(session_id.clone()),
+                    target_agent_id: None,
+                    content: "/route @codex wait for cancellation".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ))
+            .expect("worker route should prepare model generation");
+        let worker_id = pending
+            .context
+            .worker
+            .as_ref()
+            .expect("route should create a worker")
+            .worker_id
+            .clone();
+
+        let cancel = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_cancel_cleanup"),
+            ClientId::from("hud_1"),
+            ClientRequest::SessionCancel(SessionTargetRequest { session_id }),
+        ));
+
+        assert!(matches!(
+            cancel.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(cancel.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkerCancelled(payload)
+                    if payload.worker_id == worker_id
+                        && payload.worktree.as_ref().is_some_and(|worktree|
+                            worktree.state == WorkerWorktreeState::CleanupPending
+                        )
+            )
+        }));
+
+        let project_metadata = ProjectWorkspaceStore::new(&workspace)
+            .load_worker_worktree_metadata(&worker_id)
+            .expect("worker worktree metadata should load")
+            .expect("worker worktree metadata should exist");
+        assert_eq!(
+            project_metadata.state,
+            ProjectWorkerWorktreeState::CleanupPending
+        );
+
+        let state_store = StateStore::new(&CadisConfig {
+            cadis_home,
+            ..CadisConfig::default()
+        });
+        let recovered = state_store
+            .recover_worker_metadata::<WorkerMetadata>()
+            .expect("worker metadata should recover");
+        let worker = recovered
+            .records
+            .iter()
+            .find(|record| record.metadata.worker_id == worker_id)
+            .expect("worker metadata should exist");
+        assert_eq!(worker.metadata.status, "cancelled");
+        assert_eq!(
+            worker
+                .metadata
+                .worktree
+                .as_ref()
+                .expect("worker metadata should include worktree")
+                .state,
+            WorkerWorktreeState::CleanupPending
+        );
+    }
+
+    #[test]
+    fn worker_cleanup_fails_closed_for_unknown_missing_and_non_owned_worktrees() {
+        let cadis_home = test_workspace("worker-cleanup-fail-closed-home");
+        let workspace = test_workspace("worker-cleanup-fail-closed-workspace");
+        let external = test_workspace("worker-cleanup-external");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let unknown = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_unknown_worker_cleanup"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerCleanup(WorkerCleanupRequest {
+                worker_id: "worker_missing".to_owned(),
+                worktree_path: None,
+            }),
+        ));
+        assert_rejected(unknown, "worker_not_found");
+
+        register_workspace(&mut runtime, "worker-cleanup-fail", &workspace);
+        let (_session_id, worker_id, worktree_path) =
+            complete_worker_in_workspace(&mut runtime, &workspace, "cleanup_fail_closed");
+
+        let non_owned = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_non_owned_worker_cleanup"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerCleanup(WorkerCleanupRequest {
+                worker_id: worker_id.clone(),
+                worktree_path: Some(external.display().to_string()),
+            }),
+        ));
+        assert_rejected(non_owned, "worker_worktree_not_owned");
+        let project_metadata = ProjectWorkspaceStore::new(&workspace)
+            .load_worker_worktree_metadata(&worker_id)
+            .expect("worker worktree metadata should load")
+            .expect("worker worktree metadata should exist");
+        assert_eq!(
+            project_metadata.state,
+            ProjectWorkerWorktreeState::ReviewPending
+        );
+
+        fs::remove_dir_all(&worktree_path).expect("worker worktree should be removable in test");
+        let missing = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_missing_worker_worktree_cleanup"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerCleanup(WorkerCleanupRequest {
+                worker_id: worker_id.clone(),
+                worktree_path: Some(worktree_path),
+            }),
+        ));
+        assert_rejected(missing, "worker_worktree_missing");
+        let project_metadata = ProjectWorkspaceStore::new(&workspace)
+            .load_worker_worktree_metadata(&worker_id)
+            .expect("worker worktree metadata should load")
+            .expect("worker worktree metadata should exist");
+        assert_eq!(
+            project_metadata.state,
+            ProjectWorkerWorktreeState::ReviewPending
+        );
     }
 
     #[test]
