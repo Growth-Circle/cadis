@@ -9678,9 +9678,16 @@ mod tests {
             WORKER_DEFAULT_COMMAND
         );
         assert_eq!(test_report["validation_command"]["status"], "passed");
+        let reported_cwd = test_report["validation_command"]["cwd"]
+            .as_str()
+            .expect("validation command cwd should be a string");
         assert_eq!(
-            test_report["validation_command"]["cwd"],
-            worktree.worktree_path
+            Path::new(reported_cwd)
+                .canonicalize()
+                .expect("reported cwd should canonicalize"),
+            Path::new(&worktree.worktree_path)
+                .canonicalize()
+                .expect("worker worktree path should canonicalize")
         );
         let summary = fs::read_to_string(&artifacts.summary).expect("summary should read");
         assert!(summary.contains("## Daemon Validation"));
