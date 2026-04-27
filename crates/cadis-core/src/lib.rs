@@ -296,6 +296,9 @@ impl Runtime {
             records: sessions,
             mut diagnostics,
         } = recover_session_records(&state_store);
+        let agent_session_recovery = recover_agent_session_records(&state_store);
+        let agent_sessions = agent_session_recovery.records;
+        diagnostics.extend(agent_session_recovery.diagnostics);
         let mut agents = default_agents(&options.model_provider);
         let agent_recovery = recover_agent_records(&state_store);
         diagnostics.extend(agent_recovery.diagnostics);
@@ -309,6 +312,8 @@ impl Runtime {
         let next_session = next_session_counter(&sessions);
         let next_agent = next_agent_counter(&agents);
         let next_worker = next_worker_counter(&workers);
+        let next_agent_session = next_agent_session_counter(&agent_sessions);
+        let next_route = next_route_counter(&agent_sessions);
 
         Self {
             options,
@@ -318,12 +323,12 @@ impl Runtime {
             next_event: 1,
             next_session,
             next_agent,
-            next_agent_session: 1,
-            next_route: 1,
+            next_agent_session,
+            next_route,
             next_worker,
             sessions,
             agents,
-            agent_sessions: HashMap::new(),
+            agent_sessions,
             workers,
             orchestrator,
             ui_preferences,
@@ -2108,6 +2113,7 @@ impl Runtime {
             CadisEvent::AgentSessionStarted(record.event_payload()),
         );
         self.agent_sessions.insert(id.clone(), record);
+        let _ = self.persist_agent_session_record(&id);
         (id, event)
     }
 
@@ -2136,6 +2142,7 @@ impl Runtime {
                 )
             }
         };
+        let _ = self.persist_agent_session_record(agent_session_id);
         Some(self.session_event(session_id, payload))
     }
 
@@ -2150,6 +2157,7 @@ impl Runtime {
             record.result = Some(redact(&result.into()));
             (record.session_id.clone(), record.event_payload())
         };
+        let _ = self.persist_agent_session_record(agent_session_id);
         Some(self.session_event(session_id, CadisEvent::AgentSessionCompleted(payload)))
     }
 
@@ -2167,6 +2175,7 @@ impl Runtime {
             record.error = Some(redact(&error.into()));
             (record.session_id.clone(), record.event_payload())
         };
+        let _ = self.persist_agent_session_record(agent_session_id);
         Some(self.session_event(session_id, CadisEvent::AgentSessionFailed(payload)))
     }
 
@@ -2206,6 +2215,7 @@ impl Runtime {
             }) else {
                 continue;
             };
+            let _ = self.persist_agent_session_record(&agent_session_id);
             events.push(self.session_event(
                 event_session_id.clone(),
                 CadisEvent::AgentSessionCancelled(payload),
@@ -2775,6 +2785,19 @@ impl Runtime {
         Ok(())
     }
 
+    fn persist_agent_session_record(
+        &self,
+        agent_session_id: &AgentSessionId,
+    ) -> Result<(), cadis_store::StoreError> {
+        if let Some(record) = self.agent_sessions.get(agent_session_id) {
+            self.state_store.write_agent_session_metadata(
+                agent_session_id,
+                &AgentSessionMetadata::from_record(record),
+            )?;
+        }
+        Ok(())
+    }
+
     fn accept(&self, request_id: RequestId, events: Vec<EventEnvelope>) -> RequestOutcome {
         RequestOutcome {
             response: ResponseEnvelope::new(
@@ -3133,6 +3156,12 @@ impl AgentRecord {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct AgentSessionRecovery {
+    records: HashMap<AgentSessionId, AgentSessionRecord>,
+    diagnostics: Vec<ErrorPayload>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AgentSessionRecord {
     id: AgentSessionId,
@@ -3149,6 +3178,68 @@ struct AgentSessionRecord {
     error_code: Option<String>,
     error: Option<String>,
     cancellation_requested_at: Option<Timestamp>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+struct AgentSessionMetadata {
+    agent_session_id: AgentSessionId,
+    session_id: SessionId,
+    route_id: String,
+    agent_id: AgentId,
+    parent_agent_id: Option<AgentId>,
+    task: String,
+    status: AgentSessionStatus,
+    timeout_at: Timestamp,
+    budget_steps: u32,
+    steps_used: u32,
+    result: Option<String>,
+    error_code: Option<String>,
+    error: Option<String>,
+    cancellation_requested_at: Option<Timestamp>,
+}
+
+impl AgentSessionMetadata {
+    fn from_record(record: &AgentSessionRecord) -> Self {
+        Self {
+            agent_session_id: record.id.clone(),
+            session_id: record.session_id.clone(),
+            route_id: record.route_id.clone(),
+            agent_id: record.agent_id.clone(),
+            parent_agent_id: record.parent_agent_id.clone(),
+            task: record.task.clone(),
+            status: record.status,
+            timeout_at: record.timeout_at.clone(),
+            budget_steps: record.budget_steps,
+            steps_used: record.steps_used,
+            result: record.result.clone(),
+            error_code: record.error_code.clone(),
+            error: record.error.clone(),
+            cancellation_requested_at: record.cancellation_requested_at.clone(),
+        }
+    }
+
+    fn into_record(self) -> (AgentSessionId, AgentSessionRecord) {
+        let id = self.agent_session_id;
+        (
+            id.clone(),
+            AgentSessionRecord {
+                id,
+                session_id: self.session_id,
+                route_id: self.route_id,
+                agent_id: self.agent_id,
+                parent_agent_id: self.parent_agent_id,
+                task: self.task,
+                status: self.status,
+                timeout_at: self.timeout_at,
+                budget_steps: self.budget_steps,
+                steps_used: self.steps_used,
+                result: self.result,
+                error_code: self.error_code,
+                error: self.error,
+                cancellation_requested_at: self.cancellation_requested_at,
+            },
+        )
+    }
 }
 
 impl AgentSessionRecord {
@@ -4268,10 +4359,71 @@ fn recovery_error(
     }
 }
 
+fn recover_agent_session_records(state_store: &StateStore) -> AgentSessionRecovery {
+    match state_store.recover_agent_session_metadata::<AgentSessionMetadata>() {
+        Ok(recovery) => AgentSessionRecovery {
+            records: recovery
+                .records
+                .into_iter()
+                .map(|record| record.metadata.into_record())
+                .collect(),
+            diagnostics: recovery
+                .diagnostics
+                .into_iter()
+                .map(agent_session_recovery_diagnostic)
+                .collect(),
+        },
+        Err(error) => AgentSessionRecovery {
+            records: HashMap::new(),
+            diagnostics: vec![recovery_error(
+                "agent_session_recovery_failed",
+                format!("could not scan durable AgentSession metadata: {error}"),
+                true,
+            )],
+        },
+    }
+}
+
+fn agent_session_recovery_diagnostic(diagnostic: StateRecoveryDiagnostic) -> ErrorPayload {
+    let file_name = diagnostic
+        .path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("unknown");
+    recovery_error(
+        "agent_session_recovery_skipped",
+        format!(
+            "skipped durable AgentSession metadata state/agent-sessions/{file_name}: {}",
+            diagnostic.reason
+        ),
+        false,
+    )
+}
+
 fn next_session_counter(sessions: &HashMap<SessionId, SessionRecord>) -> u64 {
     sessions
         .keys()
         .filter_map(|session_id| session_id.as_str().strip_prefix("ses_"))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn next_agent_session_counter(agent_sessions: &HashMap<AgentSessionId, AgentSessionRecord>) -> u64 {
+    agent_sessions
+        .keys()
+        .filter_map(|agent_session_id| agent_session_id.as_str().strip_prefix("ags_"))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+fn next_route_counter(agent_sessions: &HashMap<AgentSessionId, AgentSessionRecord>) -> u64 {
+    agent_sessions
+        .values()
+        .filter_map(|record| record.route_id.strip_prefix("route_"))
         .filter_map(|suffix| suffix.parse::<u64>().ok())
         .max()
         .unwrap_or(0)
@@ -6589,6 +6741,141 @@ mod tests {
                 CadisEvent::AgentSessionCompleted(payload)
                     if payload.agent_session_id == started.agent_session_id
                         && payload.result.as_deref().is_some_and(|result| result.contains("run tests"))
+            )
+        }));
+    }
+
+    #[test]
+    fn agent_session_metadata_survives_runtime_restart_and_snapshot() {
+        let cadis_home = test_workspace("persistent-agent-session-home");
+        let completed = {
+            let mut runtime = runtime_with_home(cadis_home.clone());
+            let outcome = runtime.handle_request(RequestEnvelope::new(
+                RequestId::from("req_agent_session_persist"),
+                ClientId::from("cli_1"),
+                ClientRequest::MessageSend(MessageSendRequest {
+                    session_id: None,
+                    target_agent_id: Some(AgentId::from("codex")),
+                    content: "run recovery tests".to_owned(),
+                    content_kind: ContentKind::Chat,
+                }),
+            ));
+
+            outcome
+                .events
+                .iter()
+                .find_map(|event| match &event.event {
+                    CadisEvent::AgentSessionCompleted(payload) => Some(payload.clone()),
+                    _ => None,
+                })
+                .expect("agent.session.completed should be emitted")
+        };
+
+        let store = StateStore::new(&CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        });
+        assert!(store
+            .agent_session_path(&completed.agent_session_id)
+            .is_file());
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_agent_session_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionCompleted(payload)
+                    if payload.agent_session_id == completed.agent_session_id
+                        && payload.route_id == completed.route_id
+                        && payload.status == AgentSessionStatus::Completed
+                        && payload.steps_used == 1
+                        && payload.result.as_deref().is_some_and(|result| result.contains("run recovery tests"))
+            )
+        }));
+
+        let next = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_agent_session_next"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("codex")),
+                content: "next route".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(next.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionStarted(payload)
+                    if payload.agent_session_id.as_str() == "ags_000002"
+                        && payload.route_id == "route_000002"
+            )
+        }));
+    }
+
+    #[test]
+    fn corrupt_agent_session_metadata_reports_diagnostic_and_ignores_partial_temp_file() {
+        let cadis_home = test_workspace("corrupt-agent-session-home");
+        let store = StateStore::new(&CadisConfig {
+            cadis_home: cadis_home.clone(),
+            ..CadisConfig::default()
+        });
+        store.ensure_layout().expect("state layout should exist");
+        let valid = AgentSessionMetadata {
+            agent_session_id: AgentSessionId::from("ags_000041"),
+            session_id: SessionId::from("ses_recovered"),
+            route_id: "route_000041".to_owned(),
+            agent_id: AgentId::from("codex"),
+            parent_agent_id: Some(AgentId::from("main")),
+            task: "recover me".to_owned(),
+            status: AgentSessionStatus::Running,
+            timeout_at: Timestamp::new_utc("2026-04-26T00:15:00Z")
+                .expect("test timestamp should be valid"),
+            budget_steps: 2,
+            steps_used: 1,
+            result: None,
+            error_code: None,
+            error: None,
+            cancellation_requested_at: None,
+        };
+
+        store
+            .write_agent_session_metadata(&valid.agent_session_id, &valid)
+            .expect("valid AgentSession metadata should write");
+        let agent_sessions_dir = cadis_home.join("state/agent-sessions");
+        fs::write(agent_sessions_dir.join("corrupt.json"), "{")
+            .expect("corrupt AgentSession metadata should write");
+        fs::write(agent_sessions_dir.join(".ags_partial.json.tmp.1"), "{")
+            .expect("partial AgentSession temp metadata should write");
+
+        let mut runtime = runtime_with_home(cadis_home);
+        let snapshot = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_corrupt_agent_session_snapshot"),
+            ClientId::from("hud_1"),
+            ClientRequest::EventsSnapshot(EventsSnapshotRequest::default()),
+        ));
+
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSessionUpdated(payload)
+                    if payload.agent_session_id.as_str() == "ags_000041"
+                        && payload.task == "recover me"
+            )
+        }));
+        assert!(snapshot.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::DaemonError(error)
+                    if error.code == "agent_session_recovery_skipped"
+                        && error.message.contains("corrupt.json")
+                        && !error.message.contains(".ags_partial")
             )
         }));
     }

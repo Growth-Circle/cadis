@@ -11,8 +11,8 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cadis_protocol::{
-    AgentId, ApprovalDecision, ApprovalId, EventEnvelope, RiskClass, SessionId, Timestamp,
-    ToolCallId,
+    AgentId, AgentSessionId, ApprovalDecision, ApprovalId, EventEnvelope, RiskClass, SessionId,
+    Timestamp, ToolCallId,
 };
 use regex::Regex;
 use serde::de::DeserializeOwned;
@@ -993,6 +993,7 @@ pub fn ensure_layout(config: &CadisConfig) -> Result<(), StoreError> {
         "state",
         "state/sessions",
         "state/agents",
+        "state/agent-sessions",
         "state/workers",
         "state/approvals",
     ] {
@@ -1077,6 +1078,11 @@ impl StateStore {
         self.metadata_path(StateKind::Agent, agent_id.as_str())
     }
 
+    /// Returns the AgentSession metadata file path for an AgentSession ID.
+    pub fn agent_session_path(&self, agent_session_id: &AgentSessionId) -> PathBuf {
+        self.metadata_path(StateKind::AgentSession, agent_session_id.as_str())
+    }
+
     /// Returns the worker metadata file path for a worker ID.
     pub fn worker_path(&self, worker_id: &str) -> PathBuf {
         self.metadata_path(StateKind::Worker, worker_id)
@@ -1103,6 +1109,15 @@ impl StateStore {
         metadata: &T,
     ) -> Result<(), StoreError> {
         self.write_metadata(StateKind::Agent, agent_id.as_str(), metadata)
+    }
+
+    /// Atomically writes one redacted AgentSession metadata JSON file.
+    pub fn write_agent_session_metadata<T: Serialize>(
+        &self,
+        agent_session_id: &AgentSessionId,
+        metadata: &T,
+    ) -> Result<(), StoreError> {
+        self.write_metadata(StateKind::AgentSession, agent_session_id.as_str(), metadata)
     }
 
     /// Atomically writes one redacted worker metadata JSON file.
@@ -1133,6 +1148,14 @@ impl StateStore {
         self.remove_metadata(StateKind::Agent, agent_id.as_str())
     }
 
+    /// Removes one persisted AgentSession metadata JSON file when present.
+    pub fn remove_agent_session_metadata(
+        &self,
+        agent_session_id: &AgentSessionId,
+    ) -> Result<(), StoreError> {
+        self.remove_metadata(StateKind::AgentSession, agent_session_id.as_str())
+    }
+
     /// Removes one persisted worker metadata JSON file when present.
     pub fn remove_worker_metadata(&self, worker_id: &str) -> Result<(), StoreError> {
         self.remove_metadata(StateKind::Worker, worker_id)
@@ -1155,6 +1178,13 @@ impl StateStore {
         &self,
     ) -> Result<StateRecovery<T>, StoreError> {
         self.recover_metadata(StateKind::Agent)
+    }
+
+    /// Recovers valid AgentSession metadata files and reports invalid files as diagnostics.
+    pub fn recover_agent_session_metadata<T: DeserializeOwned>(
+        &self,
+    ) -> Result<StateRecovery<T>, StoreError> {
+        self.recover_metadata(StateKind::AgentSession)
     }
 
     /// Recovers valid worker metadata files and reports invalid files as diagnostics.
@@ -1315,19 +1345,27 @@ pub struct StateRecoveryDiagnostic {
 enum StateKind {
     Session,
     Agent,
+    AgentSession,
     Worker,
     Approval,
 }
 
 impl StateKind {
-    fn all() -> [Self; 4] {
-        [Self::Session, Self::Agent, Self::Worker, Self::Approval]
+    fn all() -> [Self; 5] {
+        [
+            Self::Session,
+            Self::Agent,
+            Self::AgentSession,
+            Self::Worker,
+            Self::Approval,
+        ]
     }
 
     fn dir_name(self) -> &'static str {
         match self {
             Self::Session => "sessions",
             Self::Agent => "agents",
+            Self::AgentSession => "agent-sessions",
             Self::Worker => "workers",
             Self::Approval => "approvals",
         }
@@ -1337,6 +1375,7 @@ impl StateKind {
         match self {
             Self::Session => "session",
             Self::Agent => "agent",
+            Self::AgentSession => "AgentSession",
             Self::Worker => "worker",
             Self::Approval => "approval",
         }
@@ -1797,6 +1836,7 @@ mod tests {
             config.cadis_home.join("state/sessions/ses____1.json")
         );
         assert!(config.cadis_home.join("state/agents").is_dir());
+        assert!(config.cadis_home.join("state/agent-sessions").is_dir());
         assert!(config.cadis_home.join("state/workers").is_dir());
         assert!(config.cadis_home.join("state/approvals").is_dir());
     }
@@ -1867,6 +1907,71 @@ mod tests {
         assert!(recovered.diagnostics[0]
             .reason
             .contains("invalid session metadata JSON"));
+    }
+
+    #[test]
+    fn agent_session_metadata_round_trips_from_dedicated_state_dir() {
+        let config = test_config("agent-session-write");
+        let store = StateStore::new(&config);
+        let agent_session_id = AgentSessionId::from("ags/../1");
+        let metadata = TestMetadata {
+            id: "ags/../1".to_owned(),
+            status: "running".to_owned(),
+            api_key: None,
+        };
+
+        store
+            .write_agent_session_metadata(&agent_session_id, &metadata)
+            .expect("AgentSession metadata should write");
+
+        assert_eq!(
+            store.agent_session_path(&agent_session_id),
+            config.cadis_home.join("state/agent-sessions/ags____1.json")
+        );
+
+        let recovered = store
+            .recover_agent_session_metadata::<TestMetadata>()
+            .expect("AgentSession metadata should recover");
+        assert_eq!(recovered.diagnostics, Vec::new());
+        assert_eq!(recovered.records.len(), 1);
+        assert_eq!(recovered.records[0].id, "ags____1");
+        assert_eq!(recovered.records[0].metadata, metadata);
+    }
+
+    #[test]
+    fn agent_session_recovery_skips_corrupt_json_and_partial_temp_files() {
+        let config = test_config("agent-session-recover");
+        let store = StateStore::new(&config);
+        let agent_session_id = AgentSessionId::from("ags_1");
+        let metadata = TestMetadata {
+            id: "ags_1".to_owned(),
+            status: "running".to_owned(),
+            api_key: None,
+        };
+
+        store
+            .write_agent_session_metadata(&agent_session_id, &metadata)
+            .expect("AgentSession metadata should write");
+        let agent_sessions_dir = config.cadis_home.join("state/agent-sessions");
+        fs::write(agent_sessions_dir.join("corrupt.json"), "{")
+            .expect("corrupt AgentSession state should write");
+        fs::write(agent_sessions_dir.join(".ags_2.json.tmp.1"), "{")
+            .expect("partial AgentSession temp state should write");
+
+        let recovered = store
+            .recover_agent_session_metadata::<TestMetadata>()
+            .expect("AgentSession recovery should fail safe");
+
+        assert_eq!(recovered.records.len(), 1);
+        assert_eq!(recovered.records[0].id, "ags_1");
+        assert_eq!(recovered.records[0].metadata, metadata);
+        assert_eq!(recovered.diagnostics.len(), 1);
+        assert!(recovered.diagnostics[0]
+            .path
+            .ends_with("state/agent-sessions/corrupt.json"));
+        assert!(recovered.diagnostics[0]
+            .reason
+            .contains("invalid AgentSession metadata JSON"));
     }
 
     #[test]

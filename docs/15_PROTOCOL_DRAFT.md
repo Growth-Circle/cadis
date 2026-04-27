@@ -133,9 +133,12 @@ Example:
 `events.snapshot` is a one-shot request for daemon-owned state. The desktop MVP
 snapshot is represented as normal event frames, currently including
 `agent.list.response`, `ui.preferences.updated`, `session.updated` for known
-sessions, and worker lifecycle snapshots for workers known to the in-memory
-daemon worker registry or recovered durable worker metadata. Recovery diagnostics
-for corrupt or skipped durable metadata are emitted as `daemon.error` events.
+sessions, `agent.session.*` snapshots for recovered or in-memory per-route
+AgentSession records, and worker lifecycle snapshots for workers known to the
+in-memory daemon worker registry or recovered durable worker metadata. Recovery
+diagnostics for corrupt or skipped durable metadata are emitted as redacted
+`daemon.error` events; partial temporary files are ignored and do not produce
+events.
 
 `worker.tail` is a one-shot request for recent daemon-owned worker log lines.
 The desktop MVP replays log lines from the in-memory worker registry as
@@ -375,8 +378,10 @@ Allowed AgentSession statuses are `started`, `running`, `completed`, `failed`,
 an optional redacted `result`. Terminal failure/cancellation events add optional
 `error_code`, `error`, and `cancellation_requested_at` fields as applicable.
 The current baseline enforces a per-route step budget before provider execution
-and records timeout deadlines; model/tool-loop cancellation and async interrupt
-remain later runtime work.
+and records timeout deadlines. AgentSession metadata is written atomically under
+`state/agent-sessions/` and recovered on daemon restart so snapshots can replay
+the current AgentSession state. Model/tool-loop cancellation and async
+interrupt remain later runtime work.
 
 `workspace.list.response` payload:
 

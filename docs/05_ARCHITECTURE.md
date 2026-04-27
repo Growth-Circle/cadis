@@ -259,9 +259,11 @@ The desktop MVP now wraps each routed task in an in-memory daemon-owned
 summary, timeout deadline, step budget, cancellation timestamp, target agent,
 and parent agent. Clients observe it through `agent.session.started`,
 `agent.session.updated`, and terminal `agent.session.completed`,
-`agent.session.failed`, or `agent.session.cancelled` events. These records are a
-runtime boundary only; provider/tool-loop execution, durable AgentSession
-recovery, and implicit model-driven spawning remain later work.
+`agent.session.failed`, or `agent.session.cancelled` events. AgentSession
+metadata is also written atomically under `~/.cadis/state/agent-sessions/` and
+loaded on daemon start so `events.snapshot` can replay recovered records.
+Provider/tool-loop execution and implicit model-driven spawning remain later
+work.
 
 ## 10. Model Provider Layer
 

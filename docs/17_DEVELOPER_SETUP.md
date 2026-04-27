@@ -231,6 +231,7 @@ The store crate owns the durable metadata path contract:
 ```text
 ~/.cadis/state/sessions/<session-id>.json
 ~/.cadis/state/agents/<agent-id>.json
+~/.cadis/state/agent-sessions/<agent-session-id>.json
 ~/.cadis/state/workers/<worker-id>.json
 ~/.cadis/state/approvals/<approval-id>.json
 ```
@@ -238,6 +239,10 @@ The store crate owns the durable metadata path contract:
 Use `StateStore` for new metadata writes. It sanitizes IDs for paths, writes
 redacted JSON through temp-file-plus-rename, ignores partial temp files during
 recovery, and reports corrupt final JSON as diagnostics.
+`cadis-core` currently reloads session, agent, and AgentSession metadata on
+runtime startup. Recovered AgentSession records are replayed in
+`events.snapshot`; corrupt final AgentSession JSON is reported as a redacted
+`daemon.error` diagnostic.
 
 ## 14. Development Rules
 
