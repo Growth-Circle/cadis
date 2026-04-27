@@ -24,6 +24,8 @@ The format follows Keep a Changelog style, and the project will use Semantic Ver
   daemon/HUD voice lifecycle event handling.
 - Platform baseline documentation and GitHub Actions coverage for macOS Rust
   source validation and Windows portable-crate validation.
+- GitHub repository rulesets for protected `main` pull-request flow, required
+  checks, and protected `v*` release tags.
 
 ### Changed
 
