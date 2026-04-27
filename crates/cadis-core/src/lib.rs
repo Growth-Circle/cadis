@@ -32,7 +32,8 @@ use cadis_protocol::{
     WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
 use cadis_store::{
-    redact, ApprovalRecord, ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
+    redact, AgentHomeDiagnostic, AgentHomeDoctorOptions, AgentHomeTemplate, ApprovalRecord,
+    ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
     GrantSource as StoreGrantSource, ProfileHome, ProjectWorkspaceStore, StateRecoveryDiagnostic,
     StateStore, WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
     WorkspaceGrantRecord as StoreWorkspaceGrantRecord, WorkspaceKind as StoreWorkspaceKind,
@@ -305,6 +306,7 @@ impl Runtime {
         for (agent_id, record) in agent_recovery.records {
             agents.insert(agent_id, record);
         }
+        init_agent_homes(&profile_home, &agents);
         let worker_recovery = recover_worker_records(&state_store);
         diagnostics.extend(worker_recovery.diagnostics);
         let mut workers = worker_recovery.records;
@@ -1456,6 +1458,7 @@ impl Runtime {
         };
         self.agents.insert(agent_id.clone(), record.clone());
         let _ = self.persist_agent_record(&agent_id);
+        let _ = self.profile_home.init_agent(&record.agent_home_template());
         Ok(record)
     }
 
@@ -2390,6 +2393,8 @@ impl Runtime {
             checks.extend(self.workspace_duplicate_root_checks());
         }
 
+        checks.extend(self.profile_agent_doctor_checks());
+
         if let Some(workspace_id) = request.workspace_id {
             match self.workspaces.get(&workspace_id) {
                 Some(workspace) => {
@@ -2429,6 +2434,23 @@ impl Runtime {
         }
 
         checks
+    }
+
+    fn profile_agent_doctor_checks(&self) -> Vec<WorkspaceDoctorCheck> {
+        match self
+            .profile_home
+            .agent_doctor_diagnostics(AgentHomeDoctorOptions::default())
+        {
+            Ok(diagnostics) => diagnostics
+                .into_iter()
+                .map(agent_home_diagnostic_check)
+                .collect(),
+            Err(error) => vec![WorkspaceDoctorCheck {
+                name: "profile.agents".to_owned(),
+                status: "error".to_owned(),
+                message: format!("could not inspect agent homes: {error}"),
+            }],
+        }
     }
 
     fn workspace_duplicate_root_checks(&self) -> Vec<WorkspaceDoctorCheck> {
@@ -3174,6 +3196,16 @@ impl AgentMetadata {
 }
 
 impl AgentRecord {
+    fn agent_home_template(&self) -> AgentHomeTemplate {
+        AgentHomeTemplate::new(
+            self.id.clone(),
+            self.display_name.clone(),
+            self.role.clone(),
+            self.parent_agent_id.clone(),
+            self.model.clone(),
+        )
+    }
+
     fn event_payload(self) -> AgentEventPayload {
         AgentEventPayload {
             agent_id: self.id,
@@ -4430,6 +4462,20 @@ fn agent_session_recovery_diagnostic(diagnostic: StateRecoveryDiagnostic) -> Err
     )
 }
 
+fn init_agent_homes(profile_home: &ProfileHome, agents: &HashMap<AgentId, AgentRecord>) {
+    for record in agents.values() {
+        let _ = profile_home.init_agent(&record.agent_home_template());
+    }
+}
+
+fn agent_home_diagnostic_check(diagnostic: AgentHomeDiagnostic) -> WorkspaceDoctorCheck {
+    WorkspaceDoctorCheck {
+        name: diagnostic.name,
+        status: diagnostic.status,
+        message: diagnostic.message,
+    }
+}
+
 fn next_session_counter(sessions: &HashMap<SessionId, SessionRecord>) -> u64 {
     sessions
         .keys()
@@ -5488,7 +5534,8 @@ mod tests {
         MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest,
         SessionSubscriptionRequest, SessionTargetRequest, ToolCallRequest, VoiceDoctorCheck,
         VoiceDoctorRequest, VoicePreflightRequest, WorkerTailRequest, WorkspaceAccess,
-        WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceRegisterRequest,
+        WorkspaceDoctorRequest, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
+        WorkspaceRegisterRequest,
     };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -6606,6 +6653,71 @@ mod tests {
                 CadisEvent::DaemonError(payload)
                     if payload.code == "session_metadata_recovery_skipped"
                         && payload.message.contains("broken.json")
+            )
+        }));
+    }
+
+    #[test]
+    fn runtime_initializes_agent_home_templates() {
+        let cadis_home = test_workspace("runtime-agent-home");
+        let mut runtime = runtime_with_home(cadis_home.clone());
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_spawn_agent_home"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentSpawn(AgentSpawnRequest {
+                role: "Review".to_owned(),
+                parent_agent_id: Some(AgentId::from("main")),
+                display_name: Some("Review Scout".to_owned()),
+                model: Some("echo".to_owned()),
+            }),
+        ));
+        let spawned_id = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::AgentSpawned(payload) => Some(payload.agent_id.clone()),
+                _ => None,
+            })
+            .expect("agent.spawned should be emitted");
+
+        let profile = CadisHome::new(cadis_home).profile("default");
+        assert!(profile.agent("main").agent_toml_path().is_file());
+        let spawned_home = profile.agent(spawned_id.as_str());
+        assert!(spawned_home.agent_toml_path().is_file());
+        assert!(spawned_home.policy_toml_path().is_file());
+        let metadata = spawned_home
+            .load_metadata()
+            .expect("spawned AGENT.toml should parse");
+        assert_eq!(metadata.agent.display_name, "Review Scout");
+        assert_eq!(metadata.agent.role, "Review");
+        assert_eq!(metadata.agent.parent_agent_id.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn workspace_doctor_reports_agent_home_diagnostics() {
+        let cadis_home = test_workspace("runtime-agent-doctor");
+        let mut runtime = runtime_with_home(cadis_home.clone());
+        let policy_path = CadisHome::new(cadis_home)
+            .profile("default")
+            .agent("main")
+            .policy_toml_path();
+        fs::write(policy_path, "[policy\n").expect("corrupt policy should write");
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_agent_doctor"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkspaceDoctor(WorkspaceDoctorRequest {
+                workspace_id: None,
+                root: None,
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::WorkspaceDoctorResponse(payload)
+                    if payload.checks.iter().any(|check| check.name == "main/agent.POLICY.toml"
+                        && check.status == "error")
             )
         }));
     }

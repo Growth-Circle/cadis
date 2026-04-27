@@ -1,11 +1,12 @@
 # Workspace Architecture
 
 Status: Baseline accepted and partially implemented. CADIS now initializes
-profile homes, persists the workspace registry and active grants under the
-default profile, exposes `workspace list/register/grant/revoke/doctor` through
-the protocol and CLI, and keeps tool execution behind daemon-resolved workspace
-grants. Agent homes, real worker worktree creation/cleanup, checkpoint rollback,
-and workspace-local skill enforcement remain future work.
+profile homes, creates daemon-known agent homes from templates, persists the
+workspace registry and active grants under the default profile, exposes
+`workspace list/register/grant/revoke/doctor` through the protocol and CLI, and
+keeps tool execution behind daemon-resolved workspace grants. Real worker
+worktree creation/cleanup, checkpoint rollback, workspace-local skill
+enforcement, and denied-path enforcement for mutating tools remain future work.
 
 ## 1. Purpose
 
@@ -39,19 +40,23 @@ The current desktop MVP implements only part of this architecture:
 Implemented baseline:
 
 - `~/.cadis/profiles/<profile>/` profile homes.
+- Persistent daemon-known agent homes under each profile with `AGENT.toml`,
+  persona/instruction/user/memory/tool guidance files, typed `POLICY.toml`
+  metadata, `SKILL_POLICY.toml`, and agent-local memory/skill/prompt folders.
 - Profile-local workspace registry and grant files.
 - Protocol/CLI workspace commands: `list`, `register`, `grant`, `revoke`, and
   `doctor`.
 - Tool calls require a registered workspace and matching active grant before
   safe-read execution or approval flow.
+- `workspace doctor` includes profile/agent-home diagnostics for missing,
+  corrupt, and oversized agent files.
 - Worker events include planned worktree/artifact metadata.
 
 Still future:
 
-- Persistent agent homes under each profile.
 - Worker worktree creation/cleanup.
 - Checkpoint and rollback manager.
-- Profile and agent doctor commands.
+- Dedicated profile and agent doctor commands.
 - Workspace-local skills and project `.cadis/` metadata enforcement.
 
 ## 3. Target Home Layout
@@ -282,11 +287,11 @@ The workspace architecture should be implemented in this order:
 | --- | --- |
 | W0 | Finalize terminology and protocol types |
 | W1 | CADIS home resolver and directory skeleton |
-| W2 | Profile manager |
-| W3 | Agent home manager |
+| W2 | Profile manager baseline implemented |
+| W3 | Agent home manager/templates baseline implemented |
 | W4 | Workspace registry and grants |
 | W5 | Worker worktree manager |
 | W6 | Checkpoint and rollback manager |
 | W7 | Event log and session store integration |
 | W8 | Channel bindings and deterministic routing |
-| W9 | Doctor, migration, and templates |
+| W9 | Doctor, migration, and templates; profile/agent file diagnostics baseline implemented |

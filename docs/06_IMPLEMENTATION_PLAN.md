@@ -65,9 +65,10 @@ Implemented in the first runnable baseline:
   renderer-neutral avatar modes, gestures, face-tracking privacy state, renderer
   backend intent, and renderable frame contracts.
 - Workspace architecture baseline: profile layout initialization, persistent
-  workspace registry/grants, workspace protocol/CLI commands, workspace doctor,
-  agent-scoped `tool.call` grants, and safe-read tool execution behind active
-  grants.
+  daemon-known agent home initialization, persistent workspace registry/grants,
+  workspace protocol/CLI commands, workspace doctor with profile/agent file
+  diagnostics, agent-scoped `tool.call` grants, and safe-read tool execution
+  behind active grants.
 - Voice debug baseline: HUD-local mic doctor, WebAudio analyser telemetry, and
   WebAudio PCM fallback when WebKit `MediaRecorder` produces zero audio chunks.
 - Model readiness/routing baseline: `models.list` exposes configured
@@ -86,8 +87,8 @@ Still pending:
   session, agent, AgentSession, and worker metadata.
 - Worker execution lifecycle, isolated worktrees, Telegram/mobile adapters,
   daemon-owned production voice output, and code work window.
-- Agent home manager, denied-path enforcement for all mutating tools,
-  checkpoint/rollback manager, and media asset manifests.
+- Denied-path enforcement for all mutating tools, checkpoint/rollback manager,
+  dedicated profile/agent doctor commands, and media asset manifests.
 - Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
   memory records, scoped retrieval, provenance ledger, candidate promotion, and
   memory capsules.
@@ -291,7 +292,8 @@ Tasks:
   layout in `27_WORKSPACE_ARCHITECTURE.md`. Baseline profile home initialization
   now exists for the default profile.
 - Add agent homes with `AGENT.toml`, persona/instruction/memory files, and
-  machine-enforced `POLICY.toml`.
+  machine-enforced `POLICY.toml`. Baseline templates and typed policy metadata
+  now exist for daemon-known agents.
 - Extend the implemented workspace registry/grants with full alias management,
   richer expiry UX, and denied-path checks for mutating tools.
 - Add project `.cadis/workspace.toml`, `.cadis/worktrees/`, `.cadis/artifacts/`,
@@ -301,6 +303,8 @@ Tasks:
   profile home.
 - Add doctor checks for duplicated roots, broad grants, symlink escapes, secret
   paths, stale worktrees, corrupt JSONL, and oversized memory/persona files.
+  Workspace doctor now includes a baseline for missing, corrupt, and oversized
+  agent-home files.
 
 Exit criteria:
 

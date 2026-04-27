@@ -16,6 +16,8 @@ log_level = "info"
 # cadisd initializes this profile under ~/.cadis/profiles/<profile>/ and keeps
 # profile-local sessions, agents, workers, workspaces, event logs, and secrets
 # separated from global daemon state.
+# Daemon-known agents get non-destructive homes under agents/<agent>/ with
+# AGENT.toml, POLICY.toml, instructions, memory, and skill policy templates.
 default_profile = "default"
 
 [model]

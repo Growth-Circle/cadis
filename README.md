@@ -74,7 +74,7 @@ The repository already includes a meaningful desktop MVP foundation:
   with a feature-gated adapter-ready wgpu render-plan spike
 - typed protocol events for messages, models, agents, approvals, workspaces, orchestrator routing, and workers
 - JSONL event persistence with redaction boundaries
-- profile-local workspace registry and grants for safe-read tools
+- profile-local agent homes, workspace registry, and grants for safe-read tools
 - optional Ollama, OpenAI API, and Codex CLI model adapters
 - official Codex CLI adapter for ChatGPT Plus/Pro login flows
 - HUD-local Edge TTS playback, `whisper-cli` voice input, and voice doctor preflight
@@ -82,8 +82,9 @@ The repository already includes a meaningful desktop MVP foundation:
 Planned work still includes production-grade mutating tool execution, full
 policy coverage, richer worker isolation, Telegram/mobile clients,
 daemon-owned production voice, and code work windows. The workspace
-architecture is partially implemented; persistent agent homes, real worker
-worktree creation, checkpoint rollback, and project media manifests remain next.
+architecture is partially implemented; real worker worktree creation,
+checkpoint rollback, dedicated profile/agent doctor commands, and project media
+manifests remain next.
 
 ## Core capabilities
 

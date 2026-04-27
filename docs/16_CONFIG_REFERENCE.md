@@ -19,6 +19,19 @@ first run:
 |       |-- profile.toml
 |       |-- .gitignore
 |       |-- agents/
+|       |   `-- <agent>/
+|       |       |-- AGENT.toml
+|       |       |-- PERSONA.md
+|       |       |-- INSTRUCTIONS.md
+|       |       |-- USER.md
+|       |       |-- MEMORY.md
+|       |       |-- TOOLS.md
+|       |       |-- POLICY.toml
+|       |       |-- SKILL_POLICY.toml
+|       |       |-- skills/
+|       |       |-- memory/
+|       |       |-- prompts/
+|       |       `-- sessions/
 |       |-- memory/
 |       |-- skills/
 |       |-- workspaces/
@@ -69,6 +82,10 @@ workspace registry metadata, worker records, session records, artifacts,
 checkpoints, event logs, channels, and secrets. The store crate keeps creating
 the existing top-level paths so current daemon/core/CLI code continues to work
 while profile-aware runtime pieces are added.
+
+When `cadisd` starts, daemon-known agents get non-destructive agent-home
+templates under `profiles/<profile>/agents/<agent>/`. Existing files are not
+overwritten.
 
 ## 2. Desktop MVP Config
 
@@ -181,6 +198,81 @@ initialization is non-destructive: existing profile files are not overwritten.
 The profile home is not an execution workspace and is not a sandbox. Project
 roots must be registered separately in the workspace registry before
 profile-aware tool/runtime code grants file, shell, git, or worker access.
+
+## 3.1 Agent Home Layout
+
+The store crate provides an `AgentHome` helper. The daemon initializes homes for
+agents it knows about:
+
+```text
+~/.cadis/profiles/<profile>/agents/<agent>/
+|-- AGENT.toml
+|-- PERSONA.md
+|-- INSTRUCTIONS.md
+|-- USER.md
+|-- MEMORY.md
+|-- TOOLS.md
+|-- POLICY.toml
+|-- SKILL_POLICY.toml
+|-- skills/
+|-- memory/
+|   |-- daily/
+|   |-- decisions.md
+|   `-- delegation.md
+|-- prompts/
+|-- sessions/
+`-- README.md
+```
+
+`AGENT.toml` records stable identity and conventional file names:
+
+```toml
+[agent]
+id = "main"
+display_name = "CADIS"
+role = "Orchestrator"
+model = "auto"
+
+[files]
+persona = "PERSONA.md"
+instructions = "INSTRUCTIONS.md"
+user = "USER.md"
+memory = "MEMORY.md"
+tools = "TOOLS.md"
+policy = "POLICY.toml"
+skill_policy = "SKILL_POLICY.toml"
+```
+
+`POLICY.toml` has a machine-readable structure that doctor checks parse as
+typed TOML:
+
+```toml
+[policy]
+version = 1
+default_workspace_access = ["read"]
+allow_network = false
+allow_secret_access = false
+allow_system_change = false
+approval_required = true
+
+[sandbox]
+default = "workspace"
+denied_paths = ["~/.ssh", "~/.aws", "~/.gnupg", "~/.config/gcloud", "/etc", "/dev", "/proc", "/sys"]
+
+[limits]
+max_agent_toml_bytes = 65536
+max_policy_toml_bytes = 65536
+max_text_file_bytes = 131072
+max_memory_file_bytes = 1048576
+```
+
+This file is policy metadata for the agent home. Runtime authorization remains
+daemon and policy-engine owned; Track D owns enforcement across mutating tool
+execution.
+
+`workspace doctor` currently includes profile/agent-home diagnostics for
+missing, invalid TOML, and oversized agent files. Dedicated `profile doctor` and
+`agent doctor` commands remain future work.
 
 ## 4. Workspace Registry
 
