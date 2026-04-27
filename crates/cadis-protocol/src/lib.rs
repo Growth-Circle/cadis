@@ -435,6 +435,9 @@ pub enum ClientRequest {
     /// Tail a worker log stream.
     #[serde(rename = "worker.tail")]
     WorkerTail(WorkerTailRequest),
+    /// Collect a worker terminal result summary without replaying raw logs.
+    #[serde(rename = "worker.result")]
+    WorkerResult(WorkerResultRequest),
     /// List available model descriptors.
     #[serde(rename = "models.list")]
     ModelsList(EmptyPayload),
@@ -622,6 +625,13 @@ pub struct WorkerTailRequest {
     /// Optional number of recent lines.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<u32>,
+}
+
+/// Payload for collecting a worker terminal result.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkerResultRequest {
+    /// Worker identifier.
+    pub worker_id: String,
 }
 
 /// Payload for listing registered workspaces.
@@ -1385,6 +1395,9 @@ pub struct WorkerEventPayload {
     /// Parent agent for tree display.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_agent_id: Option<AgentId>,
+    /// Agent runtime session associated with this worker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<AgentSessionId>,
     /// Worker status label.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -1787,6 +1800,32 @@ mod tests {
     }
 
     #[test]
+    fn worker_result_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkerResult(WorkerResultRequest {
+                worker_id: "worker_000001".to_owned(),
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_1",
+                "client_id": "cli_1",
+                "type": "worker.result",
+                "payload": {
+                    "worker_id": "worker_000001"
+                }
+            })
+        );
+    }
+
+    #[test]
     fn tool_call_request_matches_documented_shape() {
         let envelope = RequestEnvelope::new(
             RequestId::from("req_1"),
@@ -1999,6 +2038,7 @@ mod tests {
                 worker_id: "worker_000001".to_owned(),
                 agent_id: Some(AgentId::from("coder")),
                 parent_agent_id: Some(AgentId::from("main")),
+                agent_session_id: Some(AgentSessionId::from("ags_000001")),
                 status: Some("running".to_owned()),
                 cli: None,
                 cwd: None,
@@ -2053,6 +2093,7 @@ mod tests {
                     "worker_id": "worker_000001",
                     "agent_id": "coder",
                     "parent_agent_id": "main",
+                    "agent_session_id": "ags_000001",
                     "status": "running",
                     "summary": "implement worktree baseline",
                     "worktree": {
@@ -2118,6 +2159,7 @@ mod tests {
                 worker_id: "worker_000001".to_owned(),
                 agent_id: Some(AgentId::from("coder")),
                 parent_agent_id: Some(AgentId::from("main")),
+                agent_session_id: Some(AgentSessionId::from("ags_000001")),
                 status: Some("failed".to_owned()),
                 cli: None,
                 cwd: None,

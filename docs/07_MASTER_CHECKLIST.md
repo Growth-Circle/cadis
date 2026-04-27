@@ -242,6 +242,8 @@
 - [ ] Define worker state.
 - [x] Implement daemon worker registry.
 - [x] Implement `worker.tail`.
+- [x] Implement compact `worker.result` collection for terminal summaries and
+  artifact paths without raw log replay.
 - [x] Create git worktree for session-bound project workers.
 - [x] Add worker failed/cancelled event and metadata baseline.
 - [ ] Stream worker logs.
@@ -338,10 +340,10 @@
 - [x] Track B: provider readiness, effective model metadata, selected-model routing, and provider streaming/cancellation contract.
 - [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
   Baselines landed: AgentSession state/events, explicit daemon-owned spawn,
-  spawn limits, worker registry, worker tail, and provider-stream cancellation
-  on `session.cancel`. Remaining: implicit model-driven spawn, worker
-  failed/cancelled events, and real command/test execution inside worker
-  worktrees.
+  spawn limits, worker registry, worker tail, worker result collection,
+  worker failed/cancelled events, and provider-stream cancellation on
+  `session.cancel`. Remaining: implicit model-driven spawn and real
+  command/test execution inside worker worktrees.
 - [ ] Track D: policy-backed tools and approval persistence.
 - [x] Track D baseline: tool contract metadata, safe-read `file.read` and
   `file.search`, `git.status`, `git.diff`, workspace grants, approval
@@ -421,7 +423,7 @@
 - [x] Support spawn baseline.
 - [ ] Support kill.
 - [ ] Support tail.
-- [ ] Support result collection.
+- [x] Support result collection baseline through daemon `worker.result`.
 - [ ] Add fan-out tests.
 
 ## 18. Release Readiness
