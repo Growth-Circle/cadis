@@ -276,9 +276,9 @@ Consequence:
   manifests and without secrets or raw transcripts.
 - Current code implements the first baseline for default profile initialization,
   persistent workspace registry/grants, broad-root rejection, safe-read grant
-  enforcement, and session-bound worker worktree creation. Agent homes,
-  checkpoint rollback, worker cleanup, and mutating-tool enforcement remain
-  future work.
+  enforcement, session-bound worker worktree creation, and metadata-only worker
+  cleanup planning for CADIS-owned worktrees. Agent homes, checkpoint rollback,
+  worker file removal, and mutating-tool enforcement remain future work.
 
 ### ADR-016: Approved Track D tool execution is daemon-revalidated
 
@@ -328,7 +328,8 @@ Consequence:
   `file.patch` execution backends implement the revalidation and lifecycle
   rules above.
 - Worker cleanup, patch apply, and command/test execution must stay separate
-  approval-gated flows.
+  approval-gated flows. The current cleanup slice records `cleanup_pending`
+  metadata only; deleting worktree files remains future approved execution.
 - Protocol and standards docs must continue to separate implemented safe-read
   tools from target approved execution semantics.
 

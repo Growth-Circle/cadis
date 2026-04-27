@@ -1551,6 +1551,10 @@ pub enum ProjectWorkerWorktreeState {
     Planned,
     /// Worktree exists and is assigned to the worker.
     Ready,
+    /// Worktree is retained for user review or patch application.
+    ReviewPending,
+    /// Worktree cleanup has been requested but files have not been removed.
+    CleanupPending,
     /// Worktree has been removed while metadata remains for diagnostics/audit.
     Removed,
 }
