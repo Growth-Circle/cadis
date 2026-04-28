@@ -460,24 +460,22 @@ describe("cadisActions", () => {
     expect(screen.getAllByText("worker_mock_001").length).toBeGreaterThan(0);
     expect(screen.getAllByText("completed: focused HUD worker tests passed").length).toBeGreaterThan(0);
     expect(screen.getByText(".cadis/worktrees/worker_mock_001")).toBeInTheDocument();
-    expect(screen.getByText("/home/user/.cadis/artifacts/workers/worker_mock_001/patch.diff")).toBeInTheDocument();
-    expect(screen.getByText("/home/user/.cadis/artifacts/workers/worker_mock_001/test-report.json")).toBeInTheDocument();
+    expect(screen.getAllByText("/home/user/.cadis/artifacts/workers/worker_mock_001/patch.diff").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("/home/user/.cadis/artifacts/workers/worker_mock_001/test-report.json").length).toBeGreaterThan(0);
     expect(screen.getByText("PASSED")).toBeInTheDocument();
     expect(screen.getByText("started: Worker Coding: run focused HUD worker tests")).toBeInTheDocument();
   });
 
-  it("does not execute tools directly from the apply placeholder", () => {
+  it("apply button is disabled pending daemon worker.apply support", () => {
     for (const frame of mockCadisDaemonWorkerStream) {
       handleCadisFrameForTest(frame);
     }
-    invokeMock.mockClear();
 
     render(createElement(CodeWorkPanel));
 
     const apply = screen.getByRole("button", { name: "APPLY" });
     expect(apply).toBeDisabled();
-    fireEvent.click(apply);
-    expect(invokeMock).not.toHaveBeenCalled();
+    expect(apply.getAttribute("title")).toBe("Pending daemon worker.apply support");
   });
 
   it("computes bounded reconnect backoff", () => {

@@ -162,6 +162,24 @@ fn voice_stt_stop() -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn open_in_editor(path: String) -> Result<(), String> {
+    // Desktop convenience: open a CADIS-owned worktree in the user's editor.
+    // Validate the canonical path contains a .cadis/worktrees/ segment.
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|e| format!("cannot resolve path: {e}"))?;
+    let canonical_str = canonical.to_string_lossy();
+    if !canonical_str.contains("/.cadis/worktrees/") && !canonical_str.contains("\\.cadis\\worktrees\\") {
+        return Err("path is not inside a CADIS-owned worktree".to_owned());
+    }
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "code".to_owned());
+    std::process::Command::new(&editor)
+        .arg(&canonical)
+        .spawn()
+        .map_err(|e| format!("failed to open editor: {e}"))?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -179,7 +197,8 @@ pub fn run() {
             voice_tts_speak,
             voice_tts_stop,
             voice_stt_start,
-            voice_stt_stop
+            voice_stt_stop,
+            open_in_editor
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

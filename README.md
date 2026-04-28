@@ -80,27 +80,33 @@ The repository already includes a meaningful desktop MVP foundation:
 - `apps/cadis-hud`: Tauri + React HUD prototype
 - `crates/cadis-avatar`: renderer-neutral Wulan avatar state engine contract,
   with a feature-gated adapter-ready wgpu render-plan spike
-- typed protocol events for messages, models, agents, approvals, workspaces, orchestrator routing, and workers
+- typed protocol events for messages, models, agents, approvals, workspaces,
+  orchestrator routing, and workers, with typed `AgentRole` and `WorkerState`
+  enums
 - JSONL event persistence with redaction boundaries
 - profile-local agent homes, workspace registry, and grants for safe-read tools
 - optional Ollama, OpenAI API, and Codex CLI model adapters, with native
   streaming for Ollama and OpenAI
 - official Codex CLI adapter for ChatGPT Plus/Pro login flows
+- daemon-owned Edge TTS provider via `edge-tts` subprocess, with voice ID
+  validation, text truncation, and speech policy routing
 - daemon-visible voice status/doctor/preflight with HUD-local Edge TTS
   playback and `whisper-cli` voice input bridges
 
-Approved `shell.run` and structured `file.patch` execution now have a
-daemon-side baseline after approval plus workspace/input revalidation. Worker
-execution now creates isolated worktrees, runs a bounded daemon-owned validation
-command in the worker worktree, writes profile-scoped artifacts, exposes
-read-only `worker.result`, and records cleanup intent without deleting files.
-The HUD includes a read-only code work panel for worker status, artifact paths,
-and recent log tail. Planned work still includes production hardening for shell
-environment filtering, async tool cancellation, atomic patch writes, full policy
-coverage, configurable worker test execution, parent-checkout patch apply,
-worktree file removal, Telegram/mobile clients, daemon-owned production voice,
-checkpoint rollback, dedicated profile/agent doctor commands, and project media
-manifests.
+Approved `shell.run` and structured `file.patch` execution have daemon-side
+approval plus workspace/input revalidation, shell environment filtering via
+allowlist, secret-file gating, denied-path enforcement, and approval expiry
+recheck before execution. Worker execution creates isolated worktrees, runs
+configurable daemon-owned validation commands, writes profile-scoped artifacts,
+exposes read-only `worker.result`, and supports approved worktree cleanup
+removal. The agent runtime supports model-driven spawn (capped and sanitized),
+multi-step tool-call loops, agent kill/tail, and worker concurrency scheduling
+with queue promotion. The HUD code work panel routes apply/discard actions
+through daemon protocol and validates editor paths against CADIS-owned
+worktrees. Profile CRUD, checkpoint/rollback, and media manifests with
+provenance tracking are available through the store layer. Planned work still
+includes full async tool cancellation, Telegram/mobile clients, native Wulan
+avatar engine, and production hardening for concurrent-edit protection.
 
 ## Platform support
 

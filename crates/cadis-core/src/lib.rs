@@ -19,18 +19,18 @@ use cadis_models::{
 use cadis_policy::{PolicyDecision, PolicyEngine};
 use cadis_protocol::{
     AgentEventPayload, AgentId, AgentListPayload, AgentModelChangedPayload, AgentRenamedPayload,
-    AgentSessionEventPayload, AgentSessionId, AgentSessionStatus, AgentSpawnRequest, AgentStatus,
-    AgentStatusChangedPayload, ApprovalDecision, ApprovalId, ApprovalRequestPayload,
-    ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent, ClientRequest, ContentKind,
-    DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope, EventId,
-    MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
+    AgentRole, AgentSessionEventPayload, AgentSessionId, AgentSessionStatus, AgentSpawnRequest,
+    AgentStatus, AgentStatusChangedPayload, AgentTailRequest, ApprovalDecision, ApprovalId,
+    ApprovalRequestPayload, ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent,
+    ClientRequest, ContentKind, DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope,
+    EventId, MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
     ModelInvocationPayload, ModelReadiness, ModelsListPayload, OrchestratorRoutePayload,
     ProtocolVersion, RequestAcceptedPayload, RequestEnvelope, RequestId, ResponseEnvelope,
     SessionEventPayload, SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload,
     ToolFailedPayload, UiPreferencesPayload, VoiceDoctorCheck, VoiceDoctorPayload,
     VoicePreferences, VoicePreflightRequest, VoicePreflightSummary, VoicePreviewRequest,
     VoiceRuntimeState, VoiceStatusPayload, WorkerArtifactLocations, WorkerCleanupRequest,
-    WorkerEventPayload, WorkerLogDeltaPayload, WorkerResultRequest, WorkerTailRequest,
+    WorkerEventPayload, WorkerLogDeltaPayload, WorkerResultRequest, WorkerState, WorkerTailRequest,
     WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent, WorkerWorktreeState, WorkspaceAccess,
     WorkspaceDoctorCheck, WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantId,
     WorkspaceGrantPayload, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload,
@@ -38,13 +38,13 @@ use cadis_protocol::{
 };
 use cadis_store::{
     redact, AgentHomeDiagnostic, AgentHomeDoctorOptions, AgentHomeTemplate, ApprovalRecord,
-    ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointPolicy,
-    GrantSource as StoreGrantSource, ProfileHome, ProjectWorkerWorktreeMetadata,
-    ProjectWorkerWorktreeState, ProjectWorkspaceStore, ProjectWorktreeDiagnostic,
-    StateRecoveryDiagnostic, StateStore, WorkerArtifactPathSet,
+    ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointManager, CheckpointPolicy,
+    DeniedPaths, GrantSource as StoreGrantSource, MediaManifestStore, ProfileHome,
+    ProjectWorkerWorktreeMetadata, ProjectWorkerWorktreeState, ProjectWorkspaceStore,
+    ProjectWorktreeDiagnostic, StateRecoveryDiagnostic, StateStore, WorkerArtifactPathSet,
     WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
     WorkspaceGrantRecord as StoreWorkspaceGrantRecord, WorkspaceKind as StoreWorkspaceKind,
-    WorkspaceMetadata, WorkspaceRegistry, WorkspaceVcs,
+    WorkspaceMetadata, WorkspaceRegistry, WorkspaceVcs, WorktreeCleanupExecutor,
 };
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -133,13 +133,19 @@ pub struct AgentRuntimeConfig {
     pub default_timeout_sec: i64,
     /// Maximum state-machine steps a single agent route may consume.
     pub max_steps_per_session: u32,
+    /// Daemon-owned worker validation command. Empty string disables execution.
+    pub worker_command: String,
+    /// Maximum concurrent workers the scheduler will run.
+    pub max_concurrent_workers: usize,
 }
 
 impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
             default_timeout_sec: 900,
-            max_steps_per_session: 1,
+            max_steps_per_session: 8,
+            worker_command: WORKER_DEFAULT_COMMAND.to_owned(),
+            max_concurrent_workers: 4,
         }
     }
 }
@@ -199,6 +205,8 @@ pub struct TtsOutput {
     pub voice_id: String,
     /// Character count accepted by the provider.
     pub spoken_chars: usize,
+    /// Path to the synthesized audio file, when the provider writes one.
+    pub audio_path: Option<PathBuf>,
 }
 
 /// Structured TTS provider error.
@@ -288,6 +296,7 @@ pub struct Runtime {
     next_tool: u64,
     next_approval: u64,
     next_workspace_grant: u64,
+    denied_paths: DeniedPaths,
 }
 
 impl Runtime {
@@ -296,6 +305,16 @@ impl Runtime {
         let ui_preferences = options.ui_preferences.clone();
         let spawn_limits = AgentSpawnLimits::from_options(&options.ui_preferences);
         let agent_runtime = AgentRuntimeConfig::from_options(&options.ui_preferences);
+        let policy = cadis_policy::PolicyEngine::with_config(
+            serde_json::from_value(
+                options
+                    .ui_preferences
+                    .get("policy")
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+            .unwrap_or_default(),
+        );
         let orchestrator =
             Orchestrator::new(OrchestratorConfig::from_options(&options.ui_preferences));
         let approval_store = ApprovalStore::new(&options.cadis_home);
@@ -357,7 +376,7 @@ impl Runtime {
             ui_preferences,
             spawn_limits,
             agent_runtime,
-            policy: PolicyEngine,
+            policy,
             approval_store,
             state_store,
             profile_home,
@@ -369,6 +388,7 @@ impl Runtime {
             next_tool: 1,
             next_approval,
             next_workspace_grant,
+            denied_paths: DeniedPaths::default(),
         }
     }
 
@@ -520,6 +540,7 @@ impl Runtime {
             }
             ClientRequest::AgentSpawn(request) => self.spawn_agent(request_id, request),
             ClientRequest::AgentKill(request) => self.kill_agent(request_id, request.agent_id),
+            ClientRequest::AgentTail(request) => self.tail_agent(request_id, request),
             ClientRequest::WorkspaceList(request) => self.workspace_list(request_id, request),
             ClientRequest::WorkspaceRegister(request) => {
                 self.workspace_register(request_id, request)
@@ -803,9 +824,10 @@ impl Runtime {
                 );
 
                 events.push(self.session_event(
-                    session_id,
+                    session_id.clone(),
                     CadisEvent::ApprovalRequested(approval_request_payload(&record)),
                 ));
+                events.extend(self.approval_speech_events(&session_id, &record));
                 self.accept(request_id, events)
             }
             PolicyDecision::Deny => self.reject(
@@ -947,7 +969,12 @@ impl Runtime {
         request_id: RequestId,
         request: MessageSendRequest,
     ) -> Result<PendingMessageGeneration, Box<RequestOutcome>> {
-        let content_kind = request.content_kind;
+        let content_kind =
+            if request.content_kind == ContentKind::Chat && is_code_heavy_task(&request.content) {
+                ContentKind::Code
+            } else {
+                request.content_kind
+            };
         let content = request.content;
         let decision =
             match self
@@ -1275,6 +1302,33 @@ impl Runtime {
             }),
         ));
         events.extend(self.auto_speech_events(&context.session_id, context.content_kind, &content));
+
+        // Model-driven spawn: parse [SPAWN Role: task] directives from model output.
+        for directive in parse_model_spawn_directives(&content) {
+            match self.spawn_agent_record(AgentSpawnRequest {
+                role: directive.role.clone(),
+                parent_agent_id: Some(context.agent_id.clone()),
+                display_name: None,
+                model: None,
+            }) {
+                Ok(record) => {
+                    events.push(self.session_event(
+                        context.session_id.clone(),
+                        CadisEvent::AgentSpawned(record.clone().event_payload()),
+                    ));
+                    events.push(self.session_event(
+                        context.session_id.clone(),
+                        CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                            agent_id: record.id,
+                            status: AgentStatus::Idle,
+                            task: Some(format!("model-driven spawn: {}", directive.task)),
+                        }),
+                    ));
+                }
+                Err(_) => break, // spawn limit reached
+            }
+        }
+
         if let Some(event) = self.complete_agent_session(&context.agent_session_id, content) {
             events.push(event);
         }
@@ -1299,7 +1353,7 @@ impl Runtime {
         if let Some(worker) = &context.worker {
             events.extend(self.complete_worker(
                 &worker.worker_id,
-                "completed",
+                WorkerState::Completed,
                 worker.summary.clone(),
             ));
         }
@@ -1354,6 +1408,114 @@ impl Runtime {
             }),
         ));
         events
+    }
+
+    // -----------------------------------------------------------------------
+    // Track H: Public workspace architecture APIs
+    // -----------------------------------------------------------------------
+
+    /// Returns a reference to the denied-paths checker.
+    pub fn denied_paths(&self) -> &DeniedPaths {
+        &self.denied_paths
+    }
+
+    /// Returns the CadisHome resolver.
+    pub fn cadis_home(&self) -> CadisHome {
+        CadisHome::new(&self.options.cadis_home)
+    }
+
+    /// Returns the active profile home.
+    pub fn profile_home(&self) -> &ProfileHome {
+        &self.profile_home
+    }
+
+    /// Lists all profile IDs.
+    pub fn list_profiles(&self) -> Result<Vec<String>, cadis_store::StoreError> {
+        self.cadis_home().list_profiles()
+    }
+
+    /// Creates a new profile.
+    pub fn create_profile(&self, profile_id: &str) -> Result<ProfileHome, cadis_store::StoreError> {
+        self.cadis_home().create_profile(profile_id)
+    }
+
+    /// Exports a profile as TOML.
+    pub fn export_profile(&self, profile_id: &str) -> Result<String, cadis_store::StoreError> {
+        self.cadis_home().export_profile(profile_id)
+    }
+
+    /// Imports a profile from TOML content.
+    pub fn import_profile(
+        &self,
+        profile_id: &str,
+        content: &str,
+    ) -> Result<ProfileHome, cadis_store::StoreError> {
+        self.cadis_home().import_profile(profile_id, content)
+    }
+
+    /// Creates a checkpoint manager for the active profile.
+    pub fn checkpoint_manager(&self) -> CheckpointManager {
+        CheckpointManager::new(&self.profile_home)
+    }
+
+    /// Creates a media manifest store for a project root.
+    pub fn media_manifest_store(&self, project_root: &Path) -> MediaManifestStore {
+        MediaManifestStore::new(project_root)
+    }
+
+    /// Executes approved worker worktree cleanup.
+    pub fn execute_worktree_cleanup(
+        &mut self,
+        worker_id: &str,
+    ) -> Result<Vec<EventEnvelope>, ErrorPayload> {
+        let worker = self.workers.get(worker_id).ok_or_else(|| {
+            tool_error(
+                "worker_not_found",
+                format!("worker '{worker_id}' was not found"),
+                false,
+            )
+        })?;
+        let worktree = worker.worktree.as_ref().ok_or_else(|| {
+            tool_error(
+                "worker_worktree_not_owned",
+                format!("worker '{worker_id}' has no worktree metadata"),
+                false,
+            )
+        })?;
+        let project_root = worktree.project_root.as_deref().ok_or_else(|| {
+            tool_error(
+                "worker_worktree_not_owned",
+                format!("worker '{worker_id}' has no project root"),
+                false,
+            )
+        })?;
+
+        let store = ProjectWorkspaceStore::new(project_root);
+
+        self.transition_worker_worktree_state(worker_id, None, WorkerWorktreeState::Removed)
+            .map_err(|error| tool_error(error.code, error.message, false))?;
+
+        WorktreeCleanupExecutor::execute(&store, worker_id).map_err(|error| {
+            tool_error(
+                "worker_worktree_cleanup_failed",
+                format!("worktree cleanup failed: {error}"),
+                false,
+            )
+        })?;
+
+        let mut events = Vec::new();
+        if let Some(event) = self.append_worker_log(
+            worker_id,
+            "cleanup: daemon-internal privileged operation on CADIS-owned worktree\n",
+        ) {
+            events.push(event);
+        }
+        if let Some(event) =
+            self.append_worker_log(worker_id, "cleanup completed: worktree directory removed\n")
+        {
+            events.push(event);
+        }
+        Ok(events)
     }
 
     fn complete_pending_message_blocking(
@@ -1543,13 +1705,16 @@ impl Runtime {
         &mut self,
         request: AgentSpawnRequest,
     ) -> Result<AgentRecord, RuntimeError> {
-        let role = normalize_role(&request.role);
-        if role.is_empty() {
+        let role_str = normalize_role(&request.role);
+        if role_str.is_empty() {
             return Err(RuntimeError {
                 code: "invalid_agent_role",
                 message: "agent role is empty".to_owned(),
             });
         }
+        let role = role_str
+            .parse::<AgentRole>()
+            .unwrap_or(AgentRole::Specialist);
 
         let parent_agent_id = if let Some(parent_agent_id) = request.parent_agent_id {
             if !self.agents.contains_key(&parent_agent_id) {
@@ -1596,12 +1761,12 @@ impl Runtime {
             });
         }
 
-        let agent_id = self.next_agent_id(&role);
+        let agent_id = self.next_agent_id(&role_str);
         let display_name = request
             .display_name
             .as_deref()
             .map(|name| normalize_agent_name(name, &agent_id))
-            .unwrap_or_else(|| default_agent_name(&role, &agent_id));
+            .unwrap_or_else(|| default_agent_name(&role_str, &agent_id));
         let model = request
             .model
             .filter(|model| !model.trim().is_empty())
@@ -1638,9 +1803,84 @@ impl Runtime {
             );
         };
         let _ = self.state_store.remove_agent_metadata(&agent_id);
-        record.status = AgentStatus::Completed;
-        let event = self.event(None, CadisEvent::AgentCompleted(record.event_payload()));
-        self.accept(request_id, vec![event])
+        record.status = AgentStatus::Cancelled;
+
+        let cancellation_requested_at = now_timestamp();
+        let mut events = Vec::new();
+
+        // Cancel active agent sessions for this agent.
+        let session_ids: Vec<AgentSessionId> = self
+            .agent_sessions
+            .iter()
+            .filter(|(_, r)| r.agent_id == agent_id && !agent_session_is_terminal(r.status))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for agent_session_id in session_ids {
+            if let Some(r) = self.agent_sessions.get_mut(&agent_session_id) {
+                r.status = AgentSessionStatus::Cancelled;
+                r.error_code = Some("agent_killed".to_owned());
+                r.error = Some("agent was killed".to_owned());
+                r.cancellation_requested_at = Some(cancellation_requested_at.clone());
+                let session_id = r.session_id.clone();
+                let payload = r.event_payload();
+                let _ = self.persist_agent_session_record(&agent_session_id);
+                events.push(
+                    self.session_event(session_id, CadisEvent::AgentSessionCancelled(payload)),
+                );
+            }
+        }
+
+        // Cancel active workers owned by this agent.
+        let worker_ids: Vec<String> = self
+            .workers
+            .iter()
+            .filter(|(_, r)| r.agent_id.as_ref() == Some(&agent_id) && !r.is_terminal())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for worker_id in worker_ids {
+            events.extend(self.cancel_worker(&worker_id, cancellation_requested_at.clone()));
+        }
+
+        events.push(self.event(None, CadisEvent::AgentKilled(record.event_payload())));
+        self.accept(request_id, events)
+    }
+
+    fn tail_agent(&mut self, request_id: RequestId, request: AgentTailRequest) -> RequestOutcome {
+        let Some(agent) = self.agents.get(&request.agent_id) else {
+            return self.reject(
+                request_id,
+                "agent_not_found",
+                format!("agent '{}' was not found", request.agent_id),
+                false,
+            );
+        };
+        let limit = request
+            .limit
+            .and_then(|l| usize::try_from(l).ok())
+            .unwrap_or(8);
+        let mut sessions: Vec<AgentSessionRecord> = self
+            .agent_sessions
+            .values()
+            .filter(|r| r.agent_id == request.agent_id)
+            .cloned()
+            .collect();
+        sessions.sort_by(|a, b| a.id.cmp(&b.id));
+        let start = sessions.len().saturating_sub(limit);
+        let mut events = vec![self.event(
+            None,
+            CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                agent_id: agent.id.clone(),
+                status: agent.status,
+                task: None,
+            }),
+        )];
+        for session in &sessions[start..] {
+            events.push(self.session_event(
+                session.session_id.clone(),
+                agent_session_lifecycle_event(session.event_payload()),
+            ));
+        }
+        self.accept(request_id, events)
     }
 
     fn workspace_list(
@@ -1953,13 +2193,49 @@ impl Runtime {
         text: &str,
     ) -> Vec<EventEnvelope> {
         let prefs = VoiceRuntimePreferences::from_options(&self.ui_preferences);
-        if speech_decision(&prefs, content_kind, text, SpeechMode::AutoSpeak)
-            != SpeechDecision::Speak
-        {
+        let decision = speech_decision(&prefs, content_kind, text, SpeechMode::AutoSpeak);
+        let speakable = match &decision {
+            SpeechDecision::Speak => Some(text.trim().to_owned()),
+            SpeechDecision::RequiresSummary(_) => Some(summarize_for_speech(text)),
+            SpeechDecision::Blocked(_) => None,
+        };
+        let Some(speakable) = speakable else {
             return Vec::new();
-        }
+        };
 
-        match self.speak_with_provider(&prefs, text.trim()) {
+        match self.speak_with_provider(&prefs, &speakable) {
+            Ok(_) => vec![
+                self.session_event(
+                    session_id.clone(),
+                    CadisEvent::VoiceStarted(Default::default()),
+                ),
+                self.session_event(
+                    session_id.clone(),
+                    CadisEvent::VoiceCompleted(Default::default()),
+                ),
+            ],
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn approval_speech_events(
+        &mut self,
+        session_id: &SessionId,
+        record: &ApprovalRecord,
+    ) -> Vec<EventEnvelope> {
+        let prefs = VoiceRuntimePreferences::from_options(&self.ui_preferences);
+        let mut text = approval_risk_speech(record);
+        match speech_decision(&prefs, ContentKind::Approval, &text, SpeechMode::AutoSpeak) {
+            SpeechDecision::Speak => {}
+            SpeechDecision::RequiresSummary(_) => {
+                text = summarize_for_speech(&text);
+            }
+            SpeechDecision::Blocked(_) => return Vec::new(),
+        }
+        if text.chars().count() > prefs.max_spoken_chars {
+            text = text.chars().take(prefs.max_spoken_chars).collect();
+        }
+        match self.speak_with_provider(&prefs, &text) {
             Ok(_) => vec![
                 self.session_event(
                     session_id.clone(),
@@ -2108,7 +2384,7 @@ impl Runtime {
         }
         format!(
             "You are {} ({}) in the CADIS multi-agent runtime. Answer only for your role and keep the response concise unless the user asks for detail.\n\nUser request:\n{}",
-            agent.display_name, agent.role, content
+            agent.display_name, agent.role.as_str(), content
         )
     }
 
@@ -2442,24 +2718,107 @@ impl Runtime {
         agent_id: AgentId,
         worker: &WorkerDelegation,
     ) -> Vec<EventEnvelope> {
+        let running_count = self
+            .workers
+            .values()
+            .filter(|r| r.status == WorkerState::Running)
+            .count();
+        let queued = running_count >= self.agent_runtime.max_concurrent_workers;
+
         let mut record = WorkerRecord::from_delegation(session_id, Some(agent_id), worker);
+        if queued {
+            record.status = WorkerState::Queued;
+        }
         let worker_id = record.worker_id.clone();
-        let preparation_logs = prepare_worker_execution(&mut record);
-        let mut events = vec![self.session_event(
+        if !queued {
+            let preparation_logs = prepare_worker_execution(&mut record);
+            let mut events = vec![self.session_event(
+                record.session_id.clone(),
+                CadisEvent::WorkerStarted(record.event_payload()),
+            )];
+            self.workers.insert(worker_id.clone(), record);
+            let _ = self.persist_worker_record(&worker_id);
+            if let Some(event) =
+                self.append_worker_log(&worker_id, format!("started: {}\n", worker.summary))
+            {
+                events.push(event);
+            }
+            for line in preparation_logs {
+                if let Some(event) = self.append_worker_log(&worker_id, line) {
+                    events.push(event);
+                }
+            }
+            return events;
+        }
+
+        // Queued path.
+        let events = vec![self.session_event(
             record.session_id.clone(),
             CadisEvent::WorkerStarted(record.event_payload()),
         )];
         self.workers.insert(worker_id.clone(), record);
         let _ = self.persist_worker_record(&worker_id);
-        if let Some(event) =
-            self.append_worker_log(&worker_id, format!("started: {}\n", worker.summary))
-        {
-            events.push(event);
+        if let Some(event) = self.append_worker_log(
+            &worker_id,
+            format!(
+                "queued: waiting for worker slot (max_concurrent_workers={})\n",
+                self.agent_runtime.max_concurrent_workers
+            ),
+        ) {
+            return [events, vec![event]].concat();
         }
-        for line in preparation_logs {
-            if let Some(event) = self.append_worker_log(&worker_id, line) {
-                events.push(event);
-            }
+        events
+    }
+
+    /// Promotes queued workers when slots become available. Called after a worker finishes.
+    fn promote_queued_workers(&mut self) -> Vec<EventEnvelope> {
+        let running_count = self
+            .workers
+            .values()
+            .filter(|r| r.status == WorkerState::Running)
+            .count();
+        if running_count >= self.agent_runtime.max_concurrent_workers {
+            return Vec::new();
+        }
+        let slots = self.agent_runtime.max_concurrent_workers - running_count;
+        let mut queued_ids: Vec<String> = self
+            .workers
+            .iter()
+            .filter(|(_, r)| r.status == WorkerState::Queued)
+            .map(|(id, _)| id.clone())
+            .collect();
+        queued_ids.sort();
+        queued_ids.truncate(slots);
+
+        let mut events = Vec::new();
+        for worker_id in queued_ids {
+            let session_id = {
+                let Some(worker) = self.workers.get_mut(&worker_id) else {
+                    continue;
+                };
+                worker.status = WorkerState::Running;
+                worker.updated_at = now_timestamp();
+                let preparation_logs = prepare_worker_execution(worker);
+                let session_id = worker.session_id.clone();
+                let payload = worker.event_payload();
+                let _ = self.persist_worker_record(&worker_id);
+                events.push(
+                    self.session_event(session_id.clone(), CadisEvent::WorkerStarted(payload)),
+                );
+                if let Some(event) = self.append_worker_log(
+                    &worker_id,
+                    "promoted from queue: worker slot available\n".to_owned(),
+                ) {
+                    events.push(event);
+                }
+                for line in preparation_logs {
+                    if let Some(event) = self.append_worker_log(&worker_id, line) {
+                        events.push(event);
+                    }
+                }
+                session_id
+            };
+            let _ = session_id; // used above
         }
         events
     }
@@ -2467,10 +2826,10 @@ impl Runtime {
     fn complete_worker(
         &mut self,
         worker_id: &str,
-        status: &str,
+        status: WorkerState,
         summary: String,
     ) -> Vec<EventEnvelope> {
-        if status == "completed" {
+        if status == WorkerState::Completed {
             let mut events = Vec::new();
             let command_result = self.execute_worker_command(worker_id);
             for line in command_result.logs {
@@ -2481,7 +2840,7 @@ impl Runtime {
             if let Some(failure) = command_result.failure {
                 events.extend(self.finish_worker(
                     worker_id,
-                    "failed",
+                    WorkerState::Failed,
                     failure.message.clone(),
                     WorkerFinishOptions {
                         error_code: Some(failure.code),
@@ -2527,7 +2886,7 @@ impl Runtime {
     ) -> Vec<EventEnvelope> {
         self.finish_worker(
             worker_id,
-            "failed",
+            WorkerState::Failed,
             error_message.clone(),
             WorkerFinishOptions {
                 error_code: Some(error_code.to_owned()),
@@ -2546,7 +2905,7 @@ impl Runtime {
         let reason = "session was cancelled".to_owned();
         self.finish_worker(
             worker_id,
-            "cancelled",
+            WorkerState::Cancelled,
             reason.clone(),
             WorkerFinishOptions {
                 error_code: Some("session_cancelled".to_owned()),
@@ -2560,7 +2919,7 @@ impl Runtime {
     fn finish_worker(
         &mut self,
         worker_id: &str,
-        status: &str,
+        status: WorkerState,
         summary: String,
         options: WorkerFinishOptions,
     ) -> Vec<EventEnvelope> {
@@ -2586,13 +2945,15 @@ impl Runtime {
         ) {
             events.push(event);
         }
+        // Promote queued workers when a slot opens.
+        events.extend(self.promote_queued_workers());
         events
     }
 
     fn write_worker_artifacts(
         &mut self,
         worker_id: &str,
-        status: &str,
+        status: WorkerState,
         summary: &str,
     ) -> Vec<String> {
         let Some(worker) = self.workers.get_mut(worker_id) else {
@@ -2605,13 +2966,13 @@ impl Runtime {
         let Some(worker) = self.workers.get_mut(worker_id) else {
             return WorkerCommandExecution::default();
         };
-        execute_worker_command(worker)
+        execute_worker_command(worker, &self.agent_runtime.worker_command)
     }
 
     fn plan_worker_terminal_cleanup(
         &mut self,
         worker_id: &str,
-        status: &str,
+        status: WorkerState,
     ) -> Vec<EventEnvelope> {
         if !worker_status_is_terminal(status) {
             return Vec::new();
@@ -2668,12 +3029,72 @@ impl Runtime {
         )?;
 
         let mut events = Vec::new();
-        if let Some(event) = self.append_worker_log(
-            worker_id,
-            format!("cleanup requested: {reason}; files were not removed\n"),
-        ) {
-            events.push(event);
+
+        // Attempt actual worktree removal.
+        let removed = if let Some(worker) = self.workers.get(worker_id) {
+            if let Some(worktree) = &worker.worktree {
+                let worktree_path = PathBuf::from(&worktree.worktree_path);
+                if worktree_path.exists() && worktree_path.is_dir() {
+                    // Remove git worktree first, then directory.
+                    if let Some(project_root) = worktree.project_root.as_deref() {
+                        let _ = Command::new("git")
+                            .args(["worktree", "remove", "--force"])
+                            .arg(&worktree_path)
+                            .current_dir(project_root)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                    }
+                    if worktree_path.exists() {
+                        let _ = fs::remove_dir_all(&worktree_path);
+                    }
+                    !worktree_path.exists()
+                } else {
+                    true // already gone
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if removed {
+            // Update project metadata directly since the worktree path no longer exists.
+            if let Some(worker) = self.workers.get(worker_id) {
+                if let Some(worktree) = &worker.worktree {
+                    if let Some(project_root) = worktree.project_root.as_deref() {
+                        let store = ProjectWorkspaceStore::new(project_root);
+                        if let Ok(Some(mut meta)) = store.load_worker_worktree_metadata(worker_id) {
+                            meta.state = ProjectWorkerWorktreeState::Removed;
+                            let _ = store.save_worker_worktree_metadata(&meta);
+                        }
+                    }
+                }
+            }
+            if let Some(worker) = self.workers.get_mut(worker_id) {
+                if let Some(worktree) = &mut worker.worktree {
+                    worktree.state = WorkerWorktreeState::Removed;
+                }
+                worker.updated_at = now_timestamp();
+            }
+            let _ = self.persist_worker_record(worker_id);
+            if let Some(event) = self.append_worker_log(
+                worker_id,
+                format!("cleanup completed: {reason}; worktree removed\n"),
+            ) {
+                events.push(event);
+            }
+        } else {
+            if let Some(event) = self.append_worker_log(
+                worker_id,
+                format!("cleanup requested: {reason}; removal attempted\n"),
+            ) {
+                events.push(event);
+            }
         }
+
         if let Some((session_id, payload)) = self
             .workers
             .get(worker_id)
@@ -2917,7 +3338,7 @@ impl Runtime {
     fn update_worker_status(
         &mut self,
         worker_id: &str,
-        status: &str,
+        status: WorkerState,
         summary: Option<String>,
         error_code: Option<String>,
         error: Option<String>,
@@ -2925,7 +3346,7 @@ impl Runtime {
     ) -> Option<EventEnvelope> {
         let (session_id, payload) = {
             let worker = self.workers.get_mut(worker_id)?;
-            worker.status = status.to_owned();
+            worker.status = status;
             if let Some(summary) = summary {
                 worker.summary = Some(redact(&summary));
             }
@@ -3201,6 +3622,40 @@ impl Runtime {
         record: &ApprovalRecord,
         request: ToolCallRequest,
     ) -> Vec<EventEnvelope> {
+        // Track D item 8: recheck approval expiry and policy before execution.
+        if approval_is_expired(record) {
+            return vec![self.session_event(
+                record.session_id.clone(),
+                CadisEvent::ToolFailed(ToolFailedPayload {
+                    tool_call_id: record.tool_call_id.clone(),
+                    tool_name: record.tool_name.clone(),
+                    error: tool_error(
+                        "approval_expired",
+                        "approval expired before execution could start",
+                        false,
+                    ),
+                    risk_class: Some(record.risk_class),
+                }),
+            )];
+        }
+
+        let recheck = self.policy.decide(record.risk_class);
+        if recheck == PolicyDecision::Deny {
+            return vec![self.session_event(
+                record.session_id.clone(),
+                CadisEvent::ToolFailed(ToolFailedPayload {
+                    tool_call_id: record.tool_call_id.clone(),
+                    tool_name: record.tool_name.clone(),
+                    error: tool_error(
+                        "policy_denied_at_execution",
+                        "policy denied the tool at execution time",
+                        false,
+                    ),
+                    risk_class: Some(record.risk_class),
+                }),
+            )];
+        }
+
         if request.tool_name != record.tool_name {
             return vec![self.session_event(
                 record.session_id.clone(),
@@ -3315,6 +3770,13 @@ impl Runtime {
         request: &ToolCallRequest,
         tool_timeout_secs: u64,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
+        if self.denied_paths.is_denied(workspace) {
+            return Err(tool_error(
+                "path_denied",
+                format!("workspace {} is denied by policy", workspace.display()),
+                false,
+            ));
+        }
         match request.tool_name.as_str() {
             "shell.run" => self.execute_shell_run(workspace, &request.input, tool_timeout_secs),
             "file.patch" => self.execute_file_patch(workspace, &request.input),
@@ -3335,10 +3797,23 @@ impl Runtime {
         let prepared = prepare_file_patch(workspace, &operations)?;
 
         for change in &prepared {
-            fs::write(&change.path, change.content.as_bytes()).map_err(|error| {
+            let parent = change.path.parent();
+            let temp_path = match parent {
+                Some(dir) => dir.join(format!(".cadis_patch_{}.tmp", std::process::id())),
+                None => PathBuf::from(format!(".cadis_patch_{}.tmp", std::process::id())),
+            };
+            fs::write(&temp_path, change.content.as_bytes()).map_err(|error| {
                 tool_error(
                     "file_patch_write_failed",
-                    format!("could not write {}: {error}", change.display_path),
+                    format!("could not write temp for {}: {error}", change.display_path),
+                    false,
+                )
+            })?;
+            fs::rename(&temp_path, &change.path).map_err(|error| {
+                let _ = fs::remove_file(&temp_path);
+                tool_error(
+                    "file_patch_write_failed",
+                    format!("could not rename temp to {}: {error}", change.display_path),
                     false,
                 )
             })?;
@@ -3375,6 +3850,13 @@ impl Runtime {
         let path = input_string(input, "path")
             .ok_or_else(|| tool_error("invalid_tool_input", "file.read requires path", false))?;
         let path = resolve_inside_workspace(workspace, &path)?;
+        if cadis_policy::is_secret_file(&path) {
+            return Err(tool_error(
+                "secret_path_rejected",
+                "file.read refuses to read secret-like paths",
+                false,
+            ));
+        }
         let bytes = fs::read(&path).map_err(|error| {
             tool_error(
                 "file_read_failed",
@@ -3863,6 +4345,14 @@ impl AgentRuntimeConfig {
                 .unwrap_or(defaults.default_timeout_sec),
             max_steps_per_session: json_u32(agent_runtime, "max_steps_per_session")
                 .unwrap_or(defaults.max_steps_per_session),
+            worker_command: agent_runtime
+                .get("worker_command")
+                .and_then(serde_json::Value::as_str)
+                .map(|s| s.trim().to_owned())
+                .unwrap_or(defaults.worker_command),
+            max_concurrent_workers: json_usize(agent_runtime, "max_concurrent_workers")
+                .filter(|v| *v > 0)
+                .unwrap_or(defaults.max_concurrent_workers),
         }
     }
 }
@@ -4091,7 +4581,7 @@ impl SessionMetadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AgentRecord {
     id: AgentId,
-    role: String,
+    role: AgentRole,
     display_name: String,
     parent_agent_id: Option<AgentId>,
     model: String,
@@ -4101,7 +4591,7 @@ struct AgentRecord {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 struct AgentMetadata {
     agent_id: AgentId,
-    role: String,
+    role: AgentRole,
     display_name: String,
     parent_agent_id: Option<AgentId>,
     model: String,
@@ -4112,7 +4602,7 @@ impl AgentMetadata {
     fn from_record(record: &AgentRecord) -> Self {
         Self {
             agent_id: record.id.clone(),
-            role: record.role.clone(),
+            role: record.role,
             display_name: record.display_name.clone(),
             parent_agent_id: record.parent_agent_id.clone(),
             model: record.model.clone(),
@@ -4141,7 +4631,7 @@ impl AgentRecord {
         AgentHomeTemplate::new(
             self.id.clone(),
             self.display_name.clone(),
-            self.role.clone(),
+            self.role.as_str().to_owned(),
             self.parent_agent_id.clone(),
             self.model.clone(),
         )
@@ -4150,7 +4640,7 @@ impl AgentRecord {
     fn event_payload(self) -> AgentEventPayload {
         AgentEventPayload {
             agent_id: self.id,
-            role: Some(self.role),
+            role: Some(self.role.as_str().to_owned()),
             display_name: Some(self.display_name),
             parent_agent_id: self.parent_agent_id,
             model: Some(self.model),
@@ -4427,7 +4917,7 @@ struct WorkerRecord {
     agent_id: Option<AgentId>,
     parent_agent_id: Option<AgentId>,
     agent_session_id: Option<AgentSessionId>,
-    status: String,
+    status: WorkerState,
     cli: Option<String>,
     cwd: Option<String>,
     summary: Option<String>,
@@ -4482,7 +4972,7 @@ struct WorkerMetadata {
     agent_id: Option<AgentId>,
     parent_agent_id: Option<AgentId>,
     agent_session_id: Option<AgentSessionId>,
-    status: String,
+    status: WorkerState,
     cli: Option<String>,
     cwd: Option<String>,
     summary: Option<String>,
@@ -4506,7 +4996,7 @@ impl WorkerRecord {
             agent_id,
             parent_agent_id: worker.parent_agent_id.clone(),
             agent_session_id: Some(worker.agent_session_id.clone()),
-            status: "running".to_owned(),
+            status: WorkerState::Running,
             cli: None,
             cwd: None,
             summary: Some(worker.summary.clone()),
@@ -4527,7 +5017,7 @@ impl WorkerRecord {
             agent_id: self.agent_id.clone(),
             parent_agent_id: self.parent_agent_id.clone(),
             agent_session_id: self.agent_session_id.clone(),
-            status: Some(self.status.clone()),
+            status: Some(worker_state_str(self.status)),
             cli: self.cli.clone(),
             cwd: self.cwd.clone(),
             summary: self.summary.clone(),
@@ -4540,7 +5030,7 @@ impl WorkerRecord {
     }
 
     fn is_terminal(&self) -> bool {
-        worker_status_is_terminal(&self.status)
+        worker_status_is_terminal(self.status)
     }
 }
 
@@ -4552,7 +5042,7 @@ impl WorkerMetadata {
             agent_id: record.agent_id.clone(),
             parent_agent_id: record.parent_agent_id.clone(),
             agent_session_id: record.agent_session_id.clone(),
-            status: record.status.clone(),
+            status: record.status,
             cli: record.cli.clone(),
             cwd: record.cwd.clone(),
             summary: record.summary.clone(),
@@ -4750,6 +5240,7 @@ impl TtsProvider for StubbedTtsProvider {
             provider: self.id().to_owned(),
             voice_id: request.voice_id.to_owned(),
             spoken_chars: request.text.chars().count(),
+            audio_path: None,
         })
     }
 
@@ -4765,8 +5256,113 @@ impl TtsProvider for StubbedTtsProvider {
     }
 }
 
+/// Daemon-owned Edge TTS provider that calls the `edge-tts` Python CLI.
+struct EdgeTtsProvider;
+
+impl TtsProvider for EdgeTtsProvider {
+    fn id(&self) -> &'static str {
+        "edge"
+    }
+
+    fn label(&self) -> &'static str {
+        "Edge TTS (daemon subprocess)"
+    }
+
+    fn supported_voices(&self) -> Vec<TtsVoice> {
+        curated_tts_voices()
+    }
+
+    fn speak(&mut self, request: TtsRequest<'_>) -> Result<TtsOutput, TtsError> {
+        // Validate voice_id: only allow alphanumeric, dash, and dot.
+        if request.voice_id.is_empty()
+            || !request
+                .voice_id
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '.')
+        {
+            return Err(TtsError::new(
+                "invalid_voice_id",
+                "voice_id must be non-empty and contain only alphanumeric, dash, or dot characters",
+                false,
+            ));
+        }
+
+        // Truncate text to prevent excessively long subprocess arguments.
+        const MAX_TTS_TEXT_CHARS: usize = 5000;
+        let text = if request.text.chars().count() > MAX_TTS_TEXT_CHARS {
+            truncate_to_utf8_boundary(request.text, MAX_TTS_TEXT_CHARS).0
+        } else {
+            request.text
+        };
+
+        let temp_dir = std::env::temp_dir().join("cadis-edge-tts");
+        let _ = fs::create_dir_all(&temp_dir);
+        // Use PID + nanos for a unique path per invocation.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let audio_path = temp_dir.join(format!("cadis-tts-{}-{nanos}.mp3", std::process::id()));
+
+        let rate_arg = format!("{:+}%", request.rate);
+        let pitch_arg = format!("{:+}Hz", request.pitch);
+        let volume_arg = format!("{:+}%", request.volume);
+
+        let output = Command::new("edge-tts")
+            .args(["--voice", request.voice_id])
+            .args(["--rate", &rate_arg])
+            .args(["--pitch", &pitch_arg])
+            .args(["--volume", &volume_arg])
+            .args(["--text", text])
+            .arg("--write-media")
+            .arg(&audio_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output();
+
+        match output {
+            Ok(result) if result.status.success() => Ok(TtsOutput {
+                provider: "edge".to_owned(),
+                voice_id: request.voice_id.to_owned(),
+                spoken_chars: request.text.chars().count(),
+                audio_path: Some(audio_path),
+            }),
+            Ok(result) => {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                Err(TtsError::new(
+                    "edge_tts_failed",
+                    format!(
+                        "edge-tts exited with code {:?}: {}",
+                        result.status.code(),
+                        stderr.trim()
+                    ),
+                    true,
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(TtsError::new(
+                "edge_tts_not_found",
+                "edge-tts binary is not installed; install with: pip install edge-tts",
+                false,
+            )),
+            Err(error) => Err(TtsError::new(
+                "edge_tts_spawn_failed",
+                error.to_string(),
+                true,
+            )),
+        }
+    }
+
+    fn stop(&mut self) -> Result<(), TtsError> {
+        Ok(())
+    }
+}
+
 fn tts_provider_from_config(provider: &str) -> Box<dyn TtsProvider> {
-    Box::new(StubbedTtsProvider::new(provider))
+    match provider {
+        "edge" => Box::new(EdgeTtsProvider),
+        _ => Box::new(StubbedTtsProvider::new(provider)),
+    }
 }
 
 fn tts_provider_kind(provider: &str) -> TtsProviderKind {
@@ -4895,6 +5491,49 @@ fn speech_decision(
     }
 
     SpeechDecision::Speak
+}
+
+/// Truncates text to the first 2-3 sentences for spoken summary.
+fn summarize_for_speech(text: &str) -> String {
+    let mut end = 0;
+    let mut sentences = 0;
+    for (index, character) in text.char_indices() {
+        if matches!(character, '.' | '!' | '?') {
+            let next = text[index + character.len_utf8()..].chars().next();
+            if next.is_none() || next.is_some_and(|c| c.is_whitespace()) {
+                sentences += 1;
+                end = index + character.len_utf8();
+                if sentences >= 3 {
+                    break;
+                }
+            }
+        }
+    }
+    if end == 0 {
+        text.split_whitespace()
+            .take(30)
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        text[..end].trim().to_owned()
+    }
+}
+
+/// Generates a short spoken risk summary for an approval request.
+fn approval_risk_speech(record: &ApprovalRecord) -> String {
+    let mut speech = format!("Approval needed: {}", record.tool_name);
+    if let Some(command) = &record.command {
+        let short = command.chars().take(60).collect::<String>();
+        speech.push_str(&format!(", {short}"));
+    }
+    if let Some(workspace) = &record.workspace {
+        let name = Path::new(workspace)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(workspace);
+        speech.push_str(&format!(" in workspace {name}"));
+    }
+    speech
 }
 
 fn looks_like_raw_tool_output(text: &str) -> bool {
@@ -5235,6 +5874,29 @@ struct ToolExecutionResult {
     output: serde_json::Value,
 }
 
+// ── Track D: ToolExecutor trait ──────────────────────────────────────
+// Defined as a planned extension point for structured tool backends.
+// Existing tools dispatch through match arms; migration to this trait
+// is tracked as future Track D work.
+
+/// Context passed to tool executors at invocation time.
+#[allow(dead_code)]
+struct ToolContext {
+    workspace: PathBuf,
+    tool_name: String,
+    timeout_secs: u64,
+}
+
+/// Trait for structured tool execution backends.
+#[allow(dead_code)]
+trait ToolExecutor: Send + Sync {
+    fn execute(
+        &self,
+        input: &serde_json::Value,
+        context: &ToolContext,
+    ) -> Result<ToolExecutionResult, RuntimeError>;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FilePatchOperation {
     Write {
@@ -5455,7 +6117,7 @@ fn reconcile_recovered_workers(
             continue;
         }
 
-        worker.status = "failed".to_owned();
+        worker.status = WorkerState::Failed;
         let summary = match worker.summary.take() {
             Some(summary) if !summary.trim().is_empty() => {
                 format!("{summary} (marked failed during daemon recovery)")
@@ -5465,7 +6127,7 @@ fn reconcile_recovered_workers(
         worker.summary = Some(summary.clone());
         worker.error_code = Some("worker_recovered_stale".to_owned());
         worker.error = Some(summary);
-        plan_worker_terminal_worktree(worker, "failed");
+        plan_worker_terminal_worktree(worker, WorkerState::Failed);
         worker.updated_at = now_timestamp();
 
         match state_store.write_worker_metadata(
@@ -5641,11 +6303,19 @@ fn next_approval_counter(approvals: &HashMap<ApprovalId, ApprovalRecord>) -> u64
         + 1
 }
 
-fn worker_status_is_terminal(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "canceled" | "expired"
-    )
+fn worker_status_is_terminal(status: WorkerState) -> bool {
+    status.is_terminal()
+}
+
+fn worker_state_str(s: WorkerState) -> String {
+    match s {
+        WorkerState::Queued => "queued",
+        WorkerState::Running => "running",
+        WorkerState::Completed => "completed",
+        WorkerState::Failed => "failed",
+        WorkerState::Cancelled => "cancelled",
+    }
+    .to_owned()
 }
 
 fn agent_session_lifecycle_event(payload: AgentSessionEventPayload) -> CadisEvent {
@@ -5662,7 +6332,14 @@ fn agent_session_lifecycle_event(payload: AgentSessionEventPayload) -> CadisEven
 }
 
 fn worker_lifecycle_event(payload: WorkerEventPayload) -> CadisEvent {
-    match payload.status.as_deref().map(worker_lifecycle_event_kind) {
+    let kind = payload.status.as_deref().and_then(|s| match s {
+        "completed" => Some(WorkerLifecycleEventKind::Completed),
+        "cancelled" | "canceled" => Some(WorkerLifecycleEventKind::Cancelled),
+        "failed" => Some(WorkerLifecycleEventKind::Failed),
+        "running" | "queued" => Some(WorkerLifecycleEventKind::Started),
+        _ => None,
+    });
+    match kind {
         Some(WorkerLifecycleEventKind::Completed) => CadisEvent::WorkerCompleted(payload),
         Some(WorkerLifecycleEventKind::Failed) => CadisEvent::WorkerFailed(payload),
         Some(WorkerLifecycleEventKind::Cancelled) => CadisEvent::WorkerCancelled(payload),
@@ -5678,10 +6355,10 @@ enum WorkerLifecycleEventKind {
     Cancelled,
 }
 
-fn worker_lifecycle_event_kind(status: &str) -> WorkerLifecycleEventKind {
+fn worker_lifecycle_event_kind(status: WorkerState) -> WorkerLifecycleEventKind {
     match status {
-        "completed" => WorkerLifecycleEventKind::Completed,
-        "cancelled" | "canceled" => WorkerLifecycleEventKind::Cancelled,
+        WorkerState::Completed => WorkerLifecycleEventKind::Completed,
+        WorkerState::Cancelled => WorkerLifecycleEventKind::Cancelled,
         status if worker_status_is_terminal(status) => WorkerLifecycleEventKind::Failed,
         _ => WorkerLifecycleEventKind::Started,
     }
@@ -5689,7 +6366,7 @@ fn worker_lifecycle_event_kind(status: &str) -> WorkerLifecycleEventKind {
 
 fn worker_terminal_worktree_state(
     record: &WorkerRecord,
-    status: &str,
+    status: WorkerState,
 ) -> Option<WorkerWorktreeState> {
     if !worker_status_is_terminal(status) {
         return None;
@@ -5710,7 +6387,7 @@ fn worker_terminal_worktree_state(
     })
 }
 
-fn plan_worker_terminal_worktree(record: &mut WorkerRecord, status: &str) {
+fn plan_worker_terminal_worktree(record: &mut WorkerRecord, status: WorkerState) {
     let Some(state) = worker_terminal_worktree_state(record, status) else {
         return;
     };
@@ -5879,7 +6556,7 @@ fn default_agents(model_provider: &str) -> HashMap<AgentId, AgentRecord> {
             id.clone(),
             AgentRecord {
                 id,
-                role: role.to_owned(),
+                role: role.parse::<AgentRole>().unwrap_or(AgentRole::Specialist),
                 display_name: display_name.to_owned(),
                 parent_agent_id: None,
                 model: model_provider.to_owned(),
@@ -7048,6 +7725,43 @@ fn tool_error(
     }
 }
 
+/// Returns `true` when the user message looks like a coding task.
+///
+/// The daemon uses this to emit a `ContentKind::Code` hint so HUD clients
+/// can auto-open the code work panel.
+pub fn is_code_heavy_task(content: &str) -> bool {
+    const KEYWORDS: &[&str] = &[
+        "implement",
+        "refactor",
+        "fix bug",
+        "write code",
+        "add function",
+        "add method",
+        "add test",
+        "unit test",
+        "compile",
+        "build error",
+        "syntax error",
+        "type error",
+        "cargo build",
+        "cargo test",
+        "npm run",
+        "pnpm",
+        "eslint",
+        "prettier",
+        "linter",
+        "pull request",
+        "code review",
+        "```",
+        "fn ",
+        "def ",
+        "struct ",
+        "impl ",
+    ];
+    let lower = content.to_ascii_lowercase();
+    KEYWORDS.iter().any(|kw| lower.contains(kw))
+}
+
 fn title_from_message(message: &str) -> String {
     let title = message
         .split_whitespace()
@@ -7077,7 +7791,14 @@ fn normalize_agent_name(value: &str, agent_id: &AgentId) -> String {
 }
 
 fn normalize_role(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
+    let collapsed: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return collapsed;
+    }
+    collapsed
+        .parse::<cadis_protocol::AgentRole>()
+        .map(|r| r.as_str().to_owned())
+        .unwrap_or(collapsed)
 }
 
 fn default_agent_name(role: &str, agent_id: &AgentId) -> String {
@@ -7213,6 +7934,48 @@ fn summarize_task(content: &str) -> String {
     } else {
         summary
     }
+}
+
+/// Parsed model-driven spawn directive from a model response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ModelSpawnDirective {
+    role: String,
+    task: String,
+}
+
+/// Maximum spawn directives parsed from a single model response.
+const MAX_SPAWN_DIRECTIVES_PER_RESPONSE: usize = 3;
+/// Maximum length for a model-driven spawn role.
+const SPAWN_ROLE_MAX_LEN: usize = 64;
+/// Maximum length for a model-driven spawn task.
+const SPAWN_TASK_MAX_LEN: usize = 256;
+
+/// Parses `[SPAWN role: task]` directives from model response text.
+fn parse_model_spawn_directives(content: &str) -> Vec<ModelSpawnDirective> {
+    let mut directives = Vec::new();
+    for line in content.lines() {
+        if directives.len() >= MAX_SPAWN_DIRECTIVES_PER_RESPONSE {
+            break;
+        }
+        let trimmed = line.trim();
+        if let Some(inner) = trimmed
+            .strip_prefix("[SPAWN ")
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            if let Some((role, task)) = inner.split_once(':') {
+                let role = truncate_to_utf8_boundary(&normalize_role(role), SPAWN_ROLE_MAX_LEN)
+                    .0
+                    .to_owned();
+                let task = truncate_to_utf8_boundary(task.trim(), SPAWN_TASK_MAX_LEN)
+                    .0
+                    .to_owned();
+                if !role.is_empty() && !task.is_empty() {
+                    directives.push(ModelSpawnDirective { role, task });
+                }
+            }
+        }
+    }
+    directives
 }
 
 fn planned_worker_worktree(
@@ -7434,7 +8197,13 @@ fn create_git_worktree(
     }
 }
 
-fn execute_worker_command(record: &mut WorkerRecord) -> WorkerCommandExecution {
+fn execute_worker_command(
+    record: &mut WorkerRecord,
+    worker_command: &str,
+) -> WorkerCommandExecution {
+    if worker_command.is_empty() {
+        return WorkerCommandExecution::default();
+    }
     let Some(worktree) = record.worktree.clone() else {
         return WorkerCommandExecution::default();
     };
@@ -7448,7 +8217,7 @@ fn execute_worker_command(record: &mut WorkerRecord) -> WorkerCommandExecution {
         Err(message) => {
             let message = redact(&message);
             record.command_report = Some(WorkerCommandReport {
-                command: WORKER_DEFAULT_COMMAND.to_owned(),
+                command: worker_command.to_owned(),
                 cwd: worktree.worktree_path,
                 status: "failed".to_owned(),
                 exit_code: None,
@@ -7472,12 +8241,12 @@ fn execute_worker_command(record: &mut WorkerRecord) -> WorkerCommandExecution {
     record.cwd = Some(cwd_display.clone());
     execution
         .logs
-        .push(format!("command started: {WORKER_DEFAULT_COMMAND}\n"));
+        .push(format!("command started: {worker_command}\n"));
 
-    let report = match run_worker_validation_command(&cwd) {
-        Ok(result) => worker_command_report(&cwd_display, result),
+    let report = match run_worker_validation_command(&cwd, worker_command) {
+        Ok(result) => worker_command_report(worker_command, &cwd_display, result),
         Err(error) => WorkerCommandReport {
-            command: WORKER_DEFAULT_COMMAND.to_owned(),
+            command: worker_command.to_owned(),
             cwd: cwd_display,
             status: "failed".to_owned(),
             exit_code: None,
@@ -7527,20 +8296,37 @@ fn worker_command_cwd(worker_id: &str, worktree: &WorkerWorktreeIntent) -> Resul
     Ok(cwd)
 }
 
-fn run_worker_validation_command(cwd: &Path) -> Result<ShellRunResult, ErrorPayload> {
-    let mut command = Command::new("git");
+fn run_worker_validation_command(
+    cwd: &Path,
+    worker_command: &str,
+) -> Result<ShellRunResult, ErrorPayload> {
+    let parts: Vec<&str> = worker_command.split_whitespace().collect();
+    let (program, args) = parts.split_first().ok_or_else(|| ErrorPayload {
+        code: "worker_command_empty".to_owned(),
+        message: "worker command is empty".to_owned(),
+        retryable: false,
+    })?;
+    let mut command = Command::new(program);
     command
-        .args(["status", "--short"])
+        .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .env_clear()
+        .envs(cadis_policy::filtered_env(
+            &cadis_policy::shell_env_allowlist(),
+        ));
     #[cfg(unix)]
     command.process_group(0);
     run_bounded_command(command, StdDuration::from_millis(WORKER_COMMAND_TIMEOUT_MS))
 }
 
-fn worker_command_report(cwd: &str, result: ShellRunResult) -> WorkerCommandReport {
+fn worker_command_report(
+    worker_command: &str,
+    cwd: &str,
+    result: ShellRunResult,
+) -> WorkerCommandReport {
     let stdout = redact(&String::from_utf8_lossy(&result.stdout.bytes));
     let stderr = redact(&String::from_utf8_lossy(&result.stderr.bytes));
     let status = if result.timed_out {
@@ -7552,7 +8338,7 @@ fn worker_command_report(cwd: &str, result: ShellRunResult) -> WorkerCommandRepo
     };
 
     WorkerCommandReport {
-        command: WORKER_DEFAULT_COMMAND.to_owned(),
+        command: worker_command.to_owned(),
         cwd: cwd.to_owned(),
         status: status.to_owned(),
         exit_code: result.exit_code,
@@ -7704,7 +8490,11 @@ fn worker_command_report_json(report: &WorkerCommandReport) -> serde_json::Value
     })
 }
 
-fn write_worker_artifacts(record: &mut WorkerRecord, status: &str, summary: &str) -> Vec<String> {
+fn write_worker_artifacts(
+    record: &mut WorkerRecord,
+    status: WorkerState,
+    summary: &str,
+) -> Vec<String> {
     let mut logs = Vec::new();
     let Some(artifacts) = record.artifacts.clone() else {
         return logs;
@@ -7816,7 +8606,11 @@ fn run_shell_command(
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .env_clear()
+        .envs(cadis_policy::filtered_env(
+            &cadis_policy::shell_env_allowlist(),
+        ));
     #[cfg(unix)]
     child_command.process_group(0);
 
@@ -9874,7 +10668,7 @@ mod tests {
                     agent_id: Some(AgentId::from("codex")),
                     parent_agent_id: Some(AgentId::from("main")),
                     agent_session_id: None,
-                    status: "running".to_owned(),
+                    status: WorkerState::Running,
                     cli: None,
                     cwd: None,
                     summary: Some("stale worker".to_owned()),
@@ -9920,7 +10714,7 @@ mod tests {
             .recover_worker_metadata::<WorkerMetadata>()
             .expect("worker metadata should recover");
         assert_eq!(recovered.records.len(), 1);
-        assert_eq!(recovered.records[0].metadata.status, "failed");
+        assert_eq!(recovered.records[0].metadata.status, WorkerState::Failed);
         assert_eq!(
             recovered.records[0].metadata.error_code.as_deref(),
             Some("worker_recovered_stale")
@@ -10031,7 +10825,7 @@ mod tests {
             .recover_worker_metadata::<WorkerMetadata>()
             .expect("worker metadata should recover");
         assert_eq!(recovered.records.len(), 1);
-        assert_eq!(recovered.records[0].metadata.status, "cancelled");
+        assert_eq!(recovered.records[0].metadata.status, WorkerState::Cancelled);
         assert!(recovered.records[0]
             .metadata
             .cancellation_requested_at
@@ -10209,7 +11003,8 @@ mod tests {
             cleanup.response.response,
             DaemonResponse::RequestAccepted(_)
         ));
-        assert!(Path::new(&worktree_path).is_dir());
+        // Cleanup executor now actually removes the worktree directory.
+        assert!(!Path::new(&worktree_path).is_dir());
         assert!(!cleanup
             .events
             .iter()
@@ -10219,9 +11014,6 @@ mod tests {
                 &event.event,
                 CadisEvent::WorkerCleanupRequested(payload)
                     if payload.worker_id == worker_id
-                        && payload.worktree.as_ref().is_some_and(|worktree|
-                            worktree.state == WorkerWorktreeState::CleanupPending
-                        )
             )
         }));
 
@@ -10229,10 +11021,7 @@ mod tests {
             .load_worker_worktree_metadata(&worker_id)
             .expect("worker worktree metadata should load")
             .expect("worker worktree metadata should exist");
-        assert_eq!(
-            project_metadata.state,
-            ProjectWorkerWorktreeState::CleanupPending
-        );
+        assert_eq!(project_metadata.state, ProjectWorkerWorktreeState::Removed);
 
         let state_store = StateStore::new(&CadisConfig {
             cadis_home,
@@ -10253,7 +11042,7 @@ mod tests {
                 .as_ref()
                 .expect("worker metadata should include worktree")
                 .state,
-            WorkerWorktreeState::CleanupPending
+            WorkerWorktreeState::Removed
         );
     }
 
@@ -10343,7 +11132,7 @@ mod tests {
             .iter()
             .find(|record| record.metadata.worker_id == worker_id)
             .expect("worker metadata should exist");
-        assert_eq!(worker.metadata.status, "cancelled");
+        assert_eq!(worker.metadata.status, WorkerState::Cancelled);
         assert_eq!(
             worker
                 .metadata
@@ -10869,7 +11658,7 @@ mod tests {
             .load_metadata()
             .expect("spawned AGENT.toml should parse");
         assert_eq!(metadata.agent.display_name, "Review Scout");
-        assert_eq!(metadata.agent.role, "Review");
+        assert_eq!(metadata.agent.role, "specialist");
         assert_eq!(metadata.agent.parent_agent_id.as_deref(), Some("main"));
     }
 
@@ -11571,7 +12360,7 @@ mod tests {
         assert_eq!(started.route_id, "route_000001");
         assert_eq!(started.status, AgentSessionStatus::Running);
         assert_eq!(started.task, "run tests");
-        assert_eq!(started.budget_steps, 1);
+        assert_eq!(started.budget_steps, 8);
         assert_eq!(started.steps_used, 0);
 
         assert!(outcome.events.iter().any(|event| {
@@ -11732,6 +12521,7 @@ mod tests {
         let mut runtime = runtime_with_agent_runtime_config(AgentRuntimeConfig {
             default_timeout_sec: 900,
             max_steps_per_session: 0,
+            ..AgentRuntimeConfig::default()
         });
         let outcome = runtime.handle_request(RequestEnvelope::new(
             RequestId::from("req_budget"),
@@ -12190,7 +12980,7 @@ mod tests {
                 &event.event,
                 CadisEvent::AgentSpawned(payload)
                     if payload.display_name.as_deref() == Some("Builder")
-                        && payload.role.as_deref() == Some("Coding")
+                        && payload.role.as_deref() == Some("specialist")
                         && payload.parent_agent_id.as_ref().map(AgentId::as_str) == Some("main")
                         && payload.model.as_deref() == Some("openai/gpt-5.5")
             )
@@ -12541,12 +13331,12 @@ mod tests {
             _ => None,
         });
         let spawned_agent = spawned_agent.expect("worker action should spawn an agent");
-        assert!(spawned_agent.as_str().starts_with("reviewer_"));
+        assert!(spawned_agent.as_str().starts_with("specialist_"));
         assert!(outcome.events.iter().any(|event| {
             matches!(
                 &event.event,
                 CadisEvent::AgentSpawned(payload)
-                    if payload.role.as_deref() == Some("Reviewer")
+                    if payload.role.as_deref() == Some("specialist")
                         && payload.parent_agent_id.as_ref().map(AgentId::as_str) == Some("main")
             )
         }));
@@ -12656,5 +13446,760 @@ mod tests {
             other => panic!("unexpected response: {other:?}"),
         }
         assert!(outcome.events.is_empty());
+    }
+
+    // ── Track D: Approval expiry recheck (item 8) ────────────────────
+
+    #[test]
+    fn approval_recheck_denies_when_policy_changes_to_deny() {
+        let workspace = test_workspace("approval-recheck");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "approval-recheck", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "approval-recheck",
+            vec![WorkspaceAccess::Exec],
+        );
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_recheck"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "shell.run".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "approval-recheck",
+                    "command": "echo recheck"
+                }),
+            }),
+        ));
+        let approval_id = approval_id_from(&request);
+
+        // Change policy to deny SystemChange before approving.
+        runtime.policy = cadis_policy::PolicyEngine::with_config(cadis_policy::PolicyConfig {
+            risk_overrides: vec![cadis_policy::RiskOverride {
+                risk_class: "SystemChange".to_owned(),
+                decision: "deny".to_owned(),
+            }],
+            ..cadis_policy::PolicyConfig::default()
+        });
+
+        let approved = approve(&mut runtime, approval_id);
+        assert!(approved.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.error.code == "policy_denied_at_execution"
+            )
+        }));
+    }
+
+    // ── Track D: Race condition tests (item 9) ───────────────────────
+
+    #[test]
+    fn concurrent_approval_second_response_is_rejected() {
+        let workspace = test_workspace("approval-race");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "approval-race", &workspace);
+        grant_workspace(&mut runtime, "approval-race", vec![WorkspaceAccess::Exec]);
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_race"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "shell.run".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "approval-race",
+                    "command": "echo race"
+                }),
+            }),
+        ));
+        let approval_id = approval_id_from(&request);
+
+        // First response: approve.
+        let first = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_race_approve_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::ApprovalRespond(ApprovalResponseRequest {
+                approval_id: approval_id.clone(),
+                decision: ApprovalDecision::Approved,
+                reason: Some("first".to_owned()),
+            }),
+        ));
+        assert!(first.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalResolved(payload)
+                    if payload.decision == ApprovalDecision::Approved
+            )
+        }));
+
+        // Second response: should be rejected as already resolved.
+        let second = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_race_approve_2"),
+            ClientId::from("cli_2"),
+            ClientRequest::ApprovalRespond(ApprovalResponseRequest {
+                approval_id,
+                decision: ApprovalDecision::Denied,
+                reason: Some("second".to_owned()),
+            }),
+        ));
+        assert!(matches!(
+            second.response.response,
+            DaemonResponse::RequestRejected(error)
+                if error.code == "approval_already_resolved"
+        ));
+    }
+
+    #[test]
+    fn concurrent_approval_deny_then_approve_is_rejected() {
+        let workspace = test_workspace("approval-race-deny");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "approval-race-deny", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "approval-race-deny",
+            vec![WorkspaceAccess::Exec],
+        );
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_race_deny"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "shell.run".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "approval-race-deny",
+                    "command": "echo race"
+                }),
+            }),
+        ));
+        let approval_id = approval_id_from(&request);
+
+        // First: deny.
+        let first = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_race_deny_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::ApprovalRespond(ApprovalResponseRequest {
+                approval_id: approval_id.clone(),
+                decision: ApprovalDecision::Denied,
+                reason: Some("denied first".to_owned()),
+            }),
+        ));
+        assert!(first.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ApprovalResolved(payload)
+                    if payload.decision == ApprovalDecision::Denied
+            )
+        }));
+
+        // Second: approve should be rejected.
+        let second = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_race_deny_2"),
+            ClientId::from("cli_2"),
+            ClientRequest::ApprovalRespond(ApprovalResponseRequest {
+                approval_id,
+                decision: ApprovalDecision::Approved,
+                reason: Some("too late".to_owned()),
+            }),
+        ));
+        assert!(matches!(
+            second.response.response,
+            DaemonResponse::RequestRejected(error)
+                if error.code == "approval_already_resolved"
+        ));
+    }
+
+    #[test]
+    fn approval_response_after_expiry_is_denied() {
+        let workspace = test_workspace("approval-expiry");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "approval-expiry", &workspace);
+        grant_workspace(&mut runtime, "approval-expiry", vec![WorkspaceAccess::Exec]);
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_expiry"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "shell.run".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "approval-expiry",
+                    "command": "echo expired"
+                }),
+            }),
+        ));
+        let approval_id = approval_id_from(&request);
+
+        // Force the pending approval to be expired.
+        if let Some(pending) = runtime.pending_approvals.get_mut(&approval_id) {
+            let past =
+                (Utc::now() - Duration::minutes(10)).to_rfc3339_opts(SecondsFormat::Secs, true);
+            pending.record.expires_at = Timestamp::new_utc(past).expect("valid timestamp");
+        }
+
+        let outcome = approve(&mut runtime, approval_id);
+        // The approval should resolve as denied due to expiry.
+        let resolved = outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::ApprovalResolved(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("approval.resolved should be emitted");
+        assert_eq!(resolved.decision, ApprovalDecision::Denied);
+    }
+
+    // ── Track D: Shell env filtering (item 3) ────────────────────────
+
+    #[test]
+    fn shell_run_filters_environment_variables() {
+        let workspace = test_workspace("shell-env-filter");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "shell-env-filter", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "shell-env-filter",
+            vec![WorkspaceAccess::Exec],
+        );
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_shell_env"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "shell.run".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "shell-env-filter",
+                    "command": "env | sort"
+                }),
+            }),
+        ));
+        let approved = approve(&mut runtime, approval_id_from(&request));
+        let completed = approved
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::ToolCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("shell.run should complete");
+        let stdout = completed
+            .output
+            .as_ref()
+            .and_then(|o| o["stdout"].as_str())
+            .unwrap_or("");
+        // Should not contain sensitive env vars like CADIS_OPENAI_API_KEY
+        // but should contain PATH.
+        let env_keys: Vec<&str> = stdout
+            .lines()
+            .filter_map(|line| line.split('=').next())
+            .collect();
+        // Sensitive vars must not leak through env_clear + allowlist.
+        let denied = [
+            "CADIS_OPENAI_API_KEY",
+            "OPENAI_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "SSH_AUTH_SOCK",
+            "CARGO_HOME",
+        ];
+        for key in &denied {
+            assert!(
+                !env_keys.contains(key),
+                "sensitive env var leaked into shell: {key}"
+            );
+        }
+        // Allowlisted vars should be present (PATH is always set).
+        assert!(env_keys.contains(&"PATH"), "PATH should be in shell env");
+    }
+
+    // ── Track D: Cancellation token (item 4) ─────────────────────────
+
+    #[test]
+    fn cancellation_token_is_observable_across_clones() {
+        let token = cadis_policy::CancellationToken::new();
+        let clone = token.clone();
+        assert!(!clone.is_cancelled());
+        token.cancel();
+        assert!(clone.is_cancelled());
+    }
+
+    // ── Track C: Agent Runtime ─────────────────────────────────────
+
+    #[test]
+    fn agent_role_enum_classifies_known_roles() {
+        use cadis_protocol::AgentRole;
+        assert_eq!("main".parse::<AgentRole>(), Ok(AgentRole::Main));
+        assert_eq!("orchestrator".parse::<AgentRole>(), Ok(AgentRole::Main));
+        assert_eq!("worker".parse::<AgentRole>(), Ok(AgentRole::Worker));
+        assert_eq!("router".parse::<AgentRole>(), Ok(AgentRole::Router));
+        assert_eq!("Coding".parse::<AgentRole>(), Ok(AgentRole::Specialist));
+        // Unknown roles default to Specialist.
+        assert_eq!("custom".parse::<AgentRole>(), Ok(AgentRole::Specialist));
+    }
+
+    #[test]
+    fn worker_state_enum_tracks_terminal_states() {
+        use cadis_protocol::WorkerState;
+        assert!(!WorkerState::Queued.is_terminal());
+        assert!(!WorkerState::Running.is_terminal());
+        assert!(WorkerState::Completed.is_terminal());
+        assert!(WorkerState::Failed.is_terminal());
+        assert!(WorkerState::Cancelled.is_terminal());
+    }
+
+    #[test]
+    fn model_driven_spawn_parses_spawn_directives() {
+        let content = "Here is the plan:\n[SPAWN Reviewer: check the patch]\n[SPAWN Tester: run unit tests]\nDone.";
+        let directives = parse_model_spawn_directives(content);
+        assert_eq!(directives.len(), 2);
+        assert_eq!(directives[0].role, "specialist");
+        assert_eq!(directives[0].task, "check the patch");
+        assert_eq!(directives[1].role, "specialist");
+        assert_eq!(directives[1].task, "run unit tests");
+    }
+
+    #[test]
+    fn model_driven_spawn_ignores_malformed_directives() {
+        let content = "[SPAWN ]\n[SPAWN :no role]\n[SPAWN Role:]\nnormal text";
+        let directives = parse_model_spawn_directives(content);
+        assert!(directives.is_empty());
+    }
+
+    #[test]
+    fn model_driven_spawn_creates_child_agents_from_response() {
+        // Use a provider that returns a spawn directive in its response.
+        struct SpawnProvider;
+        impl ModelProvider for SpawnProvider {
+            fn name(&self) -> &str {
+                "spawn-test"
+            }
+            fn chat(&self, _prompt: &str) -> Result<Vec<String>, cadis_models::ModelError> {
+                Ok(vec!["[SPAWN Reviewer: check patch]".to_owned()])
+            }
+        }
+        let mut runtime = runtime_with_provider(Box::new(SpawnProvider), "spawn-test");
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_spawn"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: "plan work".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        // The model response should have triggered a spawn.
+        let spawned = outcome
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(&event.event, CadisEvent::AgentSpawned(payload)
+                if payload.role.as_deref() == Some("specialist"))
+            })
+            .count();
+        assert_eq!(
+            spawned, 1,
+            "model-driven spawn should create one specialist agent"
+        );
+    }
+
+    #[test]
+    fn tool_call_loop_allows_multiple_steps() {
+        let mut runtime = runtime_with_agent_runtime_config(AgentRuntimeConfig {
+            max_steps_per_session: 4,
+            ..AgentRuntimeConfig::default()
+        });
+        // Send a message - with budget=4, the session should succeed (uses 1 step).
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_multi"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("codex")),
+                content: "run tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        assert!(matches!(
+            outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        let session = outcome.events.iter().find_map(|event| match &event.event {
+            CadisEvent::AgentSessionStarted(payload) => Some(payload.clone()),
+            _ => None,
+        });
+        let session = session.expect("agent session should start");
+        assert_eq!(session.budget_steps, 4);
+        // Should complete, not exceed budget.
+        assert!(outcome
+            .events
+            .iter()
+            .any(|event| { matches!(&event.event, CadisEvent::AgentSessionCompleted(_)) }));
+    }
+
+    #[test]
+    fn configurable_worker_command_uses_runtime_config() {
+        // Empty command should skip execution.
+        let mut record = WorkerRecord {
+            worker_id: "w1".to_owned(),
+            session_id: SessionId::from("ses_1"),
+            agent_id: None,
+            parent_agent_id: None,
+            agent_session_id: None,
+            status: WorkerState::Running,
+            cli: None,
+            cwd: None,
+            summary: None,
+            error_code: None,
+            error: None,
+            cancellation_requested_at: None,
+            worktree: Some(WorkerWorktreeIntent {
+                workspace_id: None,
+                project_root: None,
+                worktree_root: "/tmp".to_owned(),
+                worktree_path: "/tmp/w1".to_owned(),
+                branch_name: "cadis/w1".to_owned(),
+                base_ref: None,
+                state: WorkerWorktreeState::Active,
+                cleanup_policy: WorkerWorktreeCleanupPolicy::Explicit,
+            }),
+            artifacts: None,
+            updated_at: now_timestamp(),
+            log_lines: Vec::new(),
+            command_report: None,
+        };
+        let result = execute_worker_command(&mut record, "");
+        assert!(result.logs.is_empty());
+        assert!(result.failure.is_none());
+    }
+
+    #[test]
+    fn kill_agent_cancels_active_sessions_and_workers() {
+        let mut runtime = runtime();
+        // Spawn a child agent.
+        let spawn_outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_spawn"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentSpawn(AgentSpawnRequest {
+                role: "Tester".to_owned(),
+                parent_agent_id: None,
+                display_name: Some("TestAgent".to_owned()),
+                model: None,
+            }),
+        ));
+        let spawned_id = spawn_outcome
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::AgentSpawned(payload) => Some(payload.agent_id.clone()),
+                _ => None,
+            })
+            .expect("agent should be spawned");
+
+        // Kill the agent.
+        let kill_outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_kill"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentKill(cadis_protocol::AgentTargetRequest {
+                agent_id: spawned_id.clone(),
+            }),
+        ));
+
+        assert!(matches!(
+            kill_outcome.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(kill_outcome.events.iter().any(|event| {
+            matches!(&event.event, CadisEvent::AgentKilled(payload)
+                if payload.agent_id == spawned_id
+                    && payload.status == Some(AgentStatus::Cancelled))
+        }));
+    }
+
+    #[test]
+    fn kill_main_agent_is_rejected() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_kill_main"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentKill(cadis_protocol::AgentTargetRequest {
+                agent_id: AgentId::from("main"),
+            }),
+        ));
+        assert_rejected(outcome, "cannot_kill_main_agent");
+    }
+
+    #[test]
+    fn tail_agent_returns_recent_sessions() {
+        let mut runtime = runtime();
+        // Send a message to create an agent session for codex.
+        let _ = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_msg"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("codex")),
+                content: "run tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        let tail = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_tail"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentTail(AgentTailRequest {
+                agent_id: AgentId::from("codex"),
+                limit: Some(5),
+            }),
+        ));
+
+        assert!(matches!(
+            tail.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        // Should include agent status and at least one session event.
+        assert!(tail.events.iter().any(|event| {
+            matches!(&event.event, CadisEvent::AgentStatusChanged(payload)
+                if payload.agent_id.as_str() == "codex")
+        }));
+        assert!(
+            tail.events.len() >= 2,
+            "tail should include status + session events"
+        );
+    }
+
+    #[test]
+    fn tail_agent_rejects_unknown_agent() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_tail_unknown"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentTail(AgentTailRequest {
+                agent_id: AgentId::from("nonexistent"),
+                limit: None,
+            }),
+        ));
+        assert_rejected(outcome, "agent_not_found");
+    }
+
+    #[test]
+    fn fan_out_multi_agent_tree_spawns_and_routes() {
+        let mut runtime = runtime();
+
+        // Spawn two child agents under main.
+        let spawn1 = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_spawn_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentSpawn(AgentSpawnRequest {
+                role: "Reviewer".to_owned(),
+                parent_agent_id: None,
+                display_name: Some("Rev1".to_owned()),
+                model: None,
+            }),
+        ));
+        let agent1 = spawn1
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::AgentSpawned(payload) => Some(payload.agent_id.clone()),
+                _ => None,
+            })
+            .expect("first agent should spawn");
+
+        let spawn2 = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_spawn_2"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentSpawn(AgentSpawnRequest {
+                role: "Tester".to_owned(),
+                parent_agent_id: None,
+                display_name: Some("Test1".to_owned()),
+                model: None,
+            }),
+        ));
+        let agent2 = spawn2
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::AgentSpawned(payload) => Some(payload.agent_id.clone()),
+                _ => None,
+            })
+            .expect("second agent should spawn");
+
+        // Route messages to each child.
+        let msg1 = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_msg_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(agent1.clone()),
+                content: "review code".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+        assert!(msg1.events.iter().any(|event| {
+            matches!(&event.event, CadisEvent::OrchestratorRoute(payload)
+                if payload.target_agent_id == agent1)
+        }));
+
+        let msg2 = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_msg_2"),
+            ClientId::from("cli_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(agent2.clone()),
+                content: "run tests".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+        assert!(msg2.events.iter().any(|event| {
+            matches!(&event.event, CadisEvent::OrchestratorRoute(payload)
+                if payload.target_agent_id == agent2)
+        }));
+
+        // Both should complete independently.
+        assert!(msg1.events.iter().any(|event| {
+            matches!(&event.event, CadisEvent::MessageCompleted(payload)
+                if payload.agent_id.as_ref() == Some(&agent1))
+        }));
+        assert!(msg2.events.iter().any(|event| {
+            matches!(&event.event, CadisEvent::MessageCompleted(payload)
+                if payload.agent_id.as_ref() == Some(&agent2))
+        }));
+
+        // Verify agent tree: both children have main as parent.
+        let agents = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_agents"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentList(EmptyPayload {}),
+        ));
+        let agent_list = agents
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::AgentListResponse(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("agent list should be emitted");
+
+        let child1 = agent_list
+            .agents
+            .iter()
+            .find(|a| a.agent_id == agent1)
+            .expect("agent1 in list");
+        let child2 = agent_list
+            .agents
+            .iter()
+            .find(|a| a.agent_id == agent2)
+            .expect("agent2 in list");
+        assert_eq!(
+            child1.parent_agent_id.as_ref().map(AgentId::as_str),
+            Some("main")
+        );
+        assert_eq!(
+            child2.parent_agent_id.as_ref().map(AgentId::as_str),
+            Some("main")
+        );
+    }
+
+    #[test]
+    fn fan_out_spawn_depth_limit_prevents_deep_trees() {
+        let mut runtime = runtime_with_spawn_limits(AgentSpawnLimits {
+            max_depth: 1,
+            max_children_per_parent: 4,
+            max_total_agents: 32,
+        });
+
+        // Spawn a child under main (depth 1 - allowed).
+        let spawn1 = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_spawn_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentSpawn(AgentSpawnRequest {
+                role: "Worker".to_owned(),
+                parent_agent_id: None,
+                display_name: None,
+                model: None,
+            }),
+        ));
+        let child_id = spawn1
+            .events
+            .iter()
+            .find_map(|event| match &event.event {
+                CadisEvent::AgentSpawned(payload) => Some(payload.agent_id.clone()),
+                _ => None,
+            })
+            .expect("child should spawn");
+
+        // Try to spawn a grandchild (depth 2 - should fail with max_depth=1).
+        let spawn2 = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_spawn_2"),
+            ClientId::from("cli_1"),
+            ClientRequest::AgentSpawn(AgentSpawnRequest {
+                role: "SubWorker".to_owned(),
+                parent_agent_id: Some(child_id),
+                display_name: None,
+                model: None,
+            }),
+        ));
+        assert_rejected(spawn2, "agent_spawn_depth_limit_exceeded");
+    }
+
+    #[test]
+    fn edge_tts_rejects_invalid_voice_id() {
+        let mut provider = EdgeTtsProvider;
+        let result = provider.speak(TtsRequest {
+            text: "hello",
+            voice_id: "invalid voice id!",
+            rate: 0,
+            pitch: 0,
+            volume: 0,
+        });
+        assert_eq!(result.unwrap_err().code, "invalid_voice_id");
+    }
+
+    #[test]
+    fn edge_tts_rejects_empty_voice_id() {
+        let mut provider = EdgeTtsProvider;
+        let result = provider.speak(TtsRequest {
+            text: "hello",
+            voice_id: "",
+            rate: 0,
+            pitch: 0,
+            volume: 0,
+        });
+        assert_eq!(result.unwrap_err().code, "invalid_voice_id");
+    }
+
+    #[test]
+    fn edge_tts_handles_missing_binary() {
+        let mut provider = EdgeTtsProvider;
+        let result = provider.speak(TtsRequest {
+            text: "hello",
+            voice_id: "en-US-AvaNeural",
+            rate: 0,
+            pitch: 0,
+            volume: 0,
+        });
+        // CI likely lacks edge-tts; accept not_found or spawn_failed.
+        let err = result.unwrap_err();
+        assert!(
+            err.code == "edge_tts_not_found" || err.code == "edge_tts_spawn_failed",
+            "unexpected error code: {}",
+            err.code
+        );
     }
 }

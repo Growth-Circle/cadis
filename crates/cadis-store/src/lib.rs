@@ -214,6 +214,8 @@ pub struct CadisConfig {
     pub orchestrator: OrchestratorConfig,
     /// Profile-home selection and profile layout settings.
     pub profile: ProfileConfig,
+    /// Policy engine settings.
+    pub policy: cadis_policy::PolicyConfig,
 }
 
 impl Default for CadisConfig {
@@ -229,6 +231,7 @@ impl Default for CadisConfig {
             agent_runtime: AgentRuntimeConfig::default(),
             orchestrator: OrchestratorConfig::default(),
             profile: ProfileConfig::default(),
+            policy: cadis_policy::PolicyConfig::default(),
         }
     }
 }
@@ -280,7 +283,8 @@ impl CadisConfig {
             "orchestrator": {
                 "worker_delegation_enabled": self.orchestrator.worker_delegation_enabled,
                 "default_worker_role": self.orchestrator.default_worker_role
-            }
+            },
+            "policy": serde_json::to_value(&self.policy).unwrap_or_default()
         })
     }
 }
@@ -2633,6 +2637,400 @@ fn openai_api_key_from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) ->
         .find_map(|name| lookup(name).filter(|value| !value.trim().is_empty()))
 }
 
+// ---------------------------------------------------------------------------
+// Track H: Denied paths enforcement
+// ---------------------------------------------------------------------------
+
+/// Denied paths loaded from config for mutating tool enforcement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeniedPaths {
+    paths: Vec<PathBuf>,
+}
+
+impl DeniedPaths {
+    /// Creates a denied-paths checker from config or defaults.
+    pub fn from_config(_config: &CadisConfig) -> Self {
+        Self::new(default_denied_paths_for_enforcement())
+    }
+
+    /// Creates a denied-paths checker from explicit paths.
+    pub fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths: paths.into_iter().map(|p| expand_home(&p)).collect(),
+        }
+    }
+
+    /// Returns the denied path list.
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    /// Returns `true` if the given path is denied.
+    pub fn is_denied(&self, target: &Path) -> bool {
+        cadis_policy::is_denied_path(target, &self.paths)
+    }
+
+    /// Checks a path and returns an error if denied.
+    pub fn check(&self, target: &Path) -> Result<(), StoreError> {
+        if self.is_denied(target) {
+            Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("path {} is denied by policy", target.display()),
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Default for DeniedPaths {
+    fn default() -> Self {
+        Self::new(default_denied_paths_for_enforcement())
+    }
+}
+
+fn default_denied_paths_for_enforcement() -> Vec<PathBuf> {
+    [
+        "/etc",
+        "/usr",
+        "/boot",
+        "/sys",
+        "/proc",
+        "~/.ssh",
+        "~/.gnupg",
+        "~/.cadis/state",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Track H: Worker worktree cleanup executor
+// ---------------------------------------------------------------------------
+
+/// Executes approved worker worktree cleanup by removing the directory.
+pub struct WorktreeCleanupExecutor;
+
+impl WorktreeCleanupExecutor {
+    /// Removes a CADIS-owned worker worktree directory and updates project metadata.
+    ///
+    /// This is a daemon-internal privileged operation exempt from tool policy
+    /// because it only operates on worktrees with CADIS-owned metadata records.
+    pub fn execute(
+        project_store: &ProjectWorkspaceStore,
+        worker_id: &str,
+    ) -> Result<(), StoreError> {
+        let workspace_metadata = project_store.load()?;
+        let paths = project_store.worker_worktree_paths(worker_id, workspace_metadata.as_ref());
+
+        if paths.worktree_path.exists() {
+            fs::remove_dir_all(&paths.worktree_path)?;
+        }
+
+        if let Some(mut metadata) = project_store.load_worker_worktree_metadata(worker_id)? {
+            metadata.state = ProjectWorkerWorktreeState::Removed;
+            project_store.save_worker_worktree_metadata(&metadata)?;
+        }
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Track H: Media manifest
+// ---------------------------------------------------------------------------
+
+/// One entry in a project `.cadis/media/` manifest.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct MediaManifestEntry {
+    /// Relative path inside `.cadis/media/`.
+    pub path: PathBuf,
+    /// Agent or tool that generated the file.
+    pub generated_by: String,
+    /// Tool name used for generation.
+    pub tool: String,
+    /// ISO-8601 creation timestamp.
+    pub created_at: String,
+    /// Optional human-readable description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Project-local media manifest stored as `.cadis/media/manifest.json`.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub struct MediaManifest {
+    /// Manifest entries.
+    pub entries: Vec<MediaManifestEntry>,
+}
+
+/// Media manifest store rooted at a project workspace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MediaManifestStore {
+    root: PathBuf,
+}
+
+impl MediaManifestStore {
+    /// Creates a media manifest store for a project root.
+    pub fn new(project_root: impl AsRef<Path>) -> Self {
+        Self {
+            root: project_root.as_ref().join(".cadis").join("media"),
+        }
+    }
+
+    /// Returns the manifest JSON path.
+    pub fn manifest_path(&self) -> PathBuf {
+        self.root.join("manifest.json")
+    }
+
+    /// Loads the manifest, returning empty when missing.
+    pub fn load(&self) -> Result<MediaManifest, StoreError> {
+        let path = self.manifest_path();
+        if !path.exists() {
+            return Ok(MediaManifest::default());
+        }
+        let content = fs::read_to_string(path)?;
+        Ok(serde_json::from_str(&content)?)
+    }
+
+    /// Saves the manifest with redaction.
+    pub fn save(&self, manifest: &MediaManifest) -> Result<(), StoreError> {
+        fs::create_dir_all(&self.root)?;
+        let mut json = redact(&serde_json::to_string_pretty(manifest)?);
+        json.push('\n');
+        atomic_write_private_file(&self.manifest_path(), json.as_bytes())
+    }
+
+    /// Appends one entry and saves.
+    pub fn append(&self, mut entry: MediaManifestEntry) -> Result<(), StoreError> {
+        const MANIFEST_FIELD_MAX: usize = 512;
+        const MANIFEST_DESC_MAX: usize = 1024;
+        entry.generated_by = entry
+            .generated_by
+            .chars()
+            .take(MANIFEST_FIELD_MAX)
+            .collect();
+        entry.tool = entry.tool.chars().take(MANIFEST_FIELD_MAX).collect();
+        if let Some(ref desc) = entry.description {
+            entry.description = Some(desc.chars().take(MANIFEST_DESC_MAX).collect());
+        }
+        let mut manifest = self.load()?;
+        manifest.entries.push(entry);
+        self.save(&manifest)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Track H: Profile CRUD
+// ---------------------------------------------------------------------------
+
+impl CadisHome {
+    /// Lists all profile IDs under `~/.cadis/profiles/`.
+    pub fn list_profiles(&self) -> Result<Vec<String>, StoreError> {
+        let profiles_dir = self.root.join("profiles");
+        if !profiles_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(profiles_dir)? {
+            let entry = entry?;
+            if entry.path().is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    ids.push(name.to_owned());
+                }
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Creates a new profile. Returns error if it already exists.
+    pub fn create_profile(&self, profile_id: &str) -> Result<ProfileHome, StoreError> {
+        let profile = self.profile(profile_id);
+        if profile.root().exists() {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("profile '{}' already exists", profile_id),
+            )));
+        }
+        self.init_profile(profile_id)
+    }
+
+    /// Removes a profile directory. Returns error if it does not exist.
+    pub fn remove_profile(&self, profile_id: &str) -> Result<(), StoreError> {
+        let profile = self.profile(profile_id);
+        if !profile.root().exists() {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("profile '{}' does not exist", profile_id),
+            )));
+        }
+        fs::remove_dir_all(profile.root())?;
+        Ok(())
+    }
+
+    /// Exports a profile as a TOML string of its `profile.toml`.
+    pub fn export_profile(&self, profile_id: &str) -> Result<String, StoreError> {
+        let profile = self.profile(profile_id);
+        if !profile.root().exists() {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("profile '{}' does not exist", profile_id),
+            )));
+        }
+        Ok(fs::read_to_string(profile.profile_config_path())?)
+    }
+
+    /// Imports a profile by writing `profile.toml` content into a new profile.
+    pub fn import_profile(
+        &self,
+        profile_id: &str,
+        content: &str,
+    ) -> Result<ProfileHome, StoreError> {
+        let profile = self.create_profile(profile_id)?;
+        atomic_write_private_file(&profile.profile_config_path(), content.as_bytes())?;
+        Ok(profile)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Track H: Checkpoint/rollback manager
+// ---------------------------------------------------------------------------
+
+/// Checkpoint manager that saves file copies before destructive operations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CheckpointManager {
+    checkpoints_dir: PathBuf,
+}
+
+/// One saved checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct Checkpoint {
+    /// Unique checkpoint ID.
+    pub id: String,
+    /// ISO-8601 creation timestamp.
+    pub created_at: String,
+    /// Reason for the checkpoint.
+    pub reason: String,
+    /// Files saved in this checkpoint (relative to workspace).
+    pub files: Vec<String>,
+}
+
+impl CheckpointManager {
+    /// Creates a checkpoint manager for a profile home.
+    pub fn new(profile_home: &ProfileHome) -> Self {
+        Self {
+            checkpoints_dir: profile_home.root().join("checkpoints"),
+        }
+    }
+
+    /// Returns the checkpoints root directory.
+    pub fn checkpoints_dir(&self) -> &Path {
+        &self.checkpoints_dir
+    }
+
+    /// Creates a checkpoint by copying target files.
+    pub fn create(
+        &self,
+        checkpoint_id: &str,
+        reason: &str,
+        workspace: &Path,
+        files: &[&Path],
+    ) -> Result<Checkpoint, StoreError> {
+        let checkpoint_dir = self.checkpoints_dir.join(safe_file_stem(checkpoint_id));
+        create_private_dir(&checkpoint_dir)?;
+
+        let mut saved_files = Vec::new();
+        for file in files {
+            let source = if file.is_absolute() {
+                file.to_path_buf()
+            } else {
+                workspace.join(file)
+            };
+            if !source.is_file() {
+                continue;
+            }
+            let relative = source
+                .strip_prefix(workspace)
+                .unwrap_or(&source)
+                .to_string_lossy()
+                .to_string();
+            let relative = relative.strip_prefix('/').unwrap_or(&relative);
+            let dest = checkpoint_dir.join("files").join(relative);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source, &dest)?;
+            saved_files.push(relative.to_owned());
+        }
+
+        let checkpoint = Checkpoint {
+            id: checkpoint_id.to_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            reason: reason.to_owned(),
+            files: saved_files,
+        };
+        let mut json = serde_json::to_string_pretty(&checkpoint)?;
+        json.push('\n');
+        atomic_write_private_file(&checkpoint_dir.join("checkpoint.json"), json.as_bytes())?;
+        Ok(checkpoint)
+    }
+
+    /// Rolls back a checkpoint by restoring saved files.
+    pub fn rollback(
+        &self,
+        checkpoint_id: &str,
+        workspace: &Path,
+    ) -> Result<Checkpoint, StoreError> {
+        let checkpoint_dir = self.checkpoints_dir.join(safe_file_stem(checkpoint_id));
+        let meta_path = checkpoint_dir.join("checkpoint.json");
+        if !meta_path.exists() {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("checkpoint '{}' does not exist", checkpoint_id),
+            )));
+        }
+        let content = fs::read_to_string(&meta_path)?;
+        let checkpoint: Checkpoint = serde_json::from_str(&content)?;
+
+        for file in &checkpoint.files {
+            // Prevent absolute paths from escaping the workspace.
+            let relative = Path::new(file)
+                .strip_prefix("/")
+                .or_else(|_| Path::new(file).strip_prefix("."))
+                .unwrap_or(Path::new(file));
+            let saved = checkpoint_dir.join("files").join(relative);
+            if saved.is_file() {
+                let target = workspace.join(relative);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&saved, &target)?;
+            }
+        }
+
+        Ok(checkpoint)
+    }
+
+    /// Lists checkpoint IDs.
+    pub fn list(&self) -> Result<Vec<String>, StoreError> {
+        if !self.checkpoints_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(&self.checkpoints_dir)? {
+            let entry = entry?;
+            if entry.path().is_dir() && entry.path().join("checkpoint.json").exists() {
+                if let Some(name) = entry.file_name().to_str() {
+                    ids.push(name.to_owned());
+                }
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3373,5 +3771,130 @@ mod tests {
         assert!(recovered.diagnostics[0]
             .reason
             .contains("invalid workspace grant JSON"));
+    }
+
+    #[test]
+    fn denied_paths_blocks_system_paths() {
+        let denied = DeniedPaths::default();
+        assert!(denied.is_denied(Path::new("/etc/passwd")));
+        assert!(denied.is_denied(Path::new("/usr/bin/ls")));
+        assert!(denied.is_denied(Path::new("/boot/vmlinuz")));
+        assert!(denied.is_denied(Path::new("/sys/class")));
+        assert!(denied.is_denied(Path::new("/proc/1")));
+        assert!(!denied.is_denied(Path::new("/tmp/safe")));
+    }
+
+    #[test]
+    fn denied_paths_check_returns_error_for_denied() {
+        let denied = DeniedPaths::default();
+        assert!(denied.check(Path::new("/etc")).is_err());
+        assert!(denied.check(Path::new("/tmp")).is_ok());
+    }
+
+    #[test]
+    fn media_manifest_round_trips() {
+        let config = test_config("media-manifest");
+        let root = config.cadis_home.join("project");
+        fs::create_dir_all(&root).expect("project root should be created");
+        let store = MediaManifestStore::new(&root);
+
+        assert!(store.load().unwrap().entries.is_empty());
+
+        store
+            .append(MediaManifestEntry {
+                path: PathBuf::from("image.png"),
+                generated_by: "agent/main".to_owned(),
+                tool: "image.generate".to_owned(),
+                created_at: "2026-04-28T00:00:00Z".to_owned(),
+                description: Some("test image".to_owned()),
+            })
+            .expect("entry should append");
+
+        let manifest = store.load().expect("manifest should load");
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(manifest.entries[0].generated_by, "agent/main");
+    }
+
+    #[test]
+    fn profile_crud_create_list_export_import_remove() {
+        let config = test_config("profile-crud");
+        let home = CadisHome::new(&config.cadis_home);
+        home.init_profile("default").expect("default should init");
+
+        home.create_profile("test-profile")
+            .expect("profile should be created");
+        assert!(home.create_profile("test-profile").is_err());
+
+        let profiles = home.list_profiles().expect("profiles should list");
+        assert!(profiles.contains(&"test-profile".to_owned()));
+
+        let exported = home
+            .export_profile("test-profile")
+            .expect("profile should export");
+        assert!(exported.contains("test-profile"));
+
+        home.import_profile("imported", &exported)
+            .expect("profile should import");
+        let profiles = home.list_profiles().expect("profiles should list");
+        assert!(profiles.contains(&"imported".to_owned()));
+
+        home.remove_profile("test-profile")
+            .expect("profile should be removed");
+        assert!(home.remove_profile("test-profile").is_err());
+    }
+
+    #[test]
+    fn media_manifest_truncates_long_fields() {
+        let config = test_config("media-manifest-truncate");
+        let root = config.cadis_home.join("project");
+        fs::create_dir_all(&root).expect("project root should be created");
+        let store = MediaManifestStore::new(&root);
+        let long = "x".repeat(1000);
+        let long_desc = "x".repeat(2000);
+        store
+            .append(MediaManifestEntry {
+                path: PathBuf::from("test.png"),
+                generated_by: long.clone(),
+                tool: long,
+                created_at: "2026-01-01T00:00:00Z".to_owned(),
+                description: Some(long_desc),
+            })
+            .unwrap();
+        let manifest = store.load().unwrap();
+        assert_eq!(manifest.entries[0].generated_by.len(), 512);
+        assert_eq!(manifest.entries[0].tool.len(), 512);
+        assert_eq!(
+            manifest.entries[0].description.as_ref().unwrap().len(),
+            1024
+        );
+    }
+
+    #[test]
+    fn checkpoint_create_rollback_list() {
+        let config = test_config("checkpoint");
+        let profile = CadisHome::new(&config.cadis_home)
+            .init_profile("default")
+            .expect("profile should initialize");
+        let manager = CheckpointManager::new(&profile);
+        let workspace = config.cadis_home.join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace should be created");
+        let file = workspace.join("test.txt");
+        fs::write(&file, "original").expect("file should write");
+
+        let checkpoint = manager
+            .create("cp_1", "before edit", &workspace, &[Path::new("test.txt")])
+            .expect("checkpoint should be created");
+        assert_eq!(checkpoint.files, vec!["test.txt"]);
+
+        fs::write(&file, "modified").expect("file should be modified");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "modified");
+
+        manager
+            .rollback("cp_1", &workspace)
+            .expect("rollback should succeed");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "original");
+
+        let ids = manager.list().expect("list should succeed");
+        assert!(ids.contains(&"cp_1".to_owned()));
     }
 }
