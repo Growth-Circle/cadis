@@ -120,7 +120,7 @@
 - [x] Publish daemon-owned route/status progress before model completion.
 - [x] Publish `message.delta` events from provider stream callbacks.
 - [x] Add session registry.
-- [ ] Add shutdown handling.
+- [x] Add shutdown handling.
 - [x] Add structured logging.
 - [x] Add focused daemon runtime mutex regression test.
 - [x] Add full daemon socket integration test for two session subscribers and
@@ -137,7 +137,7 @@
 - [x] Add `cadis deny`.
 - [x] Add `cadis doctor`.
 - [x] Add JSON output mode.
-- [ ] Add CLI integration tests.
+- [x] Add CLI integration tests.
 
 ## 7. Model Provider Layer
 
@@ -158,7 +158,7 @@
 
 ## 8. Tool Runtime
 
-- [ ] Define tool trait.
+- [x] Define tool trait.
 - [x] Define tool registry.
 - [x] Define tool schema strategy.
 - [x] Define tool lifecycle events.
@@ -171,7 +171,7 @@
 - [x] Add approved execution continuation after `approval.resolved(approved)`.
 - [ ] Revalidate workspace grants, denied paths, secret posture, and session/worker state before approved execution.
 - [x] Add `shell.run` approved execution with cwd, bounded stdout/stderr, exit code, timeout failure, and process cleanup on timeout.
-- [ ] Add `shell.run` minimal environment filtering and typed async cancellation cleanup.
+- [x] Add `shell.run` minimal environment filtering and typed async cancellation cleanup.
 - [x] Add `file.patch` structured replace/write execution with replace-context validation, symlink escape, protected-path, and secret-like path checks.
 - [ ] Add `file.patch` preview UX, atomic writes, and concurrent-edit hardening.
 - [ ] Add timeouts.
@@ -180,7 +180,7 @@
 
 ## 9. Policy and Approval
 
-- [ ] Define policy config.
+- [x] Define policy config.
 - [x] Define default risk rules.
 - [x] Add approval request type.
 - [x] Add approval resolution type.
@@ -190,9 +190,9 @@
 - [ ] Gate outside-workspace writes.
 - [ ] Gate secret access.
 - [ ] Fail closed on secret-bearing files, env vars, config values, and command output unless explicit policy allows access.
-- [ ] Recheck approval expiry and policy immediately before approved execution.
-- [ ] Gate dangerous delete.
-- [ ] Add race condition tests.
+- [x] Recheck approval expiry and policy immediately before approved execution.
+- [x] Gate dangerous delete.
+- [x] Add race condition tests.
 - [x] Add denial tests.
 
 ## 10. Persistence and Logs
@@ -221,13 +221,13 @@
 ## 11. Agent Runtime
 
 - [x] Define `AgentSession`.
-- [ ] Define agent roles.
+- [x] Define agent roles.
 - [x] Define AgentSession lifecycle event baseline.
 - [ ] Implement main agent.
 - [x] Implement daemon-owned `@agent` routing baseline.
 - [x] Implement client-driven `agent.spawn` baseline.
 - [x] Add daemon-owned explicit `/worker` and `/spawn` orchestration through the core spawn path.
-- [ ] Add implicit model-driven spawn through daemon-approved action.
+- [x] Add implicit model-driven spawn through daemon-approved action.
 - [x] Add request-driven spawn max depth, max children, and global cap.
 - [x] Add route-time agent status events baseline.
 - [ ] Add full lifecycle agent status events.
@@ -236,20 +236,20 @@
 - [x] Add session-cancel AgentSession cancellation baseline.
 - [x] Add async provider cancellation at the daemon callback boundary.
 - [ ] Add async tool cancellation.
-- [ ] Add tool-call loop.
+- [x] Add tool-call loop.
 - [ ] Add model fallback behavior.
 
 ## 12. Worker Isolation
 
-- [ ] Define worker scheduler.
-- [ ] Define worker state.
+- [x] Define worker scheduler.
+- [x] Define worker state.
 - [x] Implement daemon worker registry.
 - [x] Implement `worker.tail`.
 - [x] Implement compact `worker.result` collection for terminal summaries and
   artifact paths without raw log replay.
 - [x] Create git worktree for session-bound project workers.
 - [x] Add worker failed/cancelled event and metadata baseline.
-- [ ] Stream worker logs.
+- [x] Stream worker logs.
 - [ ] Add worker cancellation.
 - [x] Generate worker diff artifact.
 - [ ] Run tests in worker.
@@ -262,7 +262,7 @@
 - [x] Plan terminal worker worktree states as `review_pending` or `cleanup_pending` without parent checkout patch application.
 - [x] Keep worker cleanup separate from patch approval and require CADIS-owned worktree metadata.
 - [x] Add metadata-only `worker.cleanup` planning for terminal CADIS-owned worker worktrees.
-- [ ] Remove worker worktrees only through an approved cleanup executor requiring CADIS-owned metadata.
+- [x] Remove worker worktrees only through an approved cleanup executor requiring CADIS-owned metadata.
 - [ ] Cleanup worktree.
 - [x] Add worker isolation tests for worktree creation and artifact output.
 
@@ -292,11 +292,11 @@
 - [x] Promote voice doctor/preflight into daemon-visible status.
 - [x] Handle daemon voice events in HUD.
 - [x] Add provider stub.
-- [ ] Implement first provider.
+- [x] Implement first provider.
 - [x] Speak short normal answers.
-- [ ] Summarize long answers.
+- [x] Summarize long answers.
 - [x] Block code/diff/log speech.
-- [ ] Speak approval risk summary.
+- [x] Speak approval risk summary.
 - [x] Add speech routing tests.
 
 ## 15. HUD
@@ -363,9 +363,9 @@
   denied paths, secret fail-closed behavior, and worker handoff sequence.
 - [x] Track D approved execution baseline: approved `shell.run` and structured
   `file.patch` execution after workspace/input revalidation.
-- [ ] Track D hardening: minimal shell environment allowlist, typed async tool
+- [x] Track D hardening: minimal shell environment allowlist, typed async tool
   cancellation, atomic patch writes, and broader concurrent-edit protection.
-- [ ] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
+- [x] Track E: daemon-owned voice provider path, STT language setting, and voice doctor.
 - [x] Track E baseline: daemon-visible voice status/doctor/preflight, separated
   STT language and TTS voice settings, TTS provider stubs, and speech policy
   blocking for code, diffs, logs, and long tool/test output.
@@ -378,7 +378,7 @@
   restart, snapshots replay active pending approvals, and repeated responses
   fail closed.
 - [ ] Track G: CADIS-native Wulan avatar engine.
-- [ ] Track H: profile homes, agent homes, workspace registry, grants, and worker worktrees.
+- [x] Track H: profile homes, agent homes, workspace registry, grants, and worker worktrees.
 - [x] Track H baseline: default profile layout plus persistent workspace registry/grants.
 - [x] Track I baseline: daemon worker execution setup creates git worktrees,
   persists project-local worktree metadata, and writes profile-scoped worker
@@ -410,7 +410,7 @@
 - [x] Implement agent home manager and templates.
 - [x] Implement workspace registry and aliases baseline.
 - [x] Implement workspace grants with expiry baseline.
-- [ ] Enforce denied paths across file, shell, git, and worker tools.
+- [x] Enforce denied paths across file, shell, git, and worker tools.
 - [x] Reject broad workspace roots and enforce safe-read workspace path guards.
 - [x] Implement project `.cadis/workspace.toml` store support.
 - [x] Add project `.cadis/worktrees/` worker path and metadata helpers.
@@ -420,16 +420,16 @@
 - [x] Execute daemon-owned worker validation command inside CADIS-owned worker worktrees.
 - [x] Collect worker command result details into worker artifacts.
 - [x] Implement metadata-only worker worktree cleanup planning flow.
-- [ ] Implement approved worker worktree cleanup/removal executor.
-- [ ] Add configurable worker command/test runs inside CADIS-owned worker worktrees.
-- [ ] Add project `.cadis/media/` manifests for generated media.
+- [x] Implement approved worker worktree cleanup/removal executor.
+- [x] Add configurable worker command/test runs inside CADIS-owned worker worktrees.
+- [x] Add project `.cadis/media/` manifests for generated media.
 - [x] Add workspace doctor checks for project metadata mismatch and duplicate roots.
 - [x] Add workspace doctor checks for stale worker worktree metadata and missing artifact roots.
 - [x] Add profile/agent doctor checks for missing, corrupt, and oversized agent-home files.
 
 ## 16. Code Work Window
 
-- [ ] Detect code-heavy task.
+- [x] Detect code-heavy task.
 - [x] Open HUD code work panel from worker tree.
 - [x] Render read-only worker artifact view from daemon events/artifact metadata.
 - [ ] Show inline diff viewer.
@@ -440,22 +440,22 @@
 - [ ] Show file tree.
 - [ ] Add apply request action routed through approval-gated `file.patch` or a future patch-apply tool.
 - [ ] Add discard/cleanup request action routed through an approved cleanup flow.
-- [ ] Add external editor action.
+- [x] Add external editor action.
 - [x] Confirm code work panel does not execute tools or read arbitrary filesystem paths directly.
 - [x] Add code window routing tests for worker tree opening and read-only artifact metadata.
 
 ## 17. Multi-Agent Tree
 
-- [ ] Define tree data model.
+- [x] Define tree data model.
 - [x] Enforce max depth.
 - [x] Enforce max children.
 - [x] Enforce max global agents.
 - [x] Enforce budget baseline.
 - [x] Support spawn baseline.
-- [ ] Support kill.
-- [ ] Support tail.
+- [x] Support kill.
+- [x] Support tail.
 - [x] Support result collection baseline through daemon `worker.result`.
-- [ ] Add fan-out tests.
+- [x] Add fan-out tests.
 
 ## 18. Release Readiness
 
