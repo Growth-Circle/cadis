@@ -214,6 +214,8 @@ pub struct CadisConfig {
     pub orchestrator: OrchestratorConfig,
     /// Profile-home selection and profile layout settings.
     pub profile: ProfileConfig,
+    /// Policy engine settings.
+    pub policy: cadis_policy::PolicyConfig,
 }
 
 impl Default for CadisConfig {
@@ -229,6 +231,7 @@ impl Default for CadisConfig {
             agent_runtime: AgentRuntimeConfig::default(),
             orchestrator: OrchestratorConfig::default(),
             profile: ProfileConfig::default(),
+            policy: cadis_policy::PolicyConfig::default(),
         }
     }
 }
@@ -280,7 +283,8 @@ impl CadisConfig {
             "orchestrator": {
                 "worker_delegation_enabled": self.orchestrator.worker_delegation_enabled,
                 "default_worker_role": self.orchestrator.default_worker_role
-            }
+            },
+            "policy": serde_json::to_value(&self.policy).unwrap_or_default()
         })
     }
 }
@@ -2951,12 +2955,13 @@ impl CheckpointManager {
                 .unwrap_or(&source)
                 .to_string_lossy()
                 .to_string();
-            let dest = checkpoint_dir.join("files").join(&relative);
+            let relative = relative.strip_prefix('/').unwrap_or(&relative);
+            let dest = checkpoint_dir.join("files").join(relative);
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
             fs::copy(&source, &dest)?;
-            saved_files.push(relative);
+            saved_files.push(relative.to_owned());
         }
 
         let checkpoint = Checkpoint {
@@ -2989,9 +2994,14 @@ impl CheckpointManager {
         let checkpoint: Checkpoint = serde_json::from_str(&content)?;
 
         for file in &checkpoint.files {
-            let saved = checkpoint_dir.join("files").join(file);
+            // Prevent absolute paths from escaping the workspace.
+            let relative = Path::new(file)
+                .strip_prefix("/")
+                .or_else(|_| Path::new(file).strip_prefix("."))
+                .unwrap_or(Path::new(file));
+            let saved = checkpoint_dir.join("files").join(relative);
             if saved.is_file() {
-                let target = workspace.join(file);
+                let target = workspace.join(relative);
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)?;
                 }

@@ -33,7 +33,7 @@ pub trait Tool: Send + Sync {
 // ── Policy config from TOML (Track D item 2) ────────────────────────
 
 /// Loadable policy configuration.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PolicyConfig {
     /// Per-risk-class overrides.
@@ -76,7 +76,7 @@ impl PolicyConfig {
 }
 
 /// Per-risk-class policy override.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct RiskOverride {
     /// Risk class name (matches `RiskClass` variant names in snake_case).
     pub risk_class: String,

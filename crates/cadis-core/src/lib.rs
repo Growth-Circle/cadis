@@ -305,6 +305,16 @@ impl Runtime {
         let ui_preferences = options.ui_preferences.clone();
         let spawn_limits = AgentSpawnLimits::from_options(&options.ui_preferences);
         let agent_runtime = AgentRuntimeConfig::from_options(&options.ui_preferences);
+        let policy = cadis_policy::PolicyEngine::with_config(
+            serde_json::from_value(
+                options
+                    .ui_preferences
+                    .get("policy")
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+            .unwrap_or_default(),
+        );
         let orchestrator =
             Orchestrator::new(OrchestratorConfig::from_options(&options.ui_preferences));
         let approval_store = ApprovalStore::new(&options.cadis_home);
@@ -366,7 +376,7 @@ impl Runtime {
             ui_preferences,
             spawn_limits,
             agent_runtime,
-            policy: PolicyEngine::default(),
+            policy,
             approval_store,
             state_store,
             profile_home,
