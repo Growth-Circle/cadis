@@ -12,10 +12,17 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
+  <a href="https://github.com/Growth-Circle/cadis/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Growth-Circle/cadis/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/Growth-Circle/cadis/actions/workflows/platform-baseline.yml"><img alt="Platform" src="https://github.com/Growth-Circle/cadis/actions/workflows/platform-baseline.yml/badge.svg?branch=main"></a>
   <img alt="Status: Pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-orange.svg">
-  <img alt="Rust first" src="https://img.shields.io/badge/runtime-Rust-orange.svg">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust&logoColor=white">
+  <img alt="TypeScript" src="https://img.shields.io/badge/typescript-5.x-blue?logo=typescript&logoColor=white">
+  <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8D8?logo=tauri&logoColor=white">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-brightgreen.svg">
-  <img alt="Target: Linux desktop" src="https://img.shields.io/badge/target-Linux%20desktop-6f42c1.svg">
+  <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-Linux%20desktop-6f42c1?logo=linux&logoColor=white">
+  <a href="https://github.com/Growth-Circle/cadis/discussions"><img alt="Discussions" src="https://img.shields.io/github/discussions/Growth-Circle/cadis?logo=github&label=discussions"></a>
+  <a href="https://github.com/Growth-Circle/cadis/issues"><img alt="Issues" src="https://img.shields.io/github/issues/Growth-Circle/cadis?logo=github"></a>
+  <a href="https://github.com/Growth-Circle/cadis/pulls"><img alt="PRs" src="https://img.shields.io/github/issues-pr/Growth-Circle/cadis?logo=github&label=PRs"></a>
 </p>
 
 <p align="center">
