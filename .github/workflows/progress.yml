@@ -1,0 +1,24 @@
+name: Update progress
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/07_MASTER_CHECKLIST.md']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  progress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Calculate progress
+        run: bash scripts/update-progress.sh
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/progress.json
+          git diff --cached --quiet || git commit -m "chore: update progress [skip ci]" && git push
