@@ -224,6 +224,28 @@ export function sendVoicePreflight(report: VoiceDoctorReport, surface = "cadis-h
   return true;
 }
 
+export function sendApplyPatch(workerId: string, _patchPath?: string): boolean {
+  if (!connected) return false;
+  void callCadis("message.send", {
+    session_id: null,
+    content: `/apply ${workerId}`,
+    content_kind: "chat",
+  }).then((ok) => {
+    if (!ok) scheduleReconnect();
+  });
+  return true;
+}
+
+export function sendWorkerCleanup(workerId: string, worktreePath?: string): boolean {
+  if (!connected) return false;
+  const payload: Record<string, unknown> = { worker_id: workerId };
+  if (worktreePath) payload.worktree_path = worktreePath;
+  void callCadis("worker.cleanup", payload).then((ok) => {
+    if (!ok) scheduleReconnect();
+  });
+  return true;
+}
+
 export function _resetCadisActionsForTest(): void {
   disconnect();
   intentionalDisconnect = false;

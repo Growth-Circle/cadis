@@ -417,6 +417,9 @@ pub enum ClientRequest {
     /// Kill an agent.
     #[serde(rename = "agent.kill")]
     AgentKill(AgentTargetRequest),
+    /// Tail an agent's recent session events.
+    #[serde(rename = "agent.tail")]
+    AgentTail(AgentTailRequest),
     /// List registered project workspaces and active grants.
     #[serde(rename = "workspace.list")]
     WorkspaceList(WorkspaceListRequest),
@@ -618,6 +621,16 @@ pub struct AgentSpawnRequest {
 pub struct AgentTargetRequest {
     /// Target agent ID.
     pub agent_id: AgentId,
+}
+
+/// Payload for tailing an agent's recent session events.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct AgentTailRequest {
+    /// Target agent ID.
+    pub agent_id: AgentId,
+    /// Optional number of recent sessions to include.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
 }
 
 /// Payload for tailing worker output.
@@ -835,6 +848,9 @@ pub enum CadisEvent {
     /// Agent completed a task.
     #[serde(rename = "agent.completed")]
     AgentCompleted(AgentEventPayload),
+    /// Agent was killed by a client request.
+    #[serde(rename = "agent.killed")]
+    AgentKilled(AgentEventPayload),
     /// Agent runtime session started.
     #[serde(rename = "agent.session.started")]
     AgentSessionStarted(AgentSessionEventPayload),
@@ -1468,6 +1484,29 @@ pub struct WorkerWorktreeIntent {
     pub cleanup_policy: WorkerWorktreeCleanupPolicy,
 }
 
+/// Worker lifecycle state machine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerState {
+    /// Worker is queued and waiting for a slot.
+    Queued,
+    /// Worker is running.
+    Running,
+    /// Worker completed successfully.
+    Completed,
+    /// Worker failed.
+    Failed,
+    /// Worker was cancelled.
+    Cancelled,
+}
+
+impl WorkerState {
+    /// Returns true when the worker has reached a terminal state.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
 /// Worker worktree lifecycle state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1639,6 +1678,48 @@ pub enum ApprovalDecision {
     Approved,
     /// Approval denied.
     Denied,
+}
+
+/// Agent role classification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole {
+    /// Main orchestrator agent.
+    Main,
+    /// Worker agent for isolated tasks.
+    Worker,
+    /// Specialist agent with domain expertise.
+    Specialist,
+    /// Router agent that delegates to others.
+    Router,
+}
+
+impl AgentRole {
+    /// Returns the role label as a static string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Worker => "worker",
+            Self::Specialist => "specialist",
+            Self::Router => "router",
+        }
+    }
+}
+
+impl std::str::FromStr for AgentRole {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "main" | "orchestrator" => Ok(Self::Main),
+            "worker" => Ok(Self::Worker),
+            "specialist" | "coding" | "research" | "automation" | "system" | "shell" | "memory"
+            | "schedule" | "creative" | "network" | "data" | "security" | "voice i/o" => {
+                Ok(Self::Specialist)
+            }
+            "router" => Ok(Self::Router),
+            _ => Ok(Self::Specialist),
+        }
+    }
 }
 
 /// Agent status exposed to clients.

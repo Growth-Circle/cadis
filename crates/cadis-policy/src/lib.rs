@@ -2,6 +2,9 @@
 
 use cadis_protocol::RiskClass;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Policy decision returned before an operation may run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -15,13 +18,243 @@ pub enum PolicyDecision {
     Deny,
 }
 
+// ── Tool trait (Track D item 1) ──────────────────────────────────────
+
+/// Trait for daemon-registered tools.
+pub trait Tool: Send + Sync {
+    /// Stable tool name (e.g. `file.read`).
+    fn name(&self) -> &str;
+    /// Risk class for policy decisions.
+    fn risk_class(&self) -> RiskClass;
+    /// Whether the tool requires approval before execution.
+    fn requires_approval(&self) -> bool;
+}
+
+// ── Policy config from TOML (Track D item 2) ────────────────────────
+
+/// Loadable policy configuration.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct PolicyConfig {
+    /// Per-risk-class overrides.
+    pub risk_overrides: Vec<RiskOverride>,
+    /// Denied path prefixes checked before any tool execution.
+    pub denied_paths: Vec<PathBuf>,
+    /// Secret file patterns that require explicit policy allow.
+    pub secret_patterns: Vec<String>,
+    /// Shell environment variable allowlist.
+    pub shell_env_allowlist: Vec<String>,
+    /// Whether secret access is allowed when explicitly granted.
+    pub allow_explicit_secret_access: bool,
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            risk_overrides: Vec::new(),
+            denied_paths: Vec::new(),
+            secret_patterns: default_secret_patterns(),
+            shell_env_allowlist: default_shell_env_allowlist(),
+            allow_explicit_secret_access: false,
+        }
+    }
+}
+
+impl PolicyConfig {
+    /// Loads policy config from a TOML string.
+    pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(content)
+    }
+
+    /// Loads policy config from a TOML file, falling back to defaults.
+    pub fn from_file(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| Self::from_toml(&content).ok())
+            .unwrap_or_default()
+    }
+}
+
+/// Per-risk-class policy override.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RiskOverride {
+    /// Risk class name (matches `RiskClass` variant names in snake_case).
+    pub risk_class: String,
+    /// Decision override.
+    pub decision: String,
+}
+
+fn default_secret_patterns() -> Vec<String> {
+    [
+        ".env",
+        ".env.*",
+        "*.pem",
+        "*.key",
+        "*.p12",
+        "*.pfx",
+        "credentials",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "id_dsa",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".git-credentials",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect()
+}
+
+fn default_shell_env_allowlist() -> Vec<String> {
+    [
+        "PATH",
+        "HOME",
+        "USER",
+        "LANG",
+        "TERM",
+        "SHELL",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "PWD",
+        "CADIS_WORKER_ID",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect()
+}
+
+// ── Cancellation token (Track D item 4) ──────────────────────────────
+
+/// Typed cancellation token for cooperative tool cancellation.
+#[derive(Clone, Debug)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CancellationToken {
+    /// Creates a new uncancelled token.
+    pub fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Requests cancellation.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns true if cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+// ── Denied path enforcement (Track D item 6) ────────────────────────
+
+/// Checks whether a path is denied by the configured denied path list.
+pub fn is_denied_path(path: &Path, denied_paths: &[PathBuf]) -> bool {
+    let Ok(canonical) = path.canonicalize() else {
+        // If we can't resolve, check raw prefix match.
+        return denied_paths.iter().any(|denied| path.starts_with(denied));
+    };
+    denied_paths.iter().any(|denied| {
+        if let Ok(denied_canonical) = denied.canonicalize() {
+            canonical.starts_with(&denied_canonical)
+        } else {
+            canonical.starts_with(denied)
+        }
+    })
+}
+
+// ── Secret access gating (Track D item 7) ────────────────────────────
+
+/// Returns true if the file name matches a secret-bearing pattern.
+pub fn is_secret_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower == ".env"
+        || lower.starts_with(".env.")
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || lower.ends_with(".p12")
+        || lower.ends_with(".pfx")
+        || matches!(
+            lower.as_str(),
+            ".netrc"
+                | ".npmrc"
+                | ".pypirc"
+                | ".git-credentials"
+                | "credentials"
+                | "id_rsa"
+                | "id_dsa"
+                | "id_ecdsa"
+                | "id_ed25519"
+        )
+        || lower.contains("secret")
+        || lower.contains("credential")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("private_key")
+}
+
+// ── Shell env filtering (Track D item 3) ─────────────────────────────
+
+/// Filters the current process environment to only allowed variables.
+pub fn filtered_env(allowlist: &[String]) -> Vec<(String, String)> {
+    std::env::vars()
+        .filter(|(key, _)| allowlist.iter().any(|allowed| allowed == key))
+        .collect()
+}
+
+/// Returns the default shell environment allowlist.
+pub fn shell_env_allowlist() -> Vec<String> {
+    default_shell_env_allowlist()
+}
+
+// ── Policy engine ────────────────────────────────────────────────────
+
 /// Default policy engine.
 #[derive(Clone, Debug, Default)]
-pub struct PolicyEngine;
+pub struct PolicyEngine {
+    config: PolicyConfig,
+}
 
 impl PolicyEngine {
+    /// Creates a policy engine with the given config.
+    pub fn with_config(config: PolicyConfig) -> Self {
+        Self { config }
+    }
+
+    /// Returns the active policy config.
+    pub fn config(&self) -> &PolicyConfig {
+        &self.config
+    }
+
     /// Decides the default behavior for a risk class.
     pub fn decide(&self, risk_class: RiskClass) -> PolicyDecision {
+        // Check overrides first.
+        let risk_name = format!("{risk_class:?}");
+        for ov in &self.config.risk_overrides {
+            if ov.risk_class.eq_ignore_ascii_case(&risk_name) {
+                return match ov.decision.as_str() {
+                    "allow" => PolicyDecision::Allow,
+                    "deny" => PolicyDecision::Deny,
+                    _ => PolicyDecision::RequireApproval,
+                };
+            }
+        }
         match risk_class {
             RiskClass::SafeRead => PolicyDecision::Allow,
             RiskClass::WorkspaceEdit
@@ -34,6 +267,21 @@ impl PolicyEngine {
             | RiskClass::GitForcePush
             | RiskClass::SudoSystem => PolicyDecision::RequireApproval,
         }
+    }
+
+    /// Checks whether a path is denied by policy.
+    pub fn is_path_denied(&self, path: &Path) -> bool {
+        is_denied_path(path, &self.config.denied_paths)
+    }
+
+    /// Checks whether a file is secret-bearing and access is not allowed.
+    pub fn is_secret_access_denied(&self, path: &Path) -> bool {
+        is_secret_file(path) && !self.config.allow_explicit_secret_access
+    }
+
+    /// Returns the filtered environment for shell execution.
+    pub fn shell_env(&self) -> Vec<(String, String)> {
+        filtered_env(&self.config.shell_env_allowlist)
     }
 
     /// Decides the default behavior for a structured risk classification.
@@ -312,7 +560,7 @@ mod tests {
     #[test]
     fn safe_read_is_allowed() {
         assert_eq!(
-            PolicyEngine.decide(RiskClass::SafeRead),
+            PolicyEngine::default().decide(RiskClass::SafeRead),
             PolicyDecision::Allow
         );
     }
@@ -320,14 +568,14 @@ mod tests {
     #[test]
     fn risky_operations_require_approval() {
         assert_eq!(
-            PolicyEngine.decide(RiskClass::SudoSystem),
+            PolicyEngine::default().decide(RiskClass::SudoSystem),
             PolicyDecision::RequireApproval
         );
     }
 
     #[test]
     fn safe_read_tools_are_allowed() {
-        let decision = PolicyEngine.decide_tool("file.read");
+        let decision = PolicyEngine::default().decide_tool("file.read");
 
         assert_eq!(decision.risk_class, Some(RiskClass::SafeRead));
         assert_eq!(decision.decision, PolicyDecision::Allow);
@@ -335,7 +583,7 @@ mod tests {
 
     #[test]
     fn shell_requires_approval() {
-        let decision = PolicyEngine.decide_tool("shell.run");
+        let decision = PolicyEngine::default().decide_tool("shell.run");
 
         assert_eq!(decision.risk_class, Some(RiskClass::SystemChange));
         assert_eq!(decision.decision, PolicyDecision::RequireApproval);
@@ -343,7 +591,7 @@ mod tests {
 
     #[test]
     fn unknown_tool_is_denied() {
-        let decision = PolicyEngine.decide_tool("browser.open");
+        let decision = PolicyEngine::default().decide_tool("browser.open");
 
         assert_eq!(decision.risk_class, None);
         assert_eq!(decision.decision, PolicyDecision::Deny);
@@ -351,8 +599,8 @@ mod tests {
 
     #[test]
     fn secret_access_classification_requires_approval() {
-        let decision =
-            PolicyEngine.decide_classification(classify_secret_access(SecretAccessSource::Config));
+        let decision = PolicyEngine::default()
+            .decide_classification(classify_secret_access(SecretAccessSource::Config));
 
         assert_eq!(decision.risk_class, Some(RiskClass::SecretAccess));
         assert_eq!(decision.decision, PolicyDecision::RequireApproval);
@@ -360,7 +608,7 @@ mod tests {
 
     #[test]
     fn dangerous_delete_classification_requires_approval() {
-        let decision = PolicyEngine.decide_classification(classify_dangerous_delete(
+        let decision = PolicyEngine::default().decide_classification(classify_dangerous_delete(
             WorkspacePathScope::InsideWorkspace,
         ));
 
@@ -370,7 +618,7 @@ mod tests {
 
     #[test]
     fn outside_workspace_write_classification_requires_approval() {
-        let decision = PolicyEngine.decide_classification(classify_workspace_mutation(
+        let decision = PolicyEngine::default().decide_classification(classify_workspace_mutation(
             WorkspacePathScope::OutsideWorkspace,
         ));
 
@@ -380,11 +628,112 @@ mod tests {
 
     #[test]
     fn unclassified_workspace_mutation_is_denied() {
-        let decision = PolicyEngine.decide_action(PolicyAction::WorkspaceMutation {
+        let decision = PolicyEngine::default().decide_action(PolicyAction::WorkspaceMutation {
             target_scope: WorkspacePathScope::Unknown,
         });
 
         assert_eq!(decision.risk_class, None);
         assert_eq!(decision.decision, PolicyDecision::Deny);
+    }
+
+    // ── Track D: Policy config from TOML ─────────────────────────────
+
+    #[test]
+    fn policy_config_loads_from_toml() {
+        let toml = r#"
+allow_explicit_secret_access = true
+denied_paths = ["/etc/shadow"]
+shell_env_allowlist = ["PATH", "HOME"]
+
+[[risk_overrides]]
+risk_class = "SafeRead"
+decision = "deny"
+"#;
+        let config = PolicyConfig::from_toml(toml).expect("valid TOML");
+        assert!(config.allow_explicit_secret_access);
+        assert_eq!(config.denied_paths, vec![PathBuf::from("/etc/shadow")]);
+        assert_eq!(config.shell_env_allowlist, vec!["PATH", "HOME"]);
+        assert_eq!(config.risk_overrides.len(), 1);
+    }
+
+    #[test]
+    fn policy_config_risk_override_changes_decision() {
+        let config = PolicyConfig {
+            risk_overrides: vec![RiskOverride {
+                risk_class: "SafeRead".to_owned(),
+                decision: "deny".to_owned(),
+            }],
+            ..PolicyConfig::default()
+        };
+        let engine = PolicyEngine::with_config(config);
+        assert_eq!(engine.decide(RiskClass::SafeRead), PolicyDecision::Deny);
+    }
+
+    #[test]
+    fn policy_config_defaults_are_sensible() {
+        let config = PolicyConfig::default();
+        assert!(!config.allow_explicit_secret_access);
+        assert!(config.shell_env_allowlist.contains(&"PATH".to_owned()));
+        assert!(config.shell_env_allowlist.contains(&"HOME".to_owned()));
+        assert!(!config.secret_patterns.is_empty());
+    }
+
+    // ── Track D: Cancellation token ──────────────────────────────────
+
+    #[test]
+    fn cancellation_token_starts_uncancelled() {
+        let token = CancellationToken::new();
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_token_becomes_cancelled() {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+        token.cancel();
+        assert!(clone.is_cancelled());
+    }
+
+    // ── Track D: Secret file detection ───────────────────────────────
+
+    #[test]
+    fn secret_file_detection() {
+        assert!(is_secret_file(Path::new(".env")));
+        assert!(is_secret_file(Path::new(".env.production")));
+        assert!(is_secret_file(Path::new("server.pem")));
+        assert!(is_secret_file(Path::new("private.key")));
+        assert!(is_secret_file(Path::new("id_rsa")));
+        assert!(is_secret_file(Path::new("credentials")));
+        assert!(is_secret_file(Path::new("my_api_key.txt")));
+        assert!(!is_secret_file(Path::new("README.md")));
+        assert!(!is_secret_file(Path::new("main.rs")));
+    }
+
+    // ── Track D: Shell env filtering ─────────────────────────────────
+
+    #[test]
+    fn filtered_env_only_includes_allowlist() {
+        let result = filtered_env(&["PATH".to_owned()]);
+        assert!(result.iter().all(|(key, _)| key == "PATH"));
+    }
+
+    #[test]
+    fn shell_env_allowlist_has_expected_entries() {
+        let list = shell_env_allowlist();
+        assert!(list.contains(&"PATH".to_owned()));
+        assert!(list.contains(&"HOME".to_owned()));
+        assert!(list.contains(&"USER".to_owned()));
+        assert!(list.contains(&"LANG".to_owned()));
+        assert!(list.contains(&"TERM".to_owned()));
+        assert!(list.contains(&"SHELL".to_owned()));
+    }
+
+    // ── Track D: Denied path enforcement ─────────────────────────────
+
+    #[test]
+    fn denied_path_blocks_matching_prefix() {
+        let denied = vec![PathBuf::from("/etc")];
+        assert!(is_denied_path(Path::new("/etc/shadow"), &denied));
+        assert!(!is_denied_path(Path::new("/tmp/safe"), &denied));
     }
 }

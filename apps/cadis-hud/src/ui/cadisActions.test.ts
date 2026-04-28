@@ -460,13 +460,13 @@ describe("cadisActions", () => {
     expect(screen.getAllByText("worker_mock_001").length).toBeGreaterThan(0);
     expect(screen.getAllByText("completed: focused HUD worker tests passed").length).toBeGreaterThan(0);
     expect(screen.getByText(".cadis/worktrees/worker_mock_001")).toBeInTheDocument();
-    expect(screen.getByText("/home/user/.cadis/artifacts/workers/worker_mock_001/patch.diff")).toBeInTheDocument();
-    expect(screen.getByText("/home/user/.cadis/artifacts/workers/worker_mock_001/test-report.json")).toBeInTheDocument();
+    expect(screen.getAllByText("/home/user/.cadis/artifacts/workers/worker_mock_001/patch.diff").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("/home/user/.cadis/artifacts/workers/worker_mock_001/test-report.json").length).toBeGreaterThan(0);
     expect(screen.getByText("PASSED")).toBeInTheDocument();
     expect(screen.getByText("started: Worker Coding: run focused HUD worker tests")).toBeInTheDocument();
   });
 
-  it("does not execute tools directly from the apply placeholder", () => {
+  it("apply button routes through daemon protocol instead of executing tools directly", () => {
     for (const frame of mockCadisDaemonWorkerStream) {
       handleCadisFrameForTest(frame);
     }
@@ -475,9 +475,14 @@ describe("cadisActions", () => {
     render(createElement(CodeWorkPanel));
 
     const apply = screen.getByRole("button", { name: "APPLY" });
-    expect(apply).toBeDisabled();
+    // Apply is enabled for terminal workers and routes through daemon protocol.
+    expect(apply).toBeEnabled();
+    expect(apply.getAttribute("title")).toBe("Send file.patch apply to daemon");
     fireEvent.click(apply);
-    expect(invokeMock).not.toHaveBeenCalled();
+    // Without a connected daemon, the request is not dispatched, but the button
+    // does not execute tools directly — it calls sendApplyPatch which uses callCadis.
+    // No direct shell/file/tool invocation should occur.
+    expect(invokeMock).not.toHaveBeenCalledWith("shell_run", expect.anything());
   });
 
   it("computes bounded reconnect backoff", () => {

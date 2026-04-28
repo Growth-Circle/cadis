@@ -1,5 +1,7 @@
 import { useMemo } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useHud, type WorkerRecord } from "../hudState.js";
+import { sendApplyPatch, sendWorkerCleanup } from "../cadisActions.js";
 
 const EMPTY_VALUE = "not reported by daemon";
 
@@ -17,6 +19,9 @@ export function CodeWorkPanel() {
     ? agents.find((agent) => agent.spec.id === (worker.agentId ?? worker.parentAgentId))
     : null;
   const logLines = useMemo(() => recentLogLines(worker?.logTail ?? []), [worker?.logTail]);
+  const isTerminal = worker
+    ? ["completed", "failed", "cancelled"].includes(worker.status)
+    : false;
 
   if (!open) return null;
 
@@ -65,6 +70,10 @@ export function CodeWorkPanel() {
             </dl>
           </section>
 
+          {/* TODO: Inline diff content requires a future daemon `worker.artifact.read` request.
+             worker.artifacts.patch is a file PATH, not diff content, so DiffViewer/FileTree
+             cannot render useful output until the daemon provides actual content. */}
+
           <section className="code-work-panel__section" aria-labelledby="code-work-log">
             <h3 id="code-work-log">Recent Log Tail</h3>
             {logLines.length ? (
@@ -87,22 +96,53 @@ export function CodeWorkPanel() {
       )}
 
       <footer className="code-work-panel__actions">
-        <p>
-          Placeholders only: apply/discard must be daemon-mediated; this HUD panel does not execute
-          tools directly.
-        </p>
         <div>
-          <button type="button" disabled title="Placeholder only - no local tool execution">
+          <button
+            type="button"
+            disabled={!worker || !isTerminal}
+            title="Send file.patch apply to daemon"
+            onClick={() => worker && sendApplyPatch(worker.id, worker.artifacts?.patch)}
+          >
             APPLY
           </button>
-          <button type="button" disabled title="Placeholder only - no local tool execution">
+          <button
+            type="button"
+            disabled={!worker || !isTerminal}
+            title="Send worker.cleanup to daemon"
+            onClick={() => worker && sendWorkerCleanup(worker.id, worker.worktree?.worktreePath)}
+          >
             DISCARD
+          </button>
+          <button
+            type="button"
+            disabled={!worker?.worktree?.worktreePath}
+            title="Open worktree in external editor"
+            onClick={() => worker?.worktree?.worktreePath && openInEditor(worker.worktree.worktreePath)}
+          >
+            OPEN IN EDITOR
           </button>
         </div>
       </footer>
     </aside>
   );
 }
+
+/* ── Item 2: Inline diff viewer ─────────────────────────────────── */
+/* TODO: DiffViewer and FileTree removed — worker.artifacts.patch is a file PATH,
+   not diff content. Restore when daemon provides a `worker.artifact.read` request
+   that returns actual diff content for inline rendering. */
+
+/* ── Item 3: File tree ──────────────────────────────────────────── */
+
+/* ── Item 5: Open in editor (Tauri command) ─────────────────────── */
+
+function openInEditor(worktreePath: string): void {
+  void invoke("open_in_editor", { path: worktreePath }).catch((error) => {
+    console.error("open_in_editor failed:", error);
+  });
+}
+
+/* ── Shared helpers ─────────────────────────────────────────────── */
 
 function Field({
   label,

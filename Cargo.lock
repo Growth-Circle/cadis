@@ -593,6 +593,7 @@ version = "0.1.0"
 dependencies = [
  "cadis-protocol",
  "serde",
+ "toml",
 ]
 
 [[package]]
@@ -608,6 +609,7 @@ name = "cadis-store"
 version = "0.1.0"
 dependencies = [
  "cadis-protocol",
+ "chrono",
  "regex",
  "serde",
  "serde_json",

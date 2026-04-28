@@ -10,6 +10,7 @@ readme = "README.md"
 [dependencies]
 cadis-protocol.workspace = true
 serde.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

@@ -162,6 +162,31 @@ fn voice_stt_stop() -> Result<(), String> {
     Ok(())
 }
 
+// Desktop convenience command — not daemon tool execution.
+// Only allows opening paths inside CADIS-owned worktrees to prevent
+// the HUD from spawning arbitrary shell commands on user paths.
+#[tauri::command]
+async fn open_in_editor(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !path.contains(".cadis/worktrees/") {
+            return Err(
+                "open_in_editor: path must be inside a .cadis/worktrees/ directory".to_owned(),
+            );
+        }
+        let editor = env::var("EDITOR").unwrap_or_else(|_| "code".to_owned());
+        Command::new(&editor)
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("could not open editor '{}': {error}", editor))?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("editor worker failed: {error}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -179,7 +204,8 @@ pub fn run() {
             voice_tts_speak,
             voice_tts_stop,
             voice_stt_start,
-            voice_stt_stop
+            voice_stt_stop,
+            open_in_editor
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
