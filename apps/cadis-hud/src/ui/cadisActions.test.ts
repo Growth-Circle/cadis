@@ -466,23 +466,16 @@ describe("cadisActions", () => {
     expect(screen.getByText("started: Worker Coding: run focused HUD worker tests")).toBeInTheDocument();
   });
 
-  it("apply button routes through daemon protocol instead of executing tools directly", () => {
+  it("apply button is disabled pending daemon worker.apply support", () => {
     for (const frame of mockCadisDaemonWorkerStream) {
       handleCadisFrameForTest(frame);
     }
-    invokeMock.mockClear();
 
     render(createElement(CodeWorkPanel));
 
     const apply = screen.getByRole("button", { name: "APPLY" });
-    // Apply is enabled for terminal workers and routes through daemon protocol.
-    expect(apply).toBeEnabled();
-    expect(apply.getAttribute("title")).toBe("Send file.patch apply to daemon");
-    fireEvent.click(apply);
-    // Without a connected daemon, the request is not dispatched, but the button
-    // does not execute tools directly — it calls sendApplyPatch which uses callCadis.
-    // No direct shell/file/tool invocation should occur.
-    expect(invokeMock).not.toHaveBeenCalledWith("shell_run", expect.anything());
+    expect(apply).toBeDisabled();
+    expect(apply.getAttribute("title")).toBe("Pending daemon worker.apply support");
   });
 
   it("computes bounded reconnect backoff", () => {

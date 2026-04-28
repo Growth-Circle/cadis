@@ -1491,6 +1491,10 @@ impl Runtime {
         })?;
 
         let store = ProjectWorkspaceStore::new(project_root);
+
+        self.transition_worker_worktree_state(worker_id, None, WorkerWorktreeState::Removed)
+            .map_err(|error| tool_error(error.code, error.message, false))?;
+
         WorktreeCleanupExecutor::execute(&store, worker_id).map_err(|error| {
             tool_error(
                 "worker_worktree_cleanup_failed",
@@ -1498,9 +1502,6 @@ impl Runtime {
                 false,
             )
         })?;
-
-        self.transition_worker_worktree_state(worker_id, None, WorkerWorktreeState::Removed)
-            .map_err(|error| tool_error(error.code, error.message, false))?;
 
         let mut events = Vec::new();
         if let Some(event) = self.append_worker_log(

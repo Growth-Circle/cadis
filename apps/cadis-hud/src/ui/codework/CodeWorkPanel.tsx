@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useHud, type WorkerRecord } from "../hudState.js";
-import { sendApplyPatch, sendWorkerCleanup } from "../cadisActions.js";
+import { sendWorkerCleanup } from "../cadisActions.js";
 
 const EMPTY_VALUE = "not reported by daemon";
 
@@ -99,9 +99,8 @@ export function CodeWorkPanel() {
         <div>
           <button
             type="button"
-            disabled={!worker || !isTerminal}
-            title="Send file.patch apply to daemon"
-            onClick={() => worker && sendApplyPatch(worker.id, worker.artifacts?.patch)}
+            disabled
+            title="Pending daemon worker.apply support"
           >
             APPLY
           </button>
