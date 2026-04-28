@@ -327,6 +327,7 @@
 - [x] Confirm chat sends through `message.send`.
 - [x] Confirm agent rename sends `agent.rename` and updates only from `agent.renamed`.
 - [x] Confirm model changes send `agent.model.set`.
+- [x] Confirm specialist changes send `agent.specialist.set`.
 - [x] Confirm theme and opacity changes route through `ui.preferences.set`.
 - [x] Confirm avatar style changes route through `ui.preferences.set`.
 - [x] Define renderer-neutral Wulan avatar render state.
@@ -480,6 +481,7 @@
 - [x] Decide HUD toolkit.
 - [x] Add `agent.rename` to protocol implementation.
 - [x] Add `agent.model.set` to protocol implementation.
+- [x] Add `agent.specialist.set` to protocol implementation.
 - [x] Add `ui.preferences.*` to protocol implementation.
 - [x] Add `voice.preview` and `voice.stop` to protocol implementation.
 - [x] Add HUD preference config.

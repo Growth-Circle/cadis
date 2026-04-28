@@ -40,6 +40,7 @@ function fmtTime(ts: number): string {
 export function ChatPanel() {
   const messages = useHud((s) => s.chat);
   const push = useHud((s) => s.pushChat);
+  const clearChat = useHud((s) => s.clearChat);
   const gateway = useHud((s) => s.gateway);
   const prefs = useHud((s) => s.voicePrefs);
   const voiceState = useHud((s) => s.voiceState);
@@ -314,28 +315,18 @@ export function ChatPanel() {
     void beginMicCapture(false);
   };
 
+  const clearHistory = () => {
+    clearChat();
+    setPartial("");
+    setMicDebugOpen(false);
+    setMicDebug(emptyMicDebug(sttLang));
+  };
+
   const modelLabel = compactModelLabel(agentModels.main ?? defaultModel ?? "openai/codex");
   const statusLabel = voiceStatusLabel(voiceState, gateway);
   const isAwaitingReply = voiceState === "thinking" && messages[messages.length - 1]?.who === "user";
-  const quickActions = [
-    { label: "yes", run: () => submitText("yes") },
-    { label: "no", run: () => submitText("no") },
-    { label: "cancel", run: () => submitText("cancel") },
-    { label: "expand", run: () => submitText("expand on that") },
-    { label: "route -> codex", run: () => setDraft("@codex ") },
-    {
-      label: listening ? (micDebugOpen ? "mic debug off" : "mic debug") : "debug mic",
-      run: () => {
-        if (listening) {
-          setMicDebugOpen((open) => !open);
-        } else {
-          void beginMicCapture(true);
-        }
-      },
-      alwaysEnabled: true,
-    },
-  ];
   const showMicDebug = listening || micDebugOpen || micDebug.stage === "error";
+  const canClearHistory = messages.length > 0 || partial || showMicDebug;
 
   return (
     <section className="chat-panel" aria-label="CADIS chat">
@@ -393,18 +384,16 @@ export function ChatPanel() {
           />
         )}
       </div>
-      <div className="chat-panel__chips" aria-label="quick commands">
-        {quickActions.map((action) => (
-          <button
-            key={action.label}
-            type="button"
-            className="chat-panel__chip"
-            onClick={action.run}
-            disabled={gateway !== "connected" && !action.alwaysEnabled}
-          >
-            {action.label}
-          </button>
-        ))}
+      <div className="chat-panel__tools" aria-label="chat tools">
+        <button
+          type="button"
+          className="chat-panel__tool"
+          onClick={clearHistory}
+          disabled={!canClearHistory}
+          title="Clear chat history"
+        >
+          CLEAR CHAT
+        </button>
       </div>
       <div className="chat-panel__compose-wrap">
         {showMentionMenu && (

@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
+import { defaultSpecialistForRole } from "../lib/agent-specialists.js";
 import {
   _resetCadisActionsForTest,
   _emitCadisSubscriptionFrameForTest,
@@ -11,6 +12,7 @@ import {
   persistThemePreference,
   persistBackgroundOpacityPreference,
   persistAvatarStylePreference,
+  sendAgentSpecialistUpdate,
   sendUserMessage,
   sendVoicePreflight,
 } from "./cadisActions.js";
@@ -165,6 +167,7 @@ describe("cadisActions", () => {
             target: "Builder agent",
             detail: "openai/gpt-5.2",
           },
+          specialist: defaultSpecialistForRole("Build Ops"),
           uptimeSeconds: 0,
           parentAgentId: "main",
         },
@@ -205,6 +208,51 @@ describe("cadisActions", () => {
       currentTask: { detail: "openai/gpt-5.2" },
     });
     expect(state.agentModels.agent_42).toBe("openai/gpt-5.2");
+  });
+
+  it("routes specialist updates through daemon and applies confirmation events", async () => {
+    connect();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
+    invokeMock.mockClear();
+
+    expect(
+      sendAgentSpecialistUpdate("atlas", {
+        id: "marketing",
+        label: "Marketing",
+        persona: "Act as a senior growth marketer.",
+      }),
+    ).toBe(true);
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(sentRequest()).toMatchObject({
+      type: "agent.specialist.set",
+      payload: {
+        agent_id: "atlas",
+        specialist_id: "marketing",
+        specialist_label: "Marketing",
+        persona: "Act as a senior growth marketer.",
+      },
+    });
+
+    handleCadisFrameForTest({
+      frame: "event",
+      payload: {
+        type: "agent.specialist.changed",
+        payload: {
+          agent_id: "atlas",
+          specialist_id: "marketing",
+          specialist_label: "Marketing",
+          persona: "Act as a senior growth marketer.",
+        },
+      },
+    });
+
+    expect(useHud.getState().agents.find((agent) => agent.spec.id === "atlas")?.specialist)
+      .toMatchObject({
+        id: "marketing",
+        label: "Marketing",
+        persona: "Act as a senior growth marketer.",
+      });
   });
 
   it("starts an events.subscribe bridge with bounded replay from the last event id", async () => {

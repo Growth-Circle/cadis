@@ -19,6 +19,11 @@ import {
   type WorkerWorktreeInfo,
 } from "./hudState.js";
 import { AGENT_ROSTER } from "../lib/agents-roster.js";
+import {
+  defaultSpecialistForRole,
+  normalizeSpecialistProfile,
+  type AgentSpecialistProfile,
+} from "../lib/agent-specialists.js";
 import type { VoicePrefs } from "../lib/voice/voices.js";
 
 const CLIENT_ID = "cadis-hud";
@@ -130,6 +135,22 @@ export function sendAgentModelUpdate(agentId: string, model: string): boolean {
   void callCadis("agent.model.set", {
     agent_id: agentId,
     model,
+  }).then((ok) => {
+    if (!ok) scheduleReconnect();
+  });
+  return true;
+}
+
+export function sendAgentSpecialistUpdate(
+  agentId: string,
+  specialist: AgentSpecialistProfile,
+): boolean {
+  if (!connected) return false;
+  void callCadis("agent.specialist.set", {
+    agent_id: agentId,
+    specialist_id: specialist.id,
+    specialist_label: specialist.label,
+    persona: specialist.persona,
   }).then((ok) => {
     if (!ok) scheduleReconnect();
   });
@@ -462,6 +483,10 @@ function handleMessage(type: string, payload: unknown, sessionId?: string): void
     handleAgentModelChanged(payload);
     return;
   }
+  if (type === "agent.specialist.changed") {
+    handleAgentSpecialistChanged(payload);
+    return;
+  }
   if (type === "agent.status.changed") {
     handleAgentStatusChanged(payload);
     return;
@@ -648,8 +673,9 @@ function handleAgentSpawned(payload: unknown): void {
   const role = stringFrom(p.role);
   const parentAgentId = stringFrom(p.parent_agent_id);
   const status = normalizeAgentStatus(stringFrom(p.status)) ?? "idle";
+  const specialist = readAgentSpecialist(p, role);
 
-  upsertDaemonAgent({ agentId, displayName, role, parentAgentId, model, status });
+  upsertDaemonAgent({ agentId, displayName, role, parentAgentId, model, status, specialist });
   if (model) useHud.getState().setAgentModel(agentId, model);
 }
 
@@ -665,6 +691,15 @@ function handleAgentModelChanged(payload: unknown): void {
   const agentId = stringFrom(p.agent_id);
   const model = stringFrom(p.model);
   if (agentId && model) useHud.getState().setAgentModel(agentId, model);
+}
+
+function handleAgentSpecialistChanged(payload: unknown): void {
+  const p = asRecord(payload);
+  const agentId = stringFrom(p.agent_id);
+  if (!agentId) return;
+  const existing = useHud.getState().agents.find((agent) => agent.spec.id === agentId);
+  const specialist = readAgentSpecialist(p, existing?.spec.role);
+  if (specialist) useHud.getState().setAgentSpecialist(agentId, specialist);
 }
 
 function handleAgentStatusChanged(payload: unknown): void {
@@ -819,6 +854,7 @@ function resolveMentionTargetAgentId(token: string): string {
   const target = normalizeMentionToken(token);
   const known = useHud.getState().agents.find((agent) => {
     const names = [agent.spec.id, agent.spec.name, agent.spec.role];
+    if (agent.specialist?.label) names.push(agent.specialist.label);
     return names.some((name) => normalizeMentionToken(name) === target);
   });
   return known?.spec.id ?? token;
@@ -840,6 +876,7 @@ function upsertDaemonAgent({
   parentAgentId,
   model,
   status,
+  specialist,
 }: {
   agentId: string;
   displayName?: string;
@@ -847,6 +884,7 @@ function upsertDaemonAgent({
   parentAgentId?: string;
   model?: string;
   status: AgentLive["status"];
+  specialist?: AgentSpecialistProfile;
 }): void {
   const existing = useHud.getState().agents.find((agent) => agent.spec.id === agentId);
   const rosterSpec = AGENT_ROSTER_BY_ID.get(agentId);
@@ -860,6 +898,10 @@ function upsertDaemonAgent({
   };
   const name = normalizeAgentName(displayName ?? baseSpec.name, baseSpec.name);
   const nextRole = normalizeAgentName(role ?? baseSpec.role, baseSpec.role);
+  const nextSpecialist = normalizeSpecialistProfile(
+    specialist ?? existing?.specialist,
+    defaultSpecialistForRole(nextRole),
+  );
   upsertAgent({
     spec: {
       ...baseSpec,
@@ -873,6 +915,7 @@ function upsertDaemonAgent({
       target: parentAgentId ? `child of ${parentAgentId}` : `${name} agent`,
       detail: model ?? existing?.currentTask.detail ?? FALLBACK_MAIN_MODEL,
     },
+    specialist: nextSpecialist,
     uptimeSeconds: existing?.uptimeSeconds ?? 0,
     parentAgentId,
   });
@@ -1129,6 +1172,25 @@ function readWorkerArtifacts(value: unknown): WorkerArtifactInfo | undefined {
     stringFrom(artifacts.tests_status);
   if (!summary && !patch && !testReport && !testReportStatus) return undefined;
   return { summary, patch, testReport, testReportStatus };
+}
+
+function readAgentSpecialist(
+  payload: Record<string, unknown>,
+  role: string | undefined,
+): AgentSpecialistProfile | undefined {
+  const fallback = defaultSpecialistForRole(role ?? "Generalist");
+  const specialistId = stringFrom(payload.specialist_id);
+  const specialistLabel = stringFrom(payload.specialist_label);
+  const persona = stringFrom(payload.persona);
+  if (!specialistId && !specialistLabel && !persona) return undefined;
+  return normalizeSpecialistProfile(
+    {
+      id: specialistId,
+      label: specialistLabel,
+      persona,
+    },
+    fallback,
+  );
 }
 
 function readSessionId(envelope: CadisEnvelope): string | undefined {

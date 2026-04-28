@@ -9,8 +9,10 @@ readme = "README.md"
 
 [dependencies]
 cadis-protocol.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AGENT_ROSTER } from "../../lib/agents-roster.js";
+import { defaultSpecialistForRole } from "../../lib/agent-specialists.js";
 import { DEFAULT_VOICE_PREFS } from "../../lib/voice/voices.js";
 import {
   available as sttAvailable,
@@ -37,6 +38,7 @@ const INITIAL_AGENTS: AgentLive[] = AGENT_ROSTER.map((agent) => ({
     target: agent.id === "main" ? "CADIS agent" : `${agent.name} agent`,
     detail: "openai/gpt-5.5",
   },
+  specialist: defaultSpecialistForRole(agent.role),
   uptimeSeconds: 0,
 }));
 
@@ -128,63 +130,26 @@ describe("ChatPanel voice UX", () => {
     expect(screen.getByText("voice ended after trailing silence")).toBeInTheDocument();
   });
 
-  it("starts deterministic mic debug capture without submitting audio for transcription", async () => {
-    let handlers: SttHandlers | undefined;
-    vi.mocked(sttAvailable).mockReturnValue(true);
-    vi.mocked(startListening).mockImplementation((_lang, nextHandlers) => {
-      handlers = nextHandlers;
-      return { stop: vi.fn() };
+  it("clears visible chat history from the chat tools bar", () => {
+    useHud.setState({
+      chat: [
+        { id: "m-user", who: "user", text: "old user message", ts: 1 },
+        { id: "m-cadis", who: "cadis", text: "old CADIS reply", ts: 2 },
+      ],
     });
 
     render(<ChatPanel />);
 
-    fireEvent.click(screen.getByRole("button", { name: "debug mic" }));
-    await waitFor(() => expect(handlers).toBeDefined());
+    const clear = screen.getByRole("button", { name: "CLEAR CHAT" });
+    expect(clear).toBeEnabled();
+    expect(screen.getByText("old user message")).toBeInTheDocument();
+    expect(screen.getByText("old CADIS reply")).toBeInTheDocument();
 
-    expect(startListening).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({
-        onDebug: expect.any(Function),
-        onLevel: expect.any(Function),
-      }),
-      { debugOnly: true },
-    );
+    fireEvent.click(clear);
 
-    await act(async () => {
-      handlers?.onLevel?.({
-        level: 0.4,
-        rms: 0.009,
-        peak: 0.06,
-        samples: Array.from({ length: 48 }, (_, index) => (index % 4) / 4),
-      });
-      handlers?.onDebug?.(debugSnapshot({
-        stage: "recording",
-        message: "voice signal detected",
-        level: 0.4,
-        rms: 0.009,
-        peak: 0.06,
-        voiceDetected: true,
-        pcmFrames: 5,
-        pcmBytes: 4096,
-        captureSource: "webaudio-pcm",
-        permissionState: "granted",
-        deviceCount: 2,
-        deviceLabels: "Built-in Audio, USB Mic",
-        selectedDeviceLabel: "USB Mic",
-        streamActive: true,
-        trackReadyState: "live",
-        trackSampleRate: 48000,
-        trackChannelCount: 1,
-        analyserFrames: 5,
-        silenceReason: "trailing silence after voice",
-      }));
-    });
-
-    expect(screen.getByText("mic debug capture")).toBeInTheDocument();
-    expect(screen.getByText("USB Mic")).toBeInTheDocument();
-    expect(screen.getByText("webaudio-pcm")).toBeInTheDocument();
-    expect(screen.getByText("Built-in Audio, USB Mic")).toBeInTheDocument();
-    expect(screen.getByText("trailing silence after voice")).toBeInTheDocument();
+    expect(screen.queryByText("old user message")).not.toBeInTheDocument();
+    expect(screen.queryByText("old CADIS reply")).not.toBeInTheDocument();
+    expect(clear).toBeDisabled();
   });
 });
 

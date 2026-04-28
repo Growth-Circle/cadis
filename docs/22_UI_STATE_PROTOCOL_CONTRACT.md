@@ -200,6 +200,27 @@ Sent when a per-agent model selector changes.
 }
 ```
 
+### `agent.specialist.set`
+
+Sent when an agent settings dialog changes the specialist persona.
+
+```json
+{
+  "type": "agent.specialist.set",
+  "agent_id": "atlas",
+  "specialist_id": "marketing",
+  "specialist_label": "Marketing",
+  "persona": "Act as a senior growth marketer. Translate goals into positioning, audience insights, campaigns, funnels, messaging, and measurable experiments."
+}
+```
+
+Rules:
+
+- daemon persists accepted specialist profile on the agent
+- daemon includes the persona in future prompts routed to that agent
+- daemon emits `agent.specialist.changed`
+- UI updates from event
+
 ### `models.list`
 
 Sent by HUD on connect or config dialog open.
@@ -340,7 +361,10 @@ Replaces the seeded roster with daemon-owned agent state.
       "display_name": "Codex",
       "parent_agent_id": null,
       "model": "codex-cli/chatgpt-plan",
-      "status": "idle"
+      "status": "idle",
+      "specialist_id": "engineering",
+      "specialist_label": "Engineering",
+      "persona": "Act as a senior software engineer. Focus on implementation quality, tests, maintainability, and concrete code-level tradeoffs."
     }
   ]
 }
@@ -447,6 +471,20 @@ Confirms rename and updates all surfaces.
   "type": "agent.renamed",
   "agent_id": "main",
   "display_name": "CADIS"
+}
+```
+
+### `agent.specialist.changed`
+
+Confirms specialist/persona changes and updates all agent surfaces.
+
+```json
+{
+  "type": "agent.specialist.changed",
+  "agent_id": "atlas",
+  "specialist_id": "marketing",
+  "specialist_label": "Marketing",
+  "persona": "Act as a senior growth marketer. Translate goals into positioning, audience insights, campaigns, funnels, messaging, and measurable experiments."
 }
 ```
 

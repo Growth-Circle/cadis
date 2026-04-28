@@ -11,5 +11,21 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     "OpenSSL",
+    "OFL-1.1",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
+unused-allowed-license = "allow"
+
+# epaint_default_fonts bundles Ubuntu Font (LicenseRef-UFL-1.0) which is
+# permissive but not in the SPDX list. Allow it as a per-crate exception.
+[[licenses.clarify]]
+crate = "epaint_default_fonts"
+expression = "(MIT OR Apache-2.0) AND OFL-1.1"
+license-files = []
+
+[advisories]
+unmaintained = "none"
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is a transitive dep through egui/accesskit; awaiting upstream migration" },
+]

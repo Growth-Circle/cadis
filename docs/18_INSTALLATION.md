@@ -2,11 +2,26 @@
 
 ## Status
 
-CADIS has no packaged release yet. The desktop MVP can be built and run from
-source on Linux. macOS is currently a Rust source-validation baseline only, and
-Windows is limited to portable-crate validation until runtime transport, shell,
-path, sandbox, HUD, and audio adapters exist. See
-`docs/28_PLATFORM_BASELINE.md`.
+Linux binary artifacts (`cadisd`, `cadis`) are available from
+[GitHub Releases](https://github.com/Growth-Circle/cadis/releases). Source
+builds remain the primary path for the HUD. macOS is currently a Rust
+source-validation baseline only, and Windows is limited to portable-crate
+validation until runtime transport, shell, path, sandbox, HUD, and audio
+adapters exist. See `docs/28_PLATFORM_BASELINE.md`.
+
+## Prerequisites
+
+- **Rust** stable 1.75+ (install via [rustup](https://rustup.rs/))
+- **Git**
+- **Linux desktop** (primary supported platform)
+
+For the HUD (optional):
+- **Node.js** 20+
+- **pnpm** 10.x (`corepack enable`)
+- **Tauri system dependencies** (Debian/Ubuntu):
+  ```bash
+  sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+  ```
 
 ## From Source
 
@@ -98,7 +113,7 @@ export CADIS_OPENAI_API_KEY="..."
 ```toml
 [model]
 provider = "openai"
-openai_model = "gpt-5.2"
+openai_model = "gpt-4o"
 openai_base_url = "https://api.openai.com/v1"
 ```
 
@@ -167,23 +182,19 @@ target/release/cadis chat "hello"
 
 ## Known Limitations
 
-- No packaged installer yet.
-- Linux is the only current source-built runtime/HUD target.
+- Linux is the only supported runtime/HUD target; binary artifacts are
+  Linux-only.
 - macOS has CI source validation but no packaged runtime or HUD support claim.
 - Windows CI checks portable crates only; daemon, CLI transport, HUD, shell,
   and audio runtime paths are not supported yet.
-- Native file/git safe-read tools exist, including `file.read`, `file.search`,
-  `git.status`, and `git.diff`; mutating file tools and shell execution are not
+- Full async tool cancellation is not implemented yet.
+- Telegram, mobile clients, and production daemon-owned voice output are not
   implemented yet.
-- Approval commands, persistence, expiry, and restart recovery exist; approved
-  risky tool execution still fails closed until the native execution backends
-  are implemented.
-- Protocol types exist for orchestrator route, `session.subscribe`, and worker
-  events. Live event fan-out exists for daemon-wide and session-filtered
-  streams. Worker worktree setup and artifact output exist; worker command/test
-  execution and cleanup are not implemented yet.
-- Telegram, production daemon-owned voice output, full HUD parity, and code work window are not implemented yet.
-- The Tauri HUD is source-built for now; packaged desktop artifacts are not published yet.
+- The native Wulan avatar engine is not implemented yet; the crate provides the
+  renderer-neutral state contract only.
+- Concurrent-edit protection for shared state is not production-hardened yet.
+- The Tauri HUD is source-built; packaged desktop HUD artifacts are not
+  published yet.
 
 ## Package Targets Later
 

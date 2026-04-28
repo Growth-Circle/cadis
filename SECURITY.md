@@ -4,7 +4,7 @@ CADIS will execute tools, edit files, call models, and coordinate agents. Securi
 
 ## Supported Versions
 
-No supported release exists yet. Security reports are still welcome during planning and pre-alpha implementation.
+C.A.D.I.S. v0.9 is the current beta release. Security reports are welcome.
 
 ## Reporting a Vulnerability
 
