@@ -3,6 +3,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -635,6 +636,26 @@ mod tests {
     }
 
     #[test]
+    fn prepare_socket_path_rejects_existing_regular_file_without_deleting_it() {
+        let cadis_home = test_workspace("cadis-daemon-socket-regular-file");
+        let socket_path = cadis_home.join("run").join("cadisd-test.sock");
+        fs::create_dir_all(socket_path.parent().expect("socket path should have a parent"))
+            .expect("socket parent should be created");
+        fs::write(&socket_path, "not a socket").expect("regular file should write");
+
+        let error = prepare_socket_path(&socket_path).expect_err("regular file should be rejected");
+        let io_error = error
+            .downcast_ref::<io::Error>()
+            .expect("prepare_socket_path should return an io error");
+
+        assert_eq!(io_error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read_to_string(&socket_path).expect("regular file should remain readable"),
+            "not a socket"
+        );
+    }
+
+    #[test]
     fn pending_message_generation_leaves_runtime_mutex_available() {
         let entered = Arc::new((Mutex::new(false), Condvar::new()));
         let release = Arc::new((Mutex::new(false), Condvar::new()));
@@ -1205,18 +1226,34 @@ fn prepare_socket_path(socket_path: &Path) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    if socket_path.exists() {
-        if UnixStream::connect(socket_path).is_ok() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "daemon already appears to be running at {}",
-                    socket_path.display()
-                ),
-            )
-            .into());
+    match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => {
+            if UnixStream::connect(socket_path).is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "daemon already appears to be running at {}",
+                        socket_path.display()
+                    ),
+                )
+                .into());
+            }
+
+            if metadata.file_type().is_socket() {
+                fs::remove_file(socket_path)?;
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "socket path {} already exists and is not a Unix socket",
+                        socket_path.display()
+                    ),
+                )
+                .into());
+            }
         }
-        fs::remove_file(socket_path)?;
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
 
     Ok(())
