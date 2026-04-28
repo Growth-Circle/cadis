@@ -120,6 +120,7 @@ fn default_shell_env_allowlist() -> Vec<String> {
         "TMPDIR",
         "PWD",
         "CADIS_WORKER_ID",
+        "_",
     ]
     .iter()
     .map(|s| (*s).to_owned())
