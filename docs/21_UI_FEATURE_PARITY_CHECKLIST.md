@@ -104,7 +104,7 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [x] Composer textarea.
 - [x] Enter to send.
 - [x] Shift+Enter newline.
-- [ ] Quick chips: yes, no, cancel, expand.
+- [x] Quick chips: yes, no, cancel, expand.
 - [x] Agent route chip or command prefix.
 - [x] Voice settings shortcut.
 - [x] Model settings shortcut.
@@ -142,7 +142,7 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [ ] Persist per-agent model.
 - [ ] Thinking mode toggle.
 - [ ] Fast response toggle.
-- [ ] Main orb meta ring updates after model change.
+- [x] Main orb meta ring updates after model change.
 
 ## 12. Appearance UI
 
@@ -165,8 +165,8 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [x] Card shows command/action.
 - [x] Card shows cwd/workspace.
 - [x] Card shows reason.
-- [ ] Card shows risk summary.
-- [ ] Card shows expiry if available.
+- [x] Card shows risk summary.
+- [x] Card shows expiry if available.
 - [x] Deny button.
 - [x] Approve button.
 - [x] Button click sends daemon response.
@@ -264,8 +264,8 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 
 ## 20. Open-Source Cleanup
 
-- [ ] Replace RamaClaw brand text with CADIS.
-- [ ] Replace OpenClaw wording with CADIS daemon wording.
+- [x] Replace RamaClaw brand text with CADIS.
+- [x] Replace OpenClaw wording with CADIS daemon wording.
 - [ ] Replace private source paths with public references or remove them.
 - [ ] Recreate icons for CADIS.
 - [ ] Confirm asset licensing.

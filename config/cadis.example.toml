@@ -65,7 +65,7 @@ max_total_agents = 32
 default_timeout_sec = 900
 # Tool-call loop steps per route. Default 1 limits multi-step agent workflows.
 # Increase to 10-20 for real coding or research tasks.
-max_steps_per_session = 1
+max_steps_per_session = 8
 
 [orchestrator]
 # Enables explicit /worker, /spawn, /route, and /delegate message actions.

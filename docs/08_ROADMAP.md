@@ -173,21 +173,30 @@ Exit criteria:
 
 ## v0.9 - Desktop Beta
 
+Status: released (v0.9.0).
+
 Goal: Linux desktop beta is useful for real local work.
+
+## v0.9.2 - Release Candidate
+
+Status: in progress.
+
+Goal: version bump, open-source cleanup, HUD polish, and CI hardening.
 
 Deliverables:
 
-- Stabilized daemon.
-- Stabilized CLI.
-- HUD and code window usable.
-- Telegram and voice optional.
-- Two or more model providers.
-- Security docs.
-- Install docs.
+- All crate versions bumped to 0.9.2.
+- Open-source cleanup (RamaClaw brand removal).
+- HUD quick chips, approval expiry display, orb meta ring update.
+- `max_steps_per_session` default raised to 8.
+- `cargo-deny` license audit in CI.
+- Telegram adapter HTTP connection.
 
 Exit criteria:
 
-- External users can install, run, and complete a small coding task.
+- `cargo deny check` passes.
+- HUD builds cleanly (`pnpm lint && pnpm tsc && pnpm test && pnpm build`).
+- No RamaClaw or OpenClaw brand text in HUD source.
 
 ## v1.0 - Stable Local Runtime
 

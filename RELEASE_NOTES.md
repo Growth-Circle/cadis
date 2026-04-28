@@ -60,7 +60,7 @@ pnpm tauri:dev
 - **No Telegram or mobile clients.** The Telegram adapter crate exists but is not connected to a live bot. No Android/iOS surfaces.
 - **Sequential tool calls per session.** Workers run concurrently, but individual tool calls within a session are sequential. Async cancellation is not yet implemented.
 - **No packaged installer or HUD binary.** All artifacts are bare binaries; the Tauri HUD must be built from source.
-- **Default `max_steps_per_session=1`.** Increase to 10–20 in config for real multi-step agent workflows.
+- **Default `max_steps_per_session=8`.** Increase to 10–20 in config for complex multi-step agent workflows.
 
 ## Artifacts
 
@@ -89,6 +89,32 @@ Report vulnerabilities privately per [SECURITY.md](SECURITY.md). C.A.D.I.S. keep
 ## What's Next
 
 **v1.0 stable:** protocol freeze, stable storage format, packaged installers, Telegram client, async tool cancellation, and production voice pipeline.
+
+---
+
+# C.A.D.I.S. v0.9.2 — Release Candidate
+
+**Date:** 2026-04-29
+**Maturity:** RC (Release Candidate)
+**Target:** v1.0 stable
+
+## What's new
+
+- **Version bump** — all crates and HUD bumped to 0.9.2 (was 0.1.0).
+- **Open-source cleanup** — RamaClaw brand references replaced with CADIS throughout HUD and docs.
+- **HUD improvements** — quick action chips in chat, approval card risk summary and expiry display, orb meta ring model update.
+- **`max_steps_per_session` default → 8** — multi-step agent workflows now work out of the box.
+- **`cargo-deny` in CI** — dependency license audit runs on every PR.
+- **Telegram adapter** — real HTTP Bot API connection (get_updates, send_message, poll_loop).
+- **Test coverage** — 296+ tests across all workspace crates.
+
+## Remaining for v1.0
+
+- Protocol freeze documentation
+- Stable CLI command documentation
+- Storage migration path documentation
+- HUD packaging (AppImage/deb in release workflow)
+- Security response process verification
 
 ---
 

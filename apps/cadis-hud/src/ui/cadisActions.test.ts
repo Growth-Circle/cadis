@@ -22,7 +22,7 @@ import { WorkerTree } from "./orbital/WorkerTree.js";
 import { mockCadisDaemonWorkerStream } from "./fixtures/mockCadisDaemonEventStream.js";
 
 /*
- * RamaClaw UI contract validation (docs/20_RAMACLAW_UI_ADAPTATION.md §4):
+ * CADIS UI contract validation (docs/20_RAMACLAW_UI_ADAPTATION.md §4):
  *
  * ✓ Orbital shell        — OrbitalHUD.tsx (central orb, agent satellites, rings, spokes)
  * ✓ Chat panel            — chat/ChatPanel.tsx (streaming log, composer, voice controls)
@@ -31,7 +31,7 @@ import { mockCadisDaemonWorkerStream } from "./fixtures/mockCadisDaemonEventStre
  * ✓ Agent rename dialog   — settings/AgentRenameDialog.tsx
  * ✓ Status bar            — StatusBar.tsx (daemon state, model, agent counts)
  *
- * All six required HUD surfaces from the RamaClaw contract are present.
+ * All six required HUD surfaces from the CADIS contract are present.
  */
 
 const invokeMock = vi.hoisted(() => vi.fn());

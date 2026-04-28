@@ -20,15 +20,13 @@ const SLOTS: { cx: number; cy: number }[] = [
 
 export function OrbitalHUD() {
   const agents = useHud((s) => s.agents);
-  const agentModels = useHud((s) => s.agentModels);
-  const defaultModel = useHud((s) => s.defaultModel);
+  const mainModel = useHud((s) => s.agentModels.main ?? s.defaultModel ?? "openai/gpt-5.5");
   const chatPrefs = useHud((s) => s.chatPreferences);
   const voiceState = useHud((s) => s.voiceState);
   const displayAgents = useMemo(
     () => agents.filter((agent) => agent.spec.id !== "main"),
     [agents],
   );
-  const mainModel = agentModels.main ?? defaultModel ?? "openai/gpt-5.5";
   const positions = useMemo(
     () =>
       displayAgents.map((_, i) => SLOTS[i] ?? SLOTS[SLOTS.length - 1]!),

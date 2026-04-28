@@ -46,6 +46,8 @@ export type ApprovalRecord = {
   agentId: string;
   ts: number;
   timeoutMs?: number;
+  summary?: string;
+  expiresAt?: string;
 };
 
 export type AgentSessionStatus =

@@ -4,8 +4,8 @@
     "total": 404,
     "percent": 100
   },
-  "milestone": "rc",
-  "next_milestone": "stable",
+  "milestone": "v0.9.2-rc",
+  "next_milestone": "v1.0-stable",
   "next_target_percent": 100,
-  "updated_at": "2026-04-28T12:42:21Z"
+  "updated_at": "2026-04-29T03:24:00Z"
 }

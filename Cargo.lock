@@ -541,7 +541,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cadis-avatar"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -549,7 +549,7 @@ dependencies = [
 
 [[package]]
 name = "cadis-cli"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "cadis-protocol",
  "cadis-store",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "cadis-core"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "cadis-models",
  "cadis-policy",
@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "cadis-daemon"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "cadis-core",
  "cadis-models",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "cadis-hud"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "cadis-protocol",
  "cadis-store",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "cadis-models"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "reqwest",
  "serde",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "cadis-policy"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "cadis-protocol",
  "serde",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "cadis-protocol"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "criterion",
  "serde",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "cadis-store"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "cadis-policy",
  "cadis-protocol",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "cadis-telegram"
-version = "0.1.0"
+version = "0.9.2"
 dependencies = [
  "cadis-protocol",
  "reqwest",

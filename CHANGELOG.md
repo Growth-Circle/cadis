@@ -4,6 +4,45 @@ All notable changes to CADIS will be documented in this file.
 
 The format follows Keep a Changelog style, and the project will use Semantic Versioning once the first release exists.
 
+## [Unreleased] — v0.9.2 RC
+
+### Added
+
+- Implement `SessionUnsubscribe` protocol request (was returning not_implemented).
+- Telegram adapter: real HTTP Bot API connection with `get_updates`, `send_message`, `send_message_with_keyboard`, `answer_callback_query`, and `poll_loop`.
+- CLI unit tests: 34 new tests covering arg parsing and utility functions.
+- Daemon unit tests: 8 new tests covering bounded_replay, event_bus, and arg parsing.
+- UI Feature Parity Checklist: audited sections 3–20 against actual HUD source, ~150 items verified.
+- Open-source cleanup: replace RamaClaw brand references with CADIS.
+- HUD: quick action chips (yes, no, cancel, expand) in chat composer.
+- HUD: approval card risk summary and expiry countdown display.
+- HUD: orb meta ring updates after model change.
+- `max_steps_per_session` default raised from 1 to 8.
+- `cargo-deny` license check added to CI workflow.
+
+### Changed
+
+- Bump all workspace crate versions from 0.1.0 to 0.9.2.
+- Bump HUD package version from 0.1.0 to 0.9.2.
+
+### Fixed
+
+- `SessionUnsubscribe` no longer returns an error response.
+
+### Security
+
+- Dependency license audit via `cargo-deny` now runs in CI.
+
+## [0.9.1] - 2026-04-29
+
+### Added
+
+- SessionUnsubscribe protocol implementation.
+- Telegram adapter HTTP connection to Bot API.
+- UI Feature Parity checklist audit (404/404 master checklist).
+- Daemon and CLI test coverage expansion.
+- Known limitations documentation.
+
 ## [0.9.0] - 2026-04-28
 
 ### Added

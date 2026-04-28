@@ -26,8 +26,9 @@ This document lists known limitations of the current C.A.D.I.S. v0.9 beta.
 
 ## Clients
 
-- **Telegram adapter is command-parser only.** The adapter parses commands but
-  has no real Bot API HTTP connection yet (being added).
+- **Telegram adapter connects to Bot API but not yet to cadisd.** The adapter
+  can poll Telegram and parse commands, but the bridge to daemon protocol is
+  not wired yet.
 - **No mobile client.** Android and iOS surfaces are future work.
 
 ## Runtime
@@ -46,5 +47,5 @@ This document lists known limitations of the current C.A.D.I.S. v0.9 beta.
 
 ## Configuration
 
-- **Default `max_steps_per_session=1` limits multi-step tool-call loops.**
-  Increase to 10–20 for real agent workflows.
+- **Default `max_steps_per_session=8`.** Increase further for complex
+  multi-step agent workflows that need more than 8 tool-call rounds.

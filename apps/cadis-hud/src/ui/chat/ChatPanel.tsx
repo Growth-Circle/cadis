@@ -385,6 +385,21 @@ export function ChatPanel() {
         )}
       </div>
       <div className="chat-panel__tools" aria-label="chat tools">
+        {messages.length > 0 && (
+          <div className="chat-panel__chips" aria-label="quick actions">
+            {(["yes", "no", "cancel", "expand"] as const).map((label) => (
+              <button
+                key={label}
+                type="button"
+                className="chat-panel__chip"
+                onClick={() => submitText(label)}
+                disabled={gateway !== "connected"}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
         <button
           type="button"
           className="chat-panel__tool"
