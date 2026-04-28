@@ -39,6 +39,18 @@ jobs:
       - name: Native avatar focused tests
         run: cargo test -p cadis-avatar
 
+  license-audit:
+    name: License audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install cargo-deny@0.16.2 --locked
+      - name: Run license audit
+        run: bash scripts/license-audit.sh
+
   hud-frontend:
     name: HUD frontend
     runs-on: ubuntu-latest

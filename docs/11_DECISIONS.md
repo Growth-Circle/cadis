@@ -335,6 +335,32 @@ Consequence:
 
 ## Pending Decisions
 
+### ADR-017: Defer Bevy renderer
+
+Status: Accepted.
+
+Decision: Defer the Bevy renderer path. The focused wgpu path meets current
+avatar requirements. Bevy will be reconsidered if wgpu cannot handle particle
+systems or complex scene graphs.
+
+Reason:
+
+- The Wulan avatar's initial visual needs (portrait compositing, hologram
+  shader, particles, reticles, eye/mouth overlays, body gestures) are narrow
+  enough for a focused `wgpu` renderer.
+- Bevy adds a large dependency surface and ECS overhead that is not justified
+  until CADIS needs skeletal rigs, physics, or a broader 3D scene engine.
+- The `cadis-avatar` state crate already exposes a renderer-neutral
+  `AvatarFrame` and `WgpuAvatarUniforms` contract that any future Bevy adapter
+  can consume without changing the state engine.
+
+Consequence:
+
+- `BevyRendererStatus::Deferred` remains the default in `cadis-avatar`.
+- The `bevy-renderer` Cargo feature is reserved but empty.
+- If particle systems or scene complexity outgrow the focused wgpu path, this
+  decision should be revisited with a concrete Bevy spike.
+
 ### ADR-P001: First model provider
 
 Options:

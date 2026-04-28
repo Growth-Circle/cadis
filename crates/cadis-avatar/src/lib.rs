@@ -155,16 +155,30 @@ pub enum BodyGesture {
     IdleBreath,
     /// Slight forward attention pose.
     AttentiveLean,
+    /// Slight forward lean while listening.
+    ListeningLean,
+    /// Short affirmative head nod.
+    Nod,
+    /// Lateral gaze shift for scanning or curiosity.
+    GazeShift,
     /// Orbiting scan / thinking pose.
     ThinkingOrbit,
+    /// Scanning sweep during thinking.
+    ThinkingScan,
     /// Pulse synced to speech amplitude.
     SpeakingPulse,
+    /// Emphatic hand or body motion while speaking.
+    SpeakingEmphasis,
     /// Focused coding pose with restrained motion.
     CodingFocus,
     /// Approval hold pose.
     ApprovalHold,
+    /// Hand cue acknowledging approval.
+    ApprovalHandCue,
     /// Alert pose for errors.
     ErrorAlert,
+    /// Recoil motion on error or rejection.
+    ErrorRecoil,
 }
 
 /// Gesture priority used when renderers blend or interrupt body motion.
@@ -1062,15 +1076,19 @@ fn body_pose(state: BodyGestureState, audio: f32, face: FacePose, phase: f32) ->
         head_pitch: face.gaze_y * 0.30 * motion_scale,
         shoulder_roll: phase.sin() * 0.04 * motion_scale,
         left_hand: match state.gesture {
-            BodyGesture::SpeakingPulse => clamp01(0.20 + audio * 0.45),
-            BodyGesture::ApprovalHold => 0.38,
-            BodyGesture::ErrorAlert => 0.72,
+            BodyGesture::SpeakingPulse | BodyGesture::SpeakingEmphasis => {
+                clamp01(0.20 + audio * 0.45)
+            }
+            BodyGesture::ApprovalHold | BodyGesture::ApprovalHandCue => 0.38,
+            BodyGesture::ErrorAlert | BodyGesture::ErrorRecoil => 0.72,
             _ => 0.10,
         } * motion_scale,
         right_hand: match state.gesture {
             BodyGesture::CodingFocus => 0.58,
-            BodyGesture::SpeakingPulse => clamp01(0.22 + audio * 0.42),
-            BodyGesture::ErrorAlert => 0.72,
+            BodyGesture::SpeakingPulse | BodyGesture::SpeakingEmphasis => {
+                clamp01(0.22 + audio * 0.42)
+            }
+            BodyGesture::ErrorAlert | BodyGesture::ErrorRecoil => 0.72,
             _ => 0.10,
         } * motion_scale,
     }
@@ -1079,11 +1097,18 @@ fn body_pose(state: BodyGestureState, audio: f32, face: FacePose, phase: f32) ->
 fn gesture_priority(gesture: BodyGesture) -> BodyGesturePriority {
     match gesture {
         BodyGesture::IdleBreath => BodyGesturePriority::Ambient,
-        BodyGesture::ApprovalHold => BodyGesturePriority::Interaction,
-        BodyGesture::ErrorAlert => BodyGesturePriority::Safety,
+        BodyGesture::ApprovalHold | BodyGesture::ApprovalHandCue => {
+            BodyGesturePriority::Interaction
+        }
+        BodyGesture::ErrorAlert | BodyGesture::ErrorRecoil => BodyGesturePriority::Safety,
         BodyGesture::AttentiveLean
+        | BodyGesture::ListeningLean
+        | BodyGesture::Nod
+        | BodyGesture::GazeShift
         | BodyGesture::ThinkingOrbit
+        | BodyGesture::ThinkingScan
         | BodyGesture::SpeakingPulse
+        | BodyGesture::SpeakingEmphasis
         | BodyGesture::CodingFocus => BodyGesturePriority::Activity,
     }
 }
@@ -1138,11 +1163,18 @@ fn gesture_id(gesture: BodyGesture) -> u32 {
     match gesture {
         BodyGesture::IdleBreath => 0,
         BodyGesture::AttentiveLean => 1,
-        BodyGesture::ThinkingOrbit => 2,
-        BodyGesture::SpeakingPulse => 3,
-        BodyGesture::CodingFocus => 4,
-        BodyGesture::ApprovalHold => 5,
-        BodyGesture::ErrorAlert => 6,
+        BodyGesture::ListeningLean => 2,
+        BodyGesture::Nod => 3,
+        BodyGesture::GazeShift => 4,
+        BodyGesture::ThinkingOrbit => 5,
+        BodyGesture::ThinkingScan => 6,
+        BodyGesture::SpeakingPulse => 7,
+        BodyGesture::SpeakingEmphasis => 8,
+        BodyGesture::CodingFocus => 9,
+        BodyGesture::ApprovalHold => 10,
+        BodyGesture::ApprovalHandCue => 11,
+        BodyGesture::ErrorAlert => 12,
+        BodyGesture::ErrorRecoil => 13,
     }
 }
 
@@ -1351,7 +1383,7 @@ mod tests {
 
         assert_eq!(uniforms.version, WGPU_AVATAR_UNIFORM_VERSION);
         assert_eq!(uniforms.mode_id, 5);
-        assert_eq!(uniforms.gesture_id, 5);
+        assert_eq!(uniforms.gesture_id, 10);
         assert_eq!(uniforms.gesture_priority, 2);
         assert_eq!(uniforms.time_seconds, 1.25);
         assert!(!uniforms.flags.tracked_face);
@@ -1463,5 +1495,26 @@ mod tests {
         let json = serde_json::to_string(&frame).expect("frame should serialize");
         assert!(json.contains("\"mode\":\"approval\""));
         assert!(json.contains("\"renderer\":\"wgpu_native\""));
+    }
+
+    #[test]
+    fn face_tracking_defaults_to_off_local_only_permission_gated() {
+        let config = FaceTrackingConfig::default();
+
+        assert_eq!(config.mode, FaceTrackingMode::Off);
+        assert!(config.permission_required);
+        assert!(config.camera_indicator_required);
+        assert!(config.one_click_disable_required);
+
+        let privacy = AvatarPrivacy::default();
+        assert!(privacy.local_only_face_tracking);
+        assert!(!privacy.persist_raw_face_frames);
+        assert!(!privacy.persist_face_landmarks);
+        assert!(!privacy.allow_remote_face_tracking);
+        assert!(!privacy.allow_face_identity);
+
+        // Default engine config must pass privacy validation.
+        let engine_config = AvatarEngineConfig::default();
+        assert!(engine_config.validate_privacy().is_ok());
     }
 }

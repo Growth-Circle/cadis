@@ -2568,4 +2568,50 @@ mod tests {
         assert!(!error.retryable());
         assert!(error.to_string().contains("Codex CLI binary"));
     }
+
+    #[test]
+    fn provider_conformance_echo_provider() {
+        let provider = EchoProvider;
+
+        // name
+        assert_eq!(provider.name(), "echo");
+
+        // chat
+        let deltas = provider.chat("test").expect("echo chat should succeed");
+        assert!(!deltas.is_empty());
+        assert!(deltas.join("").contains("test"));
+
+        // chat_with_request
+        let request = ModelRequest::new("conformance").with_selected_model(Some("echo"));
+        let response = provider
+            .chat_with_request(request)
+            .expect("echo chat_with_request should succeed");
+        assert!(!response.deltas.is_empty());
+        assert_eq!(response.invocation.effective_provider, "echo");
+        assert_eq!(response.invocation.effective_model, "cadis-local-fallback");
+        assert!(!response.invocation.fallback);
+
+        // stream_chat
+        let mut events = Vec::new();
+        let stream_response = provider
+            .stream_chat(ModelRequest::new("stream"), &mut |event| {
+                events.push(event);
+                Ok(ModelStreamControl::Continue)
+            })
+            .expect("echo stream_chat should succeed");
+        assert!(!stream_response.deltas.is_empty());
+        assert!(matches!(events.first(), Some(ModelStreamEvent::Started(_))));
+        assert!(matches!(
+            events.last(),
+            Some(ModelStreamEvent::Completed(_))
+        ));
+        let streamed: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ModelStreamEvent::Delta(d) => Some(d.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(streamed, stream_response.deltas.join(""));
+    }
 }

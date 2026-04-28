@@ -10,6 +10,7 @@ members = [
     "crates/cadis-policy",
     "crates/cadis-protocol",
     "crates/cadis-store",
+    "crates/cadis-telegram",
 ]
 
 [workspace.package]

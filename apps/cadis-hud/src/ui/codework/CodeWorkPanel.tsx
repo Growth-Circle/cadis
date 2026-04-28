@@ -127,11 +127,13 @@ export function CodeWorkPanel() {
 }
 
 /* ── Item 2: Inline diff viewer ─────────────────────────────────── */
-/* TODO: DiffViewer and FileTree removed — worker.artifacts.patch is a file PATH,
-   not diff content. Restore when daemon provides a `worker.artifact.read` request
-   that returns actual diff content for inline rendering. */
+/* TODO [BLOCKED]: Inline diff viewer requires daemon `worker.artifact.read` request
+   (not yet implemented). worker.artifacts.patch is a file PATH, not diff content.
+   Restore DiffViewer when daemon can return actual diff content. */
 
-/* ── Item 3: File tree ──────────────────────────────────────────── */
+/* ── Item 3: Changed-files list & file tree ─────────────────────── */
+/* TODO [BLOCKED]: Changed-files list and file tree require daemon `worker.artifact.read`
+   to enumerate and read worktree contents. Blocked on daemon support. */
 
 /* ── Item 5: Open in editor (Tauri command) ─────────────────────── */
 

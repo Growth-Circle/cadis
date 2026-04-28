@@ -1,5 +1,5 @@
 [package]
-name = "cadis-protocol"
+name = "cadis-telegram"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -8,15 +8,9 @@ homepage.workspace = true
 readme = "README.md"
 
 [dependencies]
+cadis-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name = "protocol_bench"
-harness = false
 
 [lints]
 workspace = true

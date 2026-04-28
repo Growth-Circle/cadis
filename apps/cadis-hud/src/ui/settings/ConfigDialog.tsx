@@ -30,7 +30,7 @@ const TABS: { id: ConfigTab; label: string }[] = [
 ];
 
 const AVATAR_STYLES: { id: AvatarStyle; label: string; detail: string }[] = [
-  { id: "orb", label: "CADIS Orb", detail: "Current RamaClaw-style core" },
+  { id: "orb", label: "CADIS Orb", detail: "Default orbital core" },
   { id: "wulan_arc", label: "Wulan Arc", detail: "Hologram avatar contribution" },
 ];
 
