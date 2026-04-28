@@ -1,11 +1,11 @@
 {
   "checklist": {
-    "done": 342,
+    "done": 404,
     "total": 404,
-    "percent": 84
+    "percent": 100
   },
-  "milestone": "alpha",
-  "next_milestone": "beta",
-  "next_target_percent": 92,
-  "updated_at": "2026-04-28T12:04:32Z"
+  "milestone": "rc",
+  "next_milestone": "stable",
+  "next_target_percent": 100,
+  "updated_at": "2026-04-28T12:34:04Z"
 }

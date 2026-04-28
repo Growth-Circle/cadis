@@ -197,6 +197,61 @@ impl WgpuAvatarRenderPlan {
     }
 }
 
+/// Placeholder for the Wulan portrait shader pipeline.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct WgpuPortraitShader {
+    /// Shader label for diagnostics.
+    pub label: String,
+    /// Alpha cutoff for transparent portrait pixels.
+    pub alpha_cutoff: f32,
+    /// Whether the shader is loaded and ready.
+    pub ready: bool,
+}
+
+/// Placeholder for the Wulan particle system.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct WgpuParticleSystem {
+    /// Maximum particle budget.
+    pub max_particles: u16,
+    /// Particle lifetime in milliseconds.
+    pub lifetime_ms: u32,
+    /// Whether reduced-motion rules apply.
+    pub reduced_motion: bool,
+}
+
+/// Placeholder for the Wulan reticle renderer.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct WgpuReticleRenderer {
+    /// Number of concentric rings.
+    pub ring_count: u8,
+    /// Outer radius in NDC.
+    pub outer_radius: f32,
+    /// Base rotation rate in radians per second.
+    pub rotation_rate: f32,
+}
+
+/// Placeholder for the Wulan eye overlay.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct WgpuEyeOverlay {
+    /// Gaze target x in -1..1.
+    pub gaze_x: f32,
+    /// Gaze target y in -1..1.
+    pub gaze_y: f32,
+    /// Left eyelid openness in 0..1.
+    pub blink_left: f32,
+    /// Right eyelid openness in 0..1.
+    pub blink_right: f32,
+}
+
+/// Placeholder for the Wulan mouth overlay.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+pub struct WgpuMouthOverlay {
+    /// Mouth openness in 0..1.
+    pub mouth_open: f32,
+    /// Whether mouth is driven by speech audio.
+    pub speech_driven: bool,
+}
+
 /// Feature-gated native wgpu renderer spike.
 #[derive(Clone, Debug)]
 pub struct WgpuAvatarSpikeRenderer {
@@ -223,6 +278,19 @@ impl WgpuAvatarSpikeRenderer {
     /// Returns the last adapter plan accepted by this renderer.
     pub fn last_plan(&self) -> Option<&WgpuAvatarRenderPlan> {
         self.last_plan.as_ref()
+    }
+
+    /// Converts an [`AvatarFrame`] into a deterministic render plan.
+    ///
+    /// This is the connection point between the renderer-neutral avatar state
+    /// engine and the direct-wgpu rendering path.
+    pub fn render_frame(
+        &mut self,
+        frame: &AvatarFrame,
+    ) -> Result<WgpuAvatarRenderPlan, AvatarRenderError> {
+        let plan = WgpuAvatarRenderPlan::from_frame(frame, &self.contract, self.config)?;
+        self.last_plan = Some(plan.clone());
+        Ok(plan)
     }
 }
 
@@ -409,5 +477,26 @@ mod tests {
             })
         );
         assert!(renderer.last_plan().is_none());
+    }
+
+    #[test]
+    fn render_frame_converts_avatar_frame_to_plan() {
+        let mut engine = AvatarEngine::new(AvatarEngineConfig::default());
+        let frame = engine.update(AvatarInput {
+            mode: AvatarMode::Speaking,
+            audio_level: 0.6,
+            now_ms: 500,
+            ..AvatarInput::default()
+        });
+        let mut renderer = WgpuAvatarSpikeRenderer::default();
+
+        let plan = renderer
+            .render_frame(&frame)
+            .expect("render_frame should produce a plan");
+
+        assert_eq!(plan.renderer_id, WGPU_SPIKE_RENDERER_ID);
+        assert_eq!(plan.uniforms.mode_id, 3);
+        assert!(plan.particles.count > 0);
+        assert!(renderer.last_plan().is_some());
     }
 }

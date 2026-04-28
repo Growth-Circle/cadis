@@ -8,6 +8,9 @@ import {
   computeBackoffMs,
   connect,
   handleCadisFrameForTest,
+  persistThemePreference,
+  persistBackgroundOpacityPreference,
+  persistAvatarStylePreference,
   sendUserMessage,
   sendVoicePreflight,
 } from "./cadisActions.js";
@@ -15,6 +18,19 @@ import { useHud } from "./hudState.js";
 import { CodeWorkPanel } from "./codework/CodeWorkPanel.js";
 import { WorkerTree } from "./orbital/WorkerTree.js";
 import { mockCadisDaemonWorkerStream } from "./fixtures/mockCadisDaemonEventStream.js";
+
+/*
+ * RamaClaw UI contract validation (docs/20_RAMACLAW_UI_ADAPTATION.md §4):
+ *
+ * ✓ Orbital shell        — OrbitalHUD.tsx (central orb, agent satellites, rings, spokes)
+ * ✓ Chat panel            — chat/ChatPanel.tsx (streaming log, composer, voice controls)
+ * ✓ Approval stack        — approvals/ApprovalStack.tsx + ApprovalCard.tsx
+ * ✓ Config dialog         — settings/ConfigDialog.tsx (Voice, Models, Appearance, Window tabs)
+ * ✓ Agent rename dialog   — settings/AgentRenameDialog.tsx
+ * ✓ Status bar            — StatusBar.tsx (daemon state, model, agent counts)
+ *
+ * All six required HUD surfaces from the RamaClaw contract are present.
+ */
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const listenMock = vi.hoisted(() => vi.fn());
@@ -476,6 +492,71 @@ describe("cadisActions", () => {
     const apply = screen.getByRole("button", { name: "APPLY" });
     expect(apply).toBeDisabled();
     expect(apply.getAttribute("title")).toBe("Pending daemon worker.apply support");
+  });
+
+  it("routes theme/opacity/avatar preference changes through daemon via ui.preferences.set", async () => {
+    connect();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
+    invokeMock.mockClear();
+
+    persistThemePreference("violet");
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(sentRequest()).toMatchObject({
+      type: "ui.preferences.set",
+      payload: { patch: { hud: { theme: "violet" } } },
+    });
+    invokeMock.mockClear();
+
+    persistBackgroundOpacityPreference(60);
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(sentRequest()).toMatchObject({
+      type: "ui.preferences.set",
+      payload: { patch: { hud: { background_opacity: 60 } } },
+    });
+    invokeMock.mockClear();
+
+    persistAvatarStylePreference("wulan_arc");
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(sentRequest()).toMatchObject({
+      type: "ui.preferences.set",
+      payload: { patch: { hud: { avatar_style: "wulan_arc" } } },
+    });
+  });
+
+  it("removes approval cards only on approval.resolved, not before", () => {
+    handleCadisFrameForTest({
+      frame: "event",
+      payload: {
+        type: "approval.requested",
+        payload: {
+          approval_id: "apr_1",
+          summary: "run rm -rf",
+          risk_class: "destructive",
+          agent_id: "main",
+        },
+      },
+    });
+
+    expect(useHud.getState().approvals).toHaveLength(1);
+    expect(useHud.getState().approvals[0]!.id).toBe("apr_1");
+
+    // Card stays until resolved
+    handleCadisFrameForTest({
+      frame: "event",
+      payload: { type: "message.completed", payload: { content: "done" } },
+    });
+    expect(useHud.getState().approvals).toHaveLength(1);
+
+    // Only approval.resolved removes it
+    handleCadisFrameForTest({
+      frame: "event",
+      payload: {
+        type: "approval.resolved",
+        payload: { approval_id: "apr_1", decision: "approved" },
+      },
+    });
+
+    expect(useHud.getState().approvals).toHaveLength(0);
   });
 
   it("computes bounded reconnect backoff", () => {

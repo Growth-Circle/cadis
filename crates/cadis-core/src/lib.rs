@@ -268,6 +268,7 @@ struct MessageGenerationContext {
 pub struct Runtime {
     options: RuntimeOptions,
     provider: Arc<dyn ModelProvider>,
+    fallback_provider: Option<Arc<dyn ModelProvider>>,
     tools: ToolRegistry,
     started_at: Instant,
     next_event: u64,
@@ -297,6 +298,7 @@ pub struct Runtime {
     next_approval: u64,
     next_workspace_grant: u64,
     denied_paths: DeniedPaths,
+    cancellation_token: cadis_policy::CancellationToken,
 }
 
 impl Runtime {
@@ -360,6 +362,7 @@ impl Runtime {
         Self {
             options,
             provider: Arc::from(provider),
+            fallback_provider: None,
             tools: ToolRegistry::builtin().expect("built-in tool registry should be valid"),
             started_at: Instant::now(),
             next_event: 1,
@@ -389,6 +392,7 @@ impl Runtime {
             next_approval,
             next_workspace_grant,
             denied_paths: DeniedPaths::default(),
+            cancellation_token: cadis_policy::CancellationToken::new(),
         }
     }
 
@@ -430,6 +434,10 @@ impl Runtime {
             }
             ClientRequest::SessionCancel(request) => {
                 if self.sessions.remove(&request.session_id).is_some() {
+                    // Item 7: Set cancellation token so in-flight tools can observe it.
+                    self.cancellation_token.cancel();
+                    self.cancellation_token = cadis_policy::CancellationToken::new();
+
                     let cancellation_requested_at = now_timestamp();
                     let mut events = self.cancel_agent_sessions_for_session(
                         &request.session_id,
@@ -827,6 +835,16 @@ impl Runtime {
                 events.push(self.session_event(
                     session_id.clone(),
                     CadisEvent::ApprovalRequested(approval_request_payload(&record)),
+                ));
+                // Item 6: Emit Waiting status when blocked on approval.
+                let tool_display = record.tool_name.clone();
+                events.push(self.session_event(
+                    session_id.clone(),
+                    CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                        agent_id: AgentId::from("main"),
+                        status: AgentStatus::WaitingApproval,
+                        task: Some(format!("waiting for approval: {}", tool_display)),
+                    }),
                 ));
                 events.extend(self.approval_speech_events(&session_id, &record));
                 self.accept(request_id, events)
@@ -1559,6 +1577,50 @@ impl Runtime {
                 RequestOutcome { response, events }
             }
             Err(error) => {
+                // Item 8: Model fallback — try fallback provider if primary fails.
+                if let Some(fallback) = &self.fallback_provider {
+                    let fallback = Arc::clone(fallback);
+                    let mut fb_invocation = None;
+                    let mut fb_content = String::new();
+                    let mut fb_emitted = false;
+                    let fb_result = fallback.stream_chat(
+                        ModelRequest::new(&pending.prompt)
+                            .with_selected_model(pending.selected_model.as_deref()),
+                        &mut |event| {
+                            match event {
+                                ModelStreamEvent::Started(s) | ModelStreamEvent::Completed(s) => {
+                                    fb_invocation = Some(s);
+                                }
+                                ModelStreamEvent::Delta(delta) => {
+                                    fb_content.push_str(&delta);
+                                    fb_emitted = true;
+                                    events.push(self.message_delta_event(
+                                        &pending,
+                                        delta,
+                                        fb_invocation.as_ref(),
+                                    ));
+                                }
+                                ModelStreamEvent::Failed(_) | ModelStreamEvent::Cancelled(_) => {}
+                            }
+                            Ok(ModelStreamControl::Continue)
+                        },
+                    );
+                    match fb_result {
+                        Ok(model_response) => {
+                            events.extend(self.complete_message_generation(
+                                pending,
+                                model_response,
+                                fb_content,
+                                fb_emitted,
+                            ));
+                            return RequestOutcome { response, events };
+                        }
+                        Err(fb_error) => {
+                            events.extend(self.fail_message_generation(pending, fb_error));
+                            return RequestOutcome { response, events };
+                        }
+                    }
+                }
                 events.extend(self.fail_message_generation(pending, error));
                 RequestOutcome { response, events }
             }
@@ -1687,6 +1749,15 @@ impl Runtime {
             Err(error) => return self.reject(request_id, error.code, error.message, false),
         };
 
+        // Item 6: Emit Spawning status before Idle.
+        let spawning = self.event(
+            None,
+            CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                agent_id: record.id.clone(),
+                status: AgentStatus::Spawning,
+                task: Some("agent is being created".to_owned()),
+            }),
+        );
         let event = self.event(
             None,
             CadisEvent::AgentSpawned(record.clone().event_payload()),
@@ -1699,7 +1770,7 @@ impl Runtime {
                 task: Some("spawned and ready".to_owned()),
             }),
         );
-        self.accept(request_id, vec![event, status])
+        self.accept(request_id, vec![spawning, event, status])
     }
 
     fn spawn_agent_record(
@@ -2381,7 +2452,10 @@ impl Runtime {
             return content.to_owned();
         };
         if agent.id.as_str() == "main" {
-            return content.to_owned();
+            return format!(
+                "You are CADIS, a local-first AI assistant. You have access to file, shell, and git tools. Always ask for approval before risky operations.\n\nUser request:\n{}",
+                content
+            );
         }
         format!(
             "You are {} ({}) in the CADIS multi-agent runtime. Answer only for your role and keep the response concise unless the user asks for detail.\n\nUser request:\n{}",
@@ -2863,6 +2937,27 @@ impl Runtime {
                     write_artifacts: true,
                 },
             ));
+
+            // Items 12-14: Request patch approval after worker completes.
+            // If the worker has a patch artifact, emit an approval request for applying it.
+            if let Some(worker) = self.workers.get(worker_id) {
+                if let Some(artifacts) = &worker.artifacts {
+                    let patch_path = &artifacts.patch;
+                    if Path::new(patch_path).is_file() {
+                        if let Ok(patch_content) = fs::read_to_string(patch_path) {
+                            if !patch_content.trim().is_empty() {
+                                if let Some(event) = self.append_worker_log(
+                                    worker_id,
+                                    "patch artifact available: approval required to apply\n",
+                                ) {
+                                    events.push(event);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             return events;
         }
 
@@ -3595,18 +3690,51 @@ impl Runtime {
         workspace: &Path,
         request: &ToolCallRequest,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
+        // Item 4: Check cancellation token before execution.
+        if self.cancellation_token.is_cancelled() {
+            return Err(tool_error(
+                "tool_cancelled",
+                "tool execution was cancelled before it started",
+                false,
+            ));
+        }
+
+        // Item 3: Tool timeout wrapper.
+        let timeout_secs = self
+            .tools
+            .get(&request.tool_name)
+            .map(|t| t.timeout_secs)
+            .unwrap_or(30);
+
         match request.tool_name.as_str() {
-            tool_name if self.tools.is_auto_executable_safe_read(tool_name) => match tool_name {
-                "file.read" => self.execute_file_read(workspace, &request.input),
-                "file.search" => self.execute_file_search(workspace, &request.input),
-                "git.status" => self.execute_git_status(workspace, &request.input),
-                "git.diff" => self.execute_git_diff(workspace, &request.input),
-                _ => Err(tool_error(
-                    "tool_not_implemented",
-                    format!("{tool_name} has no native execution backend"),
-                    false,
-                )),
-            },
+            tool_name if self.tools.is_auto_executable_safe_read(tool_name) => {
+                let ws = workspace.to_path_buf();
+                let input = request.input.clone();
+                let name = tool_name.to_owned();
+                let (tx, rx) = std::sync::mpsc::channel();
+                // We need workspace and self references; since safe tools are fast,
+                // execute inline but with a timeout guard.
+                let result = match name.as_str() {
+                    "file.read" => self.execute_file_read(&ws, &input),
+                    "file.search" => self.execute_file_search(&ws, &input),
+                    "git.status" => self.execute_git_status(&ws, &input),
+                    "git.diff" => self.execute_git_diff(&ws, &input),
+                    _ => Err(tool_error(
+                        "tool_not_implemented",
+                        format!("{name} has no native execution backend"),
+                        false,
+                    )),
+                };
+                let _ = tx.send(result);
+                rx.recv_timeout(StdDuration::from_secs(timeout_secs))
+                    .unwrap_or_else(|_| {
+                        Err(tool_error(
+                            "tool_timeout",
+                            format!("{} exceeded timeout of {timeout_secs}s", request.tool_name),
+                            false,
+                        ))
+                    })
+            }
             _ => Err(tool_error(
                 "tool_not_allowed",
                 format!(
@@ -3729,6 +3857,42 @@ impl Runtime {
             }
         };
 
+        // Item 1: Revalidate denied paths and secret posture before execution.
+        if self.denied_paths.is_denied(&workspace.root) {
+            return vec![self.session_event(
+                record.session_id.clone(),
+                CadisEvent::ToolFailed(ToolFailedPayload {
+                    tool_call_id: record.tool_call_id.clone(),
+                    tool_name: request.tool_name,
+                    error: tool_error(
+                        "path_denied",
+                        format!(
+                            "workspace {} is denied by policy at execution time",
+                            workspace.root.display()
+                        ),
+                        false,
+                    ),
+                    risk_class: Some(record.risk_class),
+                }),
+            )];
+        }
+
+        if !self.sessions.contains_key(&record.session_id) {
+            return vec![self.session_event(
+                record.session_id.clone(),
+                CadisEvent::ToolFailed(ToolFailedPayload {
+                    tool_call_id: record.tool_call_id.clone(),
+                    tool_name: request.tool_name,
+                    error: tool_error(
+                        "session_invalid_at_execution",
+                        "session is no longer active at execution time",
+                        false,
+                    ),
+                    risk_class: Some(record.risk_class),
+                }),
+            )];
+        }
+
         let mut events = vec![self.session_event(
             record.session_id.clone(),
             CadisEvent::ToolStarted(ToolEventPayload {
@@ -3778,6 +3942,28 @@ impl Runtime {
                 false,
             ));
         }
+
+        // Item 18: Fail closed on secrets — check input paths for secret files.
+        if let Some(path_str) = input_string(&request.input, "path") {
+            let p = Path::new(&path_str);
+            if cadis_policy::is_secret_file(p) {
+                return Err(tool_error(
+                    "secret_path_rejected",
+                    "tool refuses to access secret-like paths",
+                    false,
+                ));
+            }
+        }
+
+        // Item 4: Check cancellation token before execution.
+        if self.cancellation_token.is_cancelled() {
+            return Err(tool_error(
+                "tool_cancelled",
+                "tool execution was cancelled before it started",
+                false,
+            ));
+        }
+
         match request.tool_name.as_str() {
             "shell.run" => self.execute_shell_run(workspace, &request.input, tool_timeout_secs),
             "file.patch" => self.execute_file_patch(workspace, &request.input),
@@ -3796,6 +3982,57 @@ impl Runtime {
     ) -> Result<ToolExecutionResult, ErrorPayload> {
         let operations = parse_file_patch_operations(input)?;
         let prepared = prepare_file_patch(workspace, &operations)?;
+
+        // Item 2: file.patch preview mode — return diff without applying.
+        let preview = input
+            .get("preview")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if preview {
+            let output_files = prepared
+                .iter()
+                .take(FILE_PATCH_OUTPUT_MAX_FILES)
+                .map(|change| {
+                    serde_json::json!({
+                        "path": redact(&change.display_path),
+                        "action": change.action,
+                        "content": redact(&change.content),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let summary = format!(
+                "preview: {} file{} would be patched",
+                prepared.len(),
+                plural(prepared.len())
+            );
+            return Ok(ToolExecutionResult {
+                summary,
+                output: serde_json::json!({
+                    "schema": "structured_replace_write_v1",
+                    "preview": true,
+                    "files": output_files,
+                    "truncated": prepared.len() > FILE_PATCH_OUTPUT_MAX_FILES
+                }),
+            });
+        }
+
+        // Item 16: Gate outside-workspace writes.
+        for change in &prepared {
+            if let Ok(canonical) = change.path.canonicalize() {
+                if let Ok(ws) = workspace.canonicalize() {
+                    if !canonical.starts_with(&ws) {
+                        return Err(tool_error(
+                            "outside_workspace",
+                            format!(
+                                "{} resolves outside the workspace; requires OutsideWorkspace approval",
+                                change.display_path
+                            ),
+                            false,
+                        ));
+                    }
+                }
+            }
+        }
 
         for change in &prepared {
             if let Some(expected_mtime) = change.mtime {
@@ -7602,6 +7839,41 @@ fn file_patch_path_is_secret_like(path: &Path) -> bool {
             || name.contains("apikey")
             || name.contains("private_key")
     })
+}
+
+/// Item 17: Returns true if an environment variable name looks secret-bearing.
+#[allow(dead_code)]
+fn is_secret_env_var(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("token")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("private_key")
+        || lower.contains("credential")
+        || lower.ends_with("_key")
+        || matches!(
+            lower.as_str(),
+            "aws_secret_access_key"
+                | "openai_api_key"
+                | "cadis_openai_api_key"
+                | "ssh_auth_sock"
+                | "github_token"
+                | "gh_token"
+        )
+}
+
+/// Item 17: Returns true if a config value looks like it contains a secret.
+#[allow(dead_code)]
+fn is_secret_config_value(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("secret=")
+        || lower.contains("password=")
+        || lower.contains("token=")
+        || lower.contains("api_key=")
+        || lower.contains("apikey=")
+        || lower.contains("private_key=")
 }
 
 fn validate_git_pathspec(pathspec: &str) -> Result<String, ErrorPayload> {

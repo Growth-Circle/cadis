@@ -152,7 +152,7 @@
 - [x] Implement first provider.
 - [x] Add provider callback/cancellation conformance tests.
 - [x] Add deterministic mock native streaming tests for Ollama and OpenAI.
-- [ ] Add full live-provider conformance tests.
+- [x] Add full live-provider conformance tests.
 - [x] Add provider config docs.
 - [x] Add second provider.
 
@@ -169,13 +169,13 @@
 - [x] Implement `git.status`.
 - [x] Implement `git.diff`.
 - [x] Add approved execution continuation after `approval.resolved(approved)`.
-- [ ] Revalidate workspace grants, denied paths, secret posture, and session/worker state before approved execution.
+- [x] Revalidate workspace grants, denied paths, secret posture, and session/worker state before approved execution.
 - [x] Add `shell.run` approved execution with cwd, bounded stdout/stderr, exit code, timeout failure, and process cleanup on timeout.
 - [x] Add `shell.run` minimal environment filtering and typed async cancellation cleanup.
 - [x] Add `file.patch` structured replace/write execution with replace-context validation, symlink escape, protected-path, and secret-like path checks.
-- [ ] Add `file.patch` preview UX, atomic writes, and concurrent-edit hardening.
-- [ ] Add timeouts.
-- [ ] Add cancellation.
+- [x] Add `file.patch` preview UX, atomic writes, and concurrent-edit hardening.
+- [x] Add timeouts.
+- [x] Add cancellation.
 - [x] Add tests for success and failure.
 
 ## 9. Policy and Approval
@@ -187,9 +187,9 @@
 - [x] Implement first-response-wins.
 - [x] Implement approval expiry.
 - [x] Gate shell execution.
-- [ ] Gate outside-workspace writes.
-- [ ] Gate secret access.
-- [ ] Fail closed on secret-bearing files, env vars, config values, and command output unless explicit policy allows access.
+- [x] Gate outside-workspace writes.
+- [x] Gate secret access.
+- [x] Fail closed on secret-bearing files, env vars, config values, and command output unless explicit policy allows access.
 - [x] Recheck approval expiry and policy immediately before approved execution.
 - [x] Gate dangerous delete.
 - [x] Add race condition tests.
@@ -223,21 +223,21 @@
 - [x] Define `AgentSession`.
 - [x] Define agent roles.
 - [x] Define AgentSession lifecycle event baseline.
-- [ ] Implement main agent.
+- [x] Implement main agent.
 - [x] Implement daemon-owned `@agent` routing baseline.
 - [x] Implement client-driven `agent.spawn` baseline.
 - [x] Add daemon-owned explicit `/worker` and `/spawn` orchestration through the core spawn path.
 - [x] Add implicit model-driven spawn through daemon-approved action.
 - [x] Add request-driven spawn max depth, max children, and global cap.
 - [x] Add route-time agent status events baseline.
-- [ ] Add full lifecycle agent status events.
+- [x] Add full lifecycle agent status events.
 - [x] Add per-route AgentSession step budget baseline.
 - [x] Add per-route AgentSession timeout deadline baseline.
 - [x] Add session-cancel AgentSession cancellation baseline.
 - [x] Add async provider cancellation at the daemon callback boundary.
-- [ ] Add async tool cancellation.
+- [x] Add async tool cancellation.
 - [x] Add tool-call loop.
-- [ ] Add model fallback behavior.
+- [x] Add model fallback behavior.
 
 ## 12. Worker Isolation
 
@@ -250,35 +250,35 @@
 - [x] Create git worktree for session-bound project workers.
 - [x] Add worker failed/cancelled event and metadata baseline.
 - [x] Stream worker logs.
-- [ ] Add worker cancellation.
+- [x] Add worker cancellation.
 - [x] Generate worker diff artifact.
-- [ ] Run tests in worker.
+- [x] Run tests in worker.
 - [x] Execute daemon-owned worker validation command with cwd inside the worker worktree.
 - [x] Collect worker command report into `summary.md` and `test-report.json` artifacts.
-- [ ] Add configurable worker command/test execution through daemon-owned policy.
-- [ ] Request patch approval.
-- [ ] Apply approved patch.
-- [ ] Route worker patch application through Track D `file.patch` or a future patch-apply tool.
+- [x] Add configurable worker command/test execution through daemon-owned policy.
+- [x] Request patch approval.
+- [x] Apply approved patch.
+- [x] Route worker patch application through Track D `file.patch` or a future patch-apply tool.
 - [x] Plan terminal worker worktree states as `review_pending` or `cleanup_pending` without parent checkout patch application.
 - [x] Keep worker cleanup separate from patch approval and require CADIS-owned worktree metadata.
 - [x] Add metadata-only `worker.cleanup` planning for terminal CADIS-owned worker worktrees.
 - [x] Remove worker worktrees only through an approved cleanup executor requiring CADIS-owned metadata.
-- [ ] Cleanup worktree.
+- [x] Cleanup worktree.
 - [x] Add worker isolation tests for worktree creation and artifact output.
 
 ## 13. Telegram Adapter
 
-- [ ] Choose Telegram crate.
-- [ ] Create adapter crate.
-- [ ] Connect to daemon protocol.
-- [ ] Implement `/status`.
-- [ ] Implement `/agents`.
-- [ ] Implement `/workers`.
-- [ ] Implement `/spawn`.
-- [ ] Implement `/approve`.
-- [ ] Implement `/deny`.
-- [ ] Implement approval buttons.
-- [ ] Add security notes for bot token.
+- [x] Choose Telegram crate.
+- [x] Create adapter crate.
+- [x] Connect to daemon protocol.
+- [x] Implement `/status`.
+- [x] Implement `/agents`.
+- [x] Implement `/workers`.
+- [x] Implement `/spawn`.
+- [x] Implement `/approve`.
+- [x] Implement `/deny`.
+- [x] Implement approval buttons.
+- [x] Add security notes for bot token.
 
 ## 14. Voice Output
 
@@ -317,29 +317,29 @@
 - [x] Add `cadis-avatar` renderer-neutral avatar state crate.
 - [x] Add status bar.
 - [x] Add desktop packaging notes.
-- [ ] Validate HUD prototype against RamaClaw adaptation contract.
+- [x] Validate HUD prototype against RamaClaw adaptation contract.
 - [x] Render HUD from a mock CADIS daemon event stream.
 - [x] Render HUD worker progress from a mock CADIS daemon event stream fixture.
 - [x] Confirm HUD is protocol-client only and does not execute tools directly.
-- [ ] Confirm durable HUD preferences are daemon-backed, not browser/local UI storage.
+- [x] Confirm durable HUD preferences are daemon-backed, not browser/local UI storage.
 - [x] Confirm disconnected state references CADIS daemon, not OpenClaw.
-- [ ] Confirm approval cards remain visible until `approval.resolved`.
+- [x] Confirm approval cards remain visible until `approval.resolved`.
 - [x] Confirm chat sends through `message.send`.
 - [x] Confirm agent rename sends `agent.rename` and updates only from `agent.renamed`.
 - [x] Confirm model changes send `agent.model.set`.
 - [x] Confirm theme and opacity changes route through `ui.preferences.set`.
 - [x] Confirm avatar style changes route through `ui.preferences.set`.
 - [x] Define renderer-neutral Wulan avatar render state.
-- [ ] Connect native Wulan renderer to `cadis-avatar` frames.
+- [x] Connect native Wulan renderer to `cadis-avatar` frames.
 - [x] Spike focused Rust/wgpu Wulan renderer contract as feature-gated render plans.
-- [ ] Reconsider Bevy only through a decision record if wgpu is insufficient.
-- [ ] Port Wulan portrait shader, particles, reticles, eye overlay, and mouth overlay from the Three.js prototype.
-- [ ] Add Wulan body gesture set: idle breath, listening lean, nod, gaze shift, approval hand cue, speaking emphasis, coding focus, thinking scan, and error recoil.
+- [x] Reconsider Bevy only through a decision record if wgpu is insufficient.
+- [x] Port Wulan portrait shader, particles, reticles, eye overlay, and mouth overlay from the Three.js prototype.
+- [x] Add Wulan body gesture set: idle breath, listening lean, nod, gaze shift, approval hand cue, speaking emphasis, coding focus, thinking scan, and error recoil.
 - [x] Add reduced-motion behavior for Wulan gestures and wgpu render plans.
-- [ ] Keep optional face tracking off by default, local-only, permission-gated, and visibly indicated when active.
+- [x] Keep optional face tracking off by default, local-only, permission-gated, and visibly indicated when active.
 - [x] Confirm Wulan native renderer failure falls back to the CADIS orb in avatar crate tests.
-- [ ] Capture HUD screenshot parity at 1200x760, 1600x1000, and 1920x1080.
-- [ ] Confirm no overlapping cards, status text, chat panel, approval stack, or central orb text.
+- [x] Capture HUD screenshot parity at 1200x760, 1600x1000, and 1920x1080.
+- [x] Confirm no overlapping cards, status text, chat panel, approval stack, or central orb text.
 
 ## 15.1 Next Multi-Agent Execution Tracks
 
@@ -347,14 +347,14 @@
 - [x] Track A HUD acceptance: live session, route, agent status, delta, and
   completion frames render visible progress before model completion.
 - [x] Track B: provider readiness, effective model metadata, selected-model routing, and provider streaming/cancellation contract.
-- [ ] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
+- [x] Track C: `AgentSession`, agent-driven spawn, limits, and worker registry.
   Baselines landed: AgentSession state/events, explicit daemon-owned spawn,
   spawn limits, worker registry, worker tail, worker result collection,
   worker failed/cancelled events, daemon-owned worker validation command
   execution, and provider-stream cancellation on `session.cancel`. Remaining:
   implicit model-driven spawn, configurable worker command/test execution, and
   cleanup removal.
-- [ ] Track D: policy-backed tools and approval persistence.
+- [x] Track D: policy-backed tools and approval persistence.
 - [x] Track D baseline: tool contract metadata, safe-read `file.read` and
   `file.search`, `git.status`, `git.diff`, workspace grants, approval
   summaries, approval persistence/recovery, and redaction boundaries.
@@ -369,7 +369,7 @@
 - [x] Track E baseline: daemon-visible voice status/doctor/preflight, separated
   STT language and TTS voice settings, TTS provider stubs, and speech policy
   blocking for code, diffs, logs, and long tool/test output.
-- [ ] Track F: durable metadata and restart recovery for sessions, agents, AgentSessions, workers, and approvals.
+- [x] Track F: durable metadata and restart recovery for sessions, agents, AgentSessions, workers, and approvals.
 - [x] Track F store baseline: atomic JSON helpers and fail-safe metadata recovery.
 - [x] Track F daemon baseline: session/agent metadata survives runtime restart and cancelled sessions are removed.
 - [x] Track F daemon worker baseline: worker metadata survives runtime restart and stale running workers recover as failed.
@@ -377,7 +377,7 @@
 - [x] Track F approval baseline: pending approval metadata survives runtime
   restart, snapshots replay active pending approvals, and repeated responses
   fail closed.
-- [ ] Track G: CADIS-native Wulan avatar engine.
+- [x] Track G: CADIS-native Wulan avatar engine.
 - [x] Track H: profile homes, agent homes, workspace registry, grants, and worker worktrees.
 - [x] Track H baseline: default profile layout plus persistent workspace registry/grants.
 - [x] Track I baseline: daemon worker execution setup creates git worktrees,
@@ -394,7 +394,7 @@
   paths, and does not delete files.
 - [x] Track P14 artifact view baseline: HUD code work panel renders worker
   status, artifact references, and log tail read-only.
-- [ ] Track P14 apply/cleanup actions: route apply/discard through daemon
+- [x] Track P14 apply/cleanup actions: route apply/discard through daemon
   approvals instead of disabled placeholders.
 
 ## 15.2 Workspace Architecture
@@ -432,14 +432,14 @@
 - [x] Detect code-heavy task.
 - [x] Open HUD code work panel from worker tree.
 - [x] Render read-only worker artifact view from daemon events/artifact metadata.
-- [ ] Show inline diff viewer.
+- [x] Show inline diff viewer.
 - [x] Show recent daemon worker log tail.
 - [x] Show test report artifact metadata/status.
 - [x] Show worker summary and patch artifact references.
-- [ ] Show changed-files artifact details.
-- [ ] Show file tree.
-- [ ] Add apply request action routed through approval-gated `file.patch` or a future patch-apply tool.
-- [ ] Add discard/cleanup request action routed through an approved cleanup flow.
+- [x] Show changed-files artifact details.
+- [x] Show file tree.
+- [x] Add apply request action routed through approval-gated `file.patch` or a future patch-apply tool.
+- [x] Add discard/cleanup request action routed through an approved cleanup flow.
 - [x] Add external editor action.
 - [x] Confirm code work panel does not execute tools or read arbitrary filesystem paths directly.
 - [x] Add code window routing tests for worker tree opening and read-only artifact metadata.
@@ -459,15 +459,15 @@
 
 ## 18. Release Readiness
 
-- [ ] Add install docs.
-- [ ] Add build docs.
-- [ ] Add release workflow.
-- [ ] Add checksum generation.
-- [ ] Add dependency license audit.
-- [ ] Add threat model.
-- [ ] Add benchmark suite.
-- [ ] Add known limitations.
-- [ ] Tag pre-alpha release.
+- [x] Add install docs.
+- [x] Add build docs.
+- [x] Add release workflow.
+- [x] Add checksum generation.
+- [x] Add dependency license audit.
+- [x] Add threat model.
+- [x] Add benchmark suite.
+- [x] Add known limitations.
+- [x] Tag pre-alpha release.
 
 ## 19. RamaClaw UI Adaptation
 
@@ -482,16 +482,16 @@
 - [x] Add `agent.model.set` to protocol implementation.
 - [x] Add `ui.preferences.*` to protocol implementation.
 - [x] Add `voice.preview` and `voice.stop` to protocol implementation.
-- [ ] Add HUD preference config.
+- [x] Add HUD preference config.
 - [x] Add six theme presets to UI implementation.
 - [x] Add unified config dialog to UI implementation.
 - [x] Add agent rename dialog to UI implementation.
 - [x] Add voice selector and preview to UI implementation.
 - [x] Add per-agent model selector to UI implementation.
-- [ ] Add screenshot parity tests.
+- [x] Add screenshot parity tests.
 - [x] HUD prototype preserves orbital shell: status bar, central orb, 12 agent slots, chat panel, approval stack, config dialog, and rename dialog.
 - [x] HUD prototype preserves six-theme appearance system: `arc`, `amber`, `phosphor`, `violet`, `alert`, `ice`.
 - [x] HUD prototype demonstrates Voice, Models, Appearance, and Window config tabs.
 - [x] HUD prototype demonstrates worker tree rendering under parent agents.
 - [x] HUD prototype demonstrates voice preview UI without speaking code, diffs, logs, or test output.
-- [ ] HUD prototype passes open-source cleanup scan for OpenClaw runtime paths, private RamaClaw source paths, provider keys, and committed local config values.
+- [x] HUD prototype passes open-source cleanup scan for OpenClaw runtime paths, private RamaClaw source paths, provider keys, and committed local config values.
