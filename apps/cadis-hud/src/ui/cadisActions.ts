@@ -226,10 +226,11 @@ export function sendVoicePreflight(report: VoiceDoctorReport, surface = "cadis-h
 
 export function sendApplyPatch(workerId: string, _patchPath?: string): boolean {
   if (!connected) return false;
-  void callCadis("message.send", {
+  void callCadis("tool.call", {
     session_id: null,
-    content: `/apply ${workerId}`,
-    content_kind: "chat",
+    agent_id: null,
+    tool_name: "file.patch",
+    input: { worker_id: workerId },
   }).then((ok) => {
     if (!ok) scheduleReconnect();
   });

@@ -2951,7 +2951,10 @@ impl CheckpointManager {
                 .unwrap_or(&source)
                 .to_string_lossy()
                 .to_string();
-            let dest = checkpoint_dir.join(safe_file_component(&relative));
+            let dest = checkpoint_dir.join("files").join(&relative);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
             fs::copy(&source, &dest)?;
             saved_files.push(relative);
         }
@@ -2986,7 +2989,7 @@ impl CheckpointManager {
         let checkpoint: Checkpoint = serde_json::from_str(&content)?;
 
         for file in &checkpoint.files {
-            let saved = checkpoint_dir.join(safe_file_component(file));
+            let saved = checkpoint_dir.join("files").join(file);
             if saved.is_file() {
                 let target = workspace.join(file);
                 if let Some(parent) = target.parent() {

@@ -162,29 +162,22 @@ fn voice_stt_stop() -> Result<(), String> {
     Ok(())
 }
 
-// Desktop convenience command — not daemon tool execution.
-// Only allows opening paths inside CADIS-owned worktrees to prevent
-// the HUD from spawning arbitrary shell commands on user paths.
 #[tauri::command]
-async fn open_in_editor(path: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        if !path.contains(".cadis/worktrees/") {
-            return Err(
-                "open_in_editor: path must be inside a .cadis/worktrees/ directory".to_owned(),
-            );
-        }
-        let editor = env::var("EDITOR").unwrap_or_else(|_| "code".to_owned());
-        Command::new(&editor)
-            .arg(&path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| format!("could not open editor '{}': {error}", editor))?;
-        Ok(())
-    })
-    .await
-    .map_err(|error| format!("editor worker failed: {error}"))?
+fn open_in_editor(path: String) -> Result<(), String> {
+    // Desktop convenience: open a CADIS-owned worktree in the user's editor.
+    // Validate the canonical path contains a .cadis/worktrees/ segment.
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|e| format!("cannot resolve path: {e}"))?;
+    let canonical_str = canonical.to_string_lossy();
+    if !canonical_str.contains("/.cadis/worktrees/") && !canonical_str.contains("\\.cadis\\worktrees\\") {
+        return Err("path is not inside a CADIS-owned worktree".to_owned());
+    }
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "code".to_owned());
+    std::process::Command::new(&editor)
+        .arg(&canonical)
+        .spawn()
+        .map_err(|e| format!("failed to open editor: {e}"))?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

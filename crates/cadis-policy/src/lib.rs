@@ -224,6 +224,19 @@ pub fn shell_env_allowlist() -> Vec<String> {
     default_shell_env_allowlist()
 }
 
+// ── Risk class matching ───────────────────────────────────────────────
+
+/// Matches a config string against a `RiskClass` using both the serde
+/// serialized name (kebab-case, e.g. `"safe-read"`) and the Debug name
+/// (PascalCase, e.g. `"SafeRead"`).
+fn risk_class_matches(risk_class: RiskClass, name: &str) -> bool {
+    let serde_name = serde_json::to_value(risk_class)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+    name.eq_ignore_ascii_case(&serde_name) || name.eq_ignore_ascii_case(&format!("{risk_class:?}"))
+}
+
 // ── Policy engine ────────────────────────────────────────────────────
 
 /// Default policy engine.
@@ -246,9 +259,8 @@ impl PolicyEngine {
     /// Decides the default behavior for a risk class.
     pub fn decide(&self, risk_class: RiskClass) -> PolicyDecision {
         // Check overrides first.
-        let risk_name = format!("{risk_class:?}");
         for ov in &self.config.risk_overrides {
-            if ov.risk_class.eq_ignore_ascii_case(&risk_name) {
+            if risk_class_matches(risk_class, &ov.risk_class) {
                 return match ov.decision.as_str() {
                     "allow" => PolicyDecision::Allow,
                     "deny" => PolicyDecision::Deny,
