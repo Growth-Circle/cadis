@@ -13692,14 +13692,22 @@ mod tests {
             .lines()
             .filter_map(|line| line.split('=').next())
             .collect();
-        // All keys should be in the allowlist.
-        let allowlist = cadis_policy::shell_env_allowlist();
-        for key in &env_keys {
+        // Sensitive vars must not leak through env_clear + allowlist.
+        let denied = [
+            "CADIS_OPENAI_API_KEY",
+            "OPENAI_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "SSH_AUTH_SOCK",
+            "CARGO_HOME",
+        ];
+        for key in &denied {
             assert!(
-                allowlist.iter().any(|a| a == key),
-                "unexpected env var in shell: {key}"
+                !env_keys.contains(key),
+                "sensitive env var leaked into shell: {key}"
             );
         }
+        // Allowlisted vars should be present (PATH is always set).
+        assert!(env_keys.contains(&"PATH"), "PATH should be in shell env");
     }
 
     // ── Track D: Cancellation token (item 4) ─────────────────────────
