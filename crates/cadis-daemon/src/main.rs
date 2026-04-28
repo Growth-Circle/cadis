@@ -6,6 +6,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
@@ -59,7 +60,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     if args.stdio {
         let stdin = io::stdin();
         let stdout = io::stdout();
-        serve_lines(stdin.lock(), stdout.lock(), runtime, event_log, event_bus)?;
+        let shutdown = AtomicBool::new(false);
+        serve_lines(
+            stdin.lock(),
+            stdout.lock(),
+            runtime,
+            event_log,
+            event_bus,
+            &shutdown,
+        )?;
         return Ok(());
     }
 
@@ -100,24 +109,41 @@ fn run_socket(
 ) -> Result<(), Box<dyn Error>> {
     prepare_socket_path(&socket_path)?;
     let listener = UnixListener::bind(&socket_path)?;
+    listener.set_nonblocking(true)?;
     eprintln!("cadisd listening on {}", socket_path.display());
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
                 let runtime = Arc::clone(&runtime);
                 let event_log = event_log.clone();
                 let event_bus = event_bus.clone();
+                let shutdown = Arc::clone(&shutdown);
                 thread::spawn(move || {
-                    if let Err(error) = serve_unix_stream(stream, runtime, event_log, event_bus) {
+                    if let Err(error) =
+                        serve_unix_stream(stream, runtime, event_log, event_bus, &shutdown)
+                    {
                         eprintln!("cadisd client error: {error}");
                     }
                 });
             }
-            Err(error) => eprintln!("cadisd accept error: {error}"),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => {
+                eprintln!("cadisd accept error: {error}");
+                break;
+            }
         }
     }
 
+    eprintln!("cadisd shutting down");
+    let _ = fs::remove_file(&socket_path);
     Ok(())
 }
 
@@ -126,10 +152,11 @@ fn serve_unix_stream(
     runtime: Arc<Mutex<Runtime>>,
     event_log: EventLog,
     event_bus: EventBus,
+    shutdown: &AtomicBool,
 ) -> Result<(), Box<dyn Error>> {
     let reader = BufReader::new(stream.try_clone()?);
     let writer = BufWriter::new(stream);
-    serve_lines(reader, writer, runtime, event_log, event_bus)
+    serve_lines(reader, writer, runtime, event_log, event_bus, shutdown)
 }
 
 fn serve_lines<R, W>(
@@ -138,6 +165,7 @@ fn serve_lines<R, W>(
     runtime: Arc<Mutex<Runtime>>,
     event_log: EventLog,
     event_bus: EventBus,
+    shutdown: &AtomicBool,
 ) -> Result<(), Box<dyn Error>>
 where
     R: BufRead,
@@ -163,6 +191,17 @@ where
                     _ => None,
                 };
                 let snapshot_only = matches!(envelope.request, ClientRequest::EventsSnapshot(_));
+                if matches!(envelope.request, ClientRequest::DaemonShutdown(_)) {
+                    let response = ResponseEnvelope::new(
+                        envelope.request_id,
+                        DaemonResponse::RequestAccepted(cadis_protocol::RequestAcceptedPayload {
+                            request_id: RequestId::from("daemon.shutdown"),
+                        }),
+                    );
+                    write_frame(&mut writer, &ServerFrame::Response(response))?;
+                    shutdown.store(true, Ordering::SeqCst);
+                    return Ok(());
+                }
                 if matches!(envelope.request, ClientRequest::MessageSend(_)) {
                     let pending = runtime
                         .lock()
@@ -695,13 +734,15 @@ mod tests {
         let accept_event_log = event_log.clone();
         let accept_event_bus = event_bus.clone();
         let accept_thread = thread::spawn(move || {
+            let shutdown = Arc::new(AtomicBool::new(false));
             for _ in 0..4 {
                 let (stream, _) = listener.accept().expect("test client should connect");
                 let runtime = Arc::clone(&accept_runtime);
                 let event_log = accept_event_log.clone();
                 let event_bus = accept_event_bus.clone();
+                let shutdown = Arc::clone(&shutdown);
                 thread::spawn(move || {
-                    let _ = serve_unix_stream(stream, runtime, event_log, event_bus);
+                    let _ = serve_unix_stream(stream, runtime, event_log, event_bus, &shutdown);
                 });
             }
         });
@@ -857,13 +898,15 @@ mod tests {
         let accept_event_log = event_log.clone();
         let accept_event_bus = event_bus.clone();
         let accept_thread = thread::spawn(move || {
+            let shutdown = Arc::new(AtomicBool::new(false));
             for _ in 0..2 {
                 let (stream, _) = listener.accept().expect("test client should connect");
                 let runtime = Arc::clone(&accept_runtime);
                 let event_log = accept_event_log.clone();
                 let event_bus = accept_event_bus.clone();
+                let shutdown = Arc::clone(&shutdown);
                 thread::spawn(move || {
-                    let _ = serve_unix_stream(stream, runtime, event_log, event_bus);
+                    let _ = serve_unix_stream(stream, runtime, event_log, event_bus, &shutdown);
                 });
             }
         });
