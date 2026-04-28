@@ -546,6 +546,22 @@ pub fn classify_dangerous_delete(target_scope: WorkspacePathScope) -> PolicyClas
     PolicyClassification::classified(RiskClass::DangerousDelete, reason)
 }
 
+/// Returns true if the command looks like a dangerous recursive delete.
+pub fn is_dangerous_delete_command(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let parts: Vec<&str> = lower.split_whitespace().collect();
+    parts
+        .iter()
+        .any(|p| *p == "rm" || *p == "rmdir" || *p == "del")
+        && parts.iter().any(|p| {
+            p.contains("-r")
+                || p.contains("--recursive")
+                || *p == "-f"
+                || p.contains("-rf")
+                || p.contains("-fr")
+        })
+}
+
 fn classify_tool(tool_name: &str) -> Option<RiskClass> {
     match tool_name {
         "file.read" | "file.search" | "git.status" => Some(RiskClass::SafeRead),
@@ -742,6 +758,18 @@ decision = "deny"
     }
 
     // ── Track D: Denied path enforcement ─────────────────────────────
+
+    #[test]
+    fn dangerous_delete_command_detection() {
+        assert!(is_dangerous_delete_command("rm -rf /tmp/foo"));
+        assert!(is_dangerous_delete_command("rm -r /tmp/foo"));
+        assert!(is_dangerous_delete_command("rm -f /tmp/foo"));
+        assert!(is_dangerous_delete_command("RM -RF /tmp/foo"));
+        assert!(is_dangerous_delete_command("rm --recursive /tmp/foo"));
+        assert!(!is_dangerous_delete_command("rm /tmp/foo"));
+        assert!(!is_dangerous_delete_command("echo hello"));
+        assert!(!is_dangerous_delete_command("ls -la"));
+    }
 
     #[test]
     fn denied_path_blocks_matching_prefix() {
