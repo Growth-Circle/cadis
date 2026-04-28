@@ -8,6 +8,7 @@ homepage.workspace = true
 readme = "README.md"
 
 [dependencies]
+cadis-policy.workspace = true
 cadis-protocol.workspace = true
 chrono.workspace = true
 regex.workspace = true

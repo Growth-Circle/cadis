@@ -608,6 +608,7 @@ dependencies = [
 name = "cadis-store"
 version = "0.1.0"
 dependencies = [
+ "cadis-policy",
  "cadis-protocol",
  "chrono",
  "regex",

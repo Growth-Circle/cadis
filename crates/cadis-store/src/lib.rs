@@ -2663,10 +2663,7 @@ impl DeniedPaths {
 
     /// Returns `true` if the given path is denied.
     pub fn is_denied(&self, target: &Path) -> bool {
-        let resolved = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-        self.paths
-            .iter()
-            .any(|denied| resolved == *denied || resolved.starts_with(denied))
+        cadis_policy::is_denied_path(target, &self.paths)
     }
 
     /// Checks a path and returns an error if denied.
