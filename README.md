@@ -26,8 +26,8 @@
 </p>
 
 <p align="center">
-  <a href="docs/07_MASTER_CHECKLIST.md"><img alt="Alpha progress" src="https://progress-bar.xyz/dynamic/json/?url=https%3A%2F%2Fraw.githubusercontent.com%2FGrowth-Circle%2Fcadis%2Fmain%2Fdocs%2Fprogress.json&query=checklist.percent&title=alpha+progress&suffix=%25&width=220&color=0d1117&progress_background=161b22&progress_number_color=58a6ff&style=flat"></a>
-  <a href="docs/07_MASTER_CHECKLIST.md"><img alt="Checklist" src="https://progress-bar.xyz/dynamic/json/?url=https%3A%2F%2Fraw.githubusercontent.com%2FGrowth-Circle%2Fcadis%2Fmain%2Fdocs%2Fprogress.json&query=checklist.done&title=checklist&suffix=%20done&scale=500&width=140&style=flat"></a>
+  <a href="docs/07_MASTER_CHECKLIST.md"><img alt="Alpha progress" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FGrowth-Circle%2Fcadis%2Fmain%2Fdocs%2Fprogress.json&query=%24.checklist.percent&suffix=%25&label=alpha%20progress&style=flat&color=58a6ff&logo=target&logoColor=white"></a>
+  <a href="docs/07_MASTER_CHECKLIST.md"><img alt="Checklist" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FGrowth-Circle%2Fcadis%2Fmain%2Fdocs%2Fprogress.json&query=%24.checklist.done&suffix=%20done&label=checklist&style=flat&color=30a14e"></a>
 </p>
 
 <p align="center">
