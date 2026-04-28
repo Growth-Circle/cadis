@@ -26,6 +26,11 @@
 </p>
 
 <p align="center">
+  <a href="docs/07_MASTER_CHECKLIST.md"><img alt="Alpha progress" src="https://progress-bar.xyz/dynamic/json/?url=https%3A%2F%2Fraw.githubusercontent.com%2FGrowth-Circle%2Fcadis%2Fmain%2Fdocs%2Fprogress.json&query=checklist.percent&title=alpha+progress&suffix=%25&width=220&color=0d1117&progress_background=161b22&progress_number_color=58a6ff&style=flat"></a>
+  <a href="docs/07_MASTER_CHECKLIST.md"><img alt="Checklist" src="https://progress-bar.xyz/dynamic/json/?url=https%3A%2F%2Fraw.githubusercontent.com%2FGrowth-Circle%2Fcadis%2Fmain%2Fdocs%2Fprogress.json&query=checklist.done&title=checklist&suffix=%20done&scale=500&width=140&style=flat"></a>
+</p>
+
+<p align="center">
   <img src="docs/assets/readme/cadis-hud-desktop.png" alt="C.A.D.I.S. desktop HUD with orbital agents, voice chat, and model routing" width="920" />
 </p>
 
