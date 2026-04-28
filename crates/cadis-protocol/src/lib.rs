@@ -471,6 +471,9 @@ pub enum ClientRequest {
     /// Reload daemon configuration.
     #[serde(rename = "config.reload")]
     ConfigReload(EmptyPayload),
+    /// Request graceful daemon shutdown.
+    #[serde(rename = "daemon.shutdown")]
+    DaemonShutdown(EmptyPayload),
 }
 
 /// Payload for subscribing to daemon runtime events.

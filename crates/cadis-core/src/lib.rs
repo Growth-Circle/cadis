@@ -579,6 +579,7 @@ impl Runtime {
                 self.accept(request_id, vec![event])
             }
             ClientRequest::ConfigReload(_) => self.accept(request_id, Vec::new()),
+            ClientRequest::DaemonShutdown(_) => self.accept(request_id, Vec::new()),
             ClientRequest::ToolCall(request) => self.handle_tool_call(request_id, request),
             ClientRequest::ApprovalRespond(request) => {
                 self.handle_approval_response(request_id, request)
@@ -3797,6 +3798,22 @@ impl Runtime {
         let prepared = prepare_file_patch(workspace, &operations)?;
 
         for change in &prepared {
+            if let Some(expected_mtime) = change.mtime {
+                if let Ok(meta) = fs::metadata(&change.path) {
+                    if let Ok(current_mtime) = meta.modified() {
+                        if current_mtime != expected_mtime {
+                            return Err(tool_error(
+                                "file_patch_concurrent_edit",
+                                format!(
+                                    "{} was modified since patch was prepared",
+                                    change.display_path
+                                ),
+                                true,
+                            ));
+                        }
+                    }
+                }
+            }
             let parent = change.path.parent();
             let temp_path = match parent {
                 Some(dir) => dir.join(format!(".cadis_patch_{}.tmp", std::process::id())),
@@ -4052,6 +4069,14 @@ impl Runtime {
             return Err(tool_error(
                 "invalid_tool_input",
                 "shell.run command cannot contain NUL bytes",
+                false,
+            ));
+        }
+
+        if cadis_policy::is_dangerous_delete_command(&command) {
+            return Err(tool_error(
+                "dangerous_delete_blocked",
+                "recursive delete commands require explicit dangerous-delete approval",
                 false,
             ));
         }
@@ -5931,6 +5956,7 @@ struct PreparedFilePatch {
     display_path: String,
     action: &'static str,
     content: String,
+    mtime: Option<std::time::SystemTime>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7375,6 +7401,7 @@ fn prepare_file_patch(
     for operation in operations {
         let path = resolve_file_patch_target(workspace, operation.path())?;
         validate_file_patch_target(operation, &path)?;
+        let mtime = fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         let content = match operation {
             FilePatchOperation::Write { content, .. } => content.clone(),
             FilePatchOperation::Replace { old, new, .. } => {
@@ -7392,6 +7419,7 @@ fn prepare_file_patch(
             path,
             action: operation.action(),
             content,
+            mtime,
         });
     }
 
@@ -14201,5 +14229,47 @@ mod tests {
             "unexpected error code: {}",
             err.code
         );
+    }
+
+    #[test]
+    fn dangerous_delete_command_is_blocked() {
+        let workspace = test_workspace("dangerous-delete");
+        let runtime = runtime_with_home(test_workspace("cadis-home-dd"));
+        let input = serde_json::json!({ "command": "rm -rf /tmp/something" });
+        let result = runtime.execute_shell_run(&workspace, &input, 10);
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "dangerous_delete_blocked");
+    }
+
+    #[test]
+    fn file_patch_detects_concurrent_edit() {
+        let workspace = test_workspace("concurrent-edit");
+        let file_path = workspace.join("target.txt");
+        fs::write(&file_path, "original content").expect("write fixture");
+
+        let operations = vec![FilePatchOperation::Replace {
+            path: "target.txt".to_owned(),
+            old: "original".to_owned(),
+            new: "replaced".to_owned(),
+        }];
+        let prepared = prepare_file_patch(&workspace, &operations).expect("prepare should succeed");
+        assert_eq!(prepared.len(), 1);
+        assert!(prepared[0].mtime.is_some());
+
+        // Simulate concurrent edit by modifying the file after prepare.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(&file_path, "modified content").expect("concurrent write");
+
+        // Now execute_file_patch should detect the mtime change.
+        let runtime = runtime_with_home(test_workspace("cadis-home-ce"));
+        let input = serde_json::json!({
+            "path": "target.txt",
+            "op": "replace",
+            "old": "original",
+            "new": "replaced"
+        });
+        let result = runtime.execute_file_patch(&workspace, &input);
+        let err = result.unwrap_err();
+        assert_eq!(err.code, "file_patch_concurrent_edit");
     }
 }
