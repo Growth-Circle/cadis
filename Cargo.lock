@@ -542,6 +542,7 @@ dependencies = [
  "cadis-protocol",
  "cadis-store",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
