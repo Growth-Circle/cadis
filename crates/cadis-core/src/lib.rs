@@ -19,8 +19,8 @@ use cadis_models::{
 use cadis_policy::{PolicyDecision, PolicyEngine};
 use cadis_protocol::{
     AgentEventPayload, AgentId, AgentListPayload, AgentModelChangedPayload, AgentRenamedPayload,
-    AgentSessionEventPayload, AgentSessionId, AgentSessionStatus, AgentSpawnRequest, AgentStatus,
-    AgentStatusChangedPayload, AgentTailRequest, ApprovalDecision, ApprovalId,
+    AgentRole, AgentSessionEventPayload, AgentSessionId, AgentSessionStatus, AgentSpawnRequest,
+    AgentStatus, AgentStatusChangedPayload, AgentTailRequest, ApprovalDecision, ApprovalId,
     ApprovalRequestPayload, ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent,
     ClientRequest, ContentKind, DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope,
     EventId, MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
@@ -30,7 +30,7 @@ use cadis_protocol::{
     ToolFailedPayload, UiPreferencesPayload, VoiceDoctorCheck, VoiceDoctorPayload,
     VoicePreferences, VoicePreflightRequest, VoicePreflightSummary, VoicePreviewRequest,
     VoiceRuntimeState, VoiceStatusPayload, WorkerArtifactLocations, WorkerCleanupRequest,
-    WorkerEventPayload, WorkerLogDeltaPayload, WorkerResultRequest, WorkerTailRequest,
+    WorkerEventPayload, WorkerLogDeltaPayload, WorkerResultRequest, WorkerState, WorkerTailRequest,
     WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent, WorkerWorktreeState, WorkspaceAccess,
     WorkspaceDoctorCheck, WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantId,
     WorkspaceGrantPayload, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload,
@@ -1343,7 +1343,7 @@ impl Runtime {
         if let Some(worker) = &context.worker {
             events.extend(self.complete_worker(
                 &worker.worker_id,
-                "completed",
+                WorkerState::Completed,
                 worker.summary.clone(),
             ));
         }
@@ -1694,13 +1694,16 @@ impl Runtime {
         &mut self,
         request: AgentSpawnRequest,
     ) -> Result<AgentRecord, RuntimeError> {
-        let role = normalize_role(&request.role);
-        if role.is_empty() {
+        let role_str = normalize_role(&request.role);
+        if role_str.is_empty() {
             return Err(RuntimeError {
                 code: "invalid_agent_role",
                 message: "agent role is empty".to_owned(),
             });
         }
+        let role = role_str
+            .parse::<AgentRole>()
+            .unwrap_or(AgentRole::Specialist);
 
         let parent_agent_id = if let Some(parent_agent_id) = request.parent_agent_id {
             if !self.agents.contains_key(&parent_agent_id) {
@@ -1747,12 +1750,12 @@ impl Runtime {
             });
         }
 
-        let agent_id = self.next_agent_id(&role);
+        let agent_id = self.next_agent_id(&role_str);
         let display_name = request
             .display_name
             .as_deref()
             .map(|name| normalize_agent_name(name, &agent_id))
-            .unwrap_or_else(|| default_agent_name(&role, &agent_id));
+            .unwrap_or_else(|| default_agent_name(&role_str, &agent_id));
         let model = request
             .model
             .filter(|model| !model.trim().is_empty())
@@ -2370,7 +2373,7 @@ impl Runtime {
         }
         format!(
             "You are {} ({}) in the CADIS multi-agent runtime. Answer only for your role and keep the response concise unless the user asks for detail.\n\nUser request:\n{}",
-            agent.display_name, agent.role, content
+            agent.display_name, agent.role.as_str(), content
         )
     }
 
@@ -2707,13 +2710,13 @@ impl Runtime {
         let running_count = self
             .workers
             .values()
-            .filter(|r| r.status == "running")
+            .filter(|r| r.status == WorkerState::Running)
             .count();
         let queued = running_count >= self.agent_runtime.max_concurrent_workers;
 
         let mut record = WorkerRecord::from_delegation(session_id, Some(agent_id), worker);
         if queued {
-            record.status = "queued".to_owned();
+            record.status = WorkerState::Queued;
         }
         let worker_id = record.worker_id.clone();
         if !queued {
@@ -2761,7 +2764,7 @@ impl Runtime {
         let running_count = self
             .workers
             .values()
-            .filter(|r| r.status == "running")
+            .filter(|r| r.status == WorkerState::Running)
             .count();
         if running_count >= self.agent_runtime.max_concurrent_workers {
             return Vec::new();
@@ -2770,7 +2773,7 @@ impl Runtime {
         let mut queued_ids: Vec<String> = self
             .workers
             .iter()
-            .filter(|(_, r)| r.status == "queued")
+            .filter(|(_, r)| r.status == WorkerState::Queued)
             .map(|(id, _)| id.clone())
             .collect();
         queued_ids.sort();
@@ -2782,7 +2785,7 @@ impl Runtime {
                 let Some(worker) = self.workers.get_mut(&worker_id) else {
                     continue;
                 };
-                worker.status = "running".to_owned();
+                worker.status = WorkerState::Running;
                 worker.updated_at = now_timestamp();
                 let preparation_logs = prepare_worker_execution(worker);
                 let session_id = worker.session_id.clone();
@@ -2812,10 +2815,10 @@ impl Runtime {
     fn complete_worker(
         &mut self,
         worker_id: &str,
-        status: &str,
+        status: WorkerState,
         summary: String,
     ) -> Vec<EventEnvelope> {
-        if status == "completed" {
+        if status == WorkerState::Completed {
             let mut events = Vec::new();
             let command_result = self.execute_worker_command(worker_id);
             for line in command_result.logs {
@@ -2826,7 +2829,7 @@ impl Runtime {
             if let Some(failure) = command_result.failure {
                 events.extend(self.finish_worker(
                     worker_id,
-                    "failed",
+                    WorkerState::Failed,
                     failure.message.clone(),
                     WorkerFinishOptions {
                         error_code: Some(failure.code),
@@ -2872,7 +2875,7 @@ impl Runtime {
     ) -> Vec<EventEnvelope> {
         self.finish_worker(
             worker_id,
-            "failed",
+            WorkerState::Failed,
             error_message.clone(),
             WorkerFinishOptions {
                 error_code: Some(error_code.to_owned()),
@@ -2891,7 +2894,7 @@ impl Runtime {
         let reason = "session was cancelled".to_owned();
         self.finish_worker(
             worker_id,
-            "cancelled",
+            WorkerState::Cancelled,
             reason.clone(),
             WorkerFinishOptions {
                 error_code: Some("session_cancelled".to_owned()),
@@ -2905,7 +2908,7 @@ impl Runtime {
     fn finish_worker(
         &mut self,
         worker_id: &str,
-        status: &str,
+        status: WorkerState,
         summary: String,
         options: WorkerFinishOptions,
     ) -> Vec<EventEnvelope> {
@@ -2939,7 +2942,7 @@ impl Runtime {
     fn write_worker_artifacts(
         &mut self,
         worker_id: &str,
-        status: &str,
+        status: WorkerState,
         summary: &str,
     ) -> Vec<String> {
         let Some(worker) = self.workers.get_mut(worker_id) else {
@@ -2958,7 +2961,7 @@ impl Runtime {
     fn plan_worker_terminal_cleanup(
         &mut self,
         worker_id: &str,
-        status: &str,
+        status: WorkerState,
     ) -> Vec<EventEnvelope> {
         if !worker_status_is_terminal(status) {
             return Vec::new();
@@ -3324,7 +3327,7 @@ impl Runtime {
     fn update_worker_status(
         &mut self,
         worker_id: &str,
-        status: &str,
+        status: WorkerState,
         summary: Option<String>,
         error_code: Option<String>,
         error: Option<String>,
@@ -3332,7 +3335,7 @@ impl Runtime {
     ) -> Option<EventEnvelope> {
         let (session_id, payload) = {
             let worker = self.workers.get_mut(worker_id)?;
-            worker.status = status.to_owned();
+            worker.status = status;
             if let Some(summary) = summary {
                 worker.summary = Some(redact(&summary));
             }
@@ -4567,7 +4570,7 @@ impl SessionMetadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AgentRecord {
     id: AgentId,
-    role: String,
+    role: AgentRole,
     display_name: String,
     parent_agent_id: Option<AgentId>,
     model: String,
@@ -4577,7 +4580,7 @@ struct AgentRecord {
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 struct AgentMetadata {
     agent_id: AgentId,
-    role: String,
+    role: AgentRole,
     display_name: String,
     parent_agent_id: Option<AgentId>,
     model: String,
@@ -4588,7 +4591,7 @@ impl AgentMetadata {
     fn from_record(record: &AgentRecord) -> Self {
         Self {
             agent_id: record.id.clone(),
-            role: record.role.clone(),
+            role: record.role,
             display_name: record.display_name.clone(),
             parent_agent_id: record.parent_agent_id.clone(),
             model: record.model.clone(),
@@ -4617,7 +4620,7 @@ impl AgentRecord {
         AgentHomeTemplate::new(
             self.id.clone(),
             self.display_name.clone(),
-            self.role.clone(),
+            self.role.as_str().to_owned(),
             self.parent_agent_id.clone(),
             self.model.clone(),
         )
@@ -4626,7 +4629,7 @@ impl AgentRecord {
     fn event_payload(self) -> AgentEventPayload {
         AgentEventPayload {
             agent_id: self.id,
-            role: Some(self.role),
+            role: Some(self.role.as_str().to_owned()),
             display_name: Some(self.display_name),
             parent_agent_id: self.parent_agent_id,
             model: Some(self.model),
@@ -4903,7 +4906,7 @@ struct WorkerRecord {
     agent_id: Option<AgentId>,
     parent_agent_id: Option<AgentId>,
     agent_session_id: Option<AgentSessionId>,
-    status: String,
+    status: WorkerState,
     cli: Option<String>,
     cwd: Option<String>,
     summary: Option<String>,
@@ -4958,7 +4961,7 @@ struct WorkerMetadata {
     agent_id: Option<AgentId>,
     parent_agent_id: Option<AgentId>,
     agent_session_id: Option<AgentSessionId>,
-    status: String,
+    status: WorkerState,
     cli: Option<String>,
     cwd: Option<String>,
     summary: Option<String>,
@@ -4982,7 +4985,7 @@ impl WorkerRecord {
             agent_id,
             parent_agent_id: worker.parent_agent_id.clone(),
             agent_session_id: Some(worker.agent_session_id.clone()),
-            status: "running".to_owned(),
+            status: WorkerState::Running,
             cli: None,
             cwd: None,
             summary: Some(worker.summary.clone()),
@@ -5003,7 +5006,7 @@ impl WorkerRecord {
             agent_id: self.agent_id.clone(),
             parent_agent_id: self.parent_agent_id.clone(),
             agent_session_id: self.agent_session_id.clone(),
-            status: Some(self.status.clone()),
+            status: Some(worker_state_str(self.status)),
             cli: self.cli.clone(),
             cwd: self.cwd.clone(),
             summary: self.summary.clone(),
@@ -5016,7 +5019,7 @@ impl WorkerRecord {
     }
 
     fn is_terminal(&self) -> bool {
-        worker_status_is_terminal(&self.status)
+        worker_status_is_terminal(self.status)
     }
 }
 
@@ -5028,7 +5031,7 @@ impl WorkerMetadata {
             agent_id: record.agent_id.clone(),
             parent_agent_id: record.parent_agent_id.clone(),
             agent_session_id: record.agent_session_id.clone(),
-            status: record.status.clone(),
+            status: record.status,
             cli: record.cli.clone(),
             cwd: record.cwd.clone(),
             summary: record.summary.clone(),
@@ -6103,7 +6106,7 @@ fn reconcile_recovered_workers(
             continue;
         }
 
-        worker.status = "failed".to_owned();
+        worker.status = WorkerState::Failed;
         let summary = match worker.summary.take() {
             Some(summary) if !summary.trim().is_empty() => {
                 format!("{summary} (marked failed during daemon recovery)")
@@ -6113,7 +6116,7 @@ fn reconcile_recovered_workers(
         worker.summary = Some(summary.clone());
         worker.error_code = Some("worker_recovered_stale".to_owned());
         worker.error = Some(summary);
-        plan_worker_terminal_worktree(worker, "failed");
+        plan_worker_terminal_worktree(worker, WorkerState::Failed);
         worker.updated_at = now_timestamp();
 
         match state_store.write_worker_metadata(
@@ -6289,11 +6292,19 @@ fn next_approval_counter(approvals: &HashMap<ApprovalId, ApprovalRecord>) -> u64
         + 1
 }
 
-fn worker_status_is_terminal(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "failed" | "cancelled" | "canceled" | "expired"
-    )
+fn worker_status_is_terminal(status: WorkerState) -> bool {
+    status.is_terminal()
+}
+
+fn worker_state_str(s: WorkerState) -> String {
+    match s {
+        WorkerState::Queued => "queued",
+        WorkerState::Running => "running",
+        WorkerState::Completed => "completed",
+        WorkerState::Failed => "failed",
+        WorkerState::Cancelled => "cancelled",
+    }
+    .to_owned()
 }
 
 fn agent_session_lifecycle_event(payload: AgentSessionEventPayload) -> CadisEvent {
@@ -6310,7 +6321,14 @@ fn agent_session_lifecycle_event(payload: AgentSessionEventPayload) -> CadisEven
 }
 
 fn worker_lifecycle_event(payload: WorkerEventPayload) -> CadisEvent {
-    match payload.status.as_deref().map(worker_lifecycle_event_kind) {
+    let kind = payload.status.as_deref().and_then(|s| match s {
+        "completed" => Some(WorkerLifecycleEventKind::Completed),
+        "cancelled" | "canceled" => Some(WorkerLifecycleEventKind::Cancelled),
+        "failed" => Some(WorkerLifecycleEventKind::Failed),
+        "running" | "queued" => Some(WorkerLifecycleEventKind::Started),
+        _ => None,
+    });
+    match kind {
         Some(WorkerLifecycleEventKind::Completed) => CadisEvent::WorkerCompleted(payload),
         Some(WorkerLifecycleEventKind::Failed) => CadisEvent::WorkerFailed(payload),
         Some(WorkerLifecycleEventKind::Cancelled) => CadisEvent::WorkerCancelled(payload),
@@ -6326,10 +6344,10 @@ enum WorkerLifecycleEventKind {
     Cancelled,
 }
 
-fn worker_lifecycle_event_kind(status: &str) -> WorkerLifecycleEventKind {
+fn worker_lifecycle_event_kind(status: WorkerState) -> WorkerLifecycleEventKind {
     match status {
-        "completed" => WorkerLifecycleEventKind::Completed,
-        "cancelled" | "canceled" => WorkerLifecycleEventKind::Cancelled,
+        WorkerState::Completed => WorkerLifecycleEventKind::Completed,
+        WorkerState::Cancelled => WorkerLifecycleEventKind::Cancelled,
         status if worker_status_is_terminal(status) => WorkerLifecycleEventKind::Failed,
         _ => WorkerLifecycleEventKind::Started,
     }
@@ -6337,7 +6355,7 @@ fn worker_lifecycle_event_kind(status: &str) -> WorkerLifecycleEventKind {
 
 fn worker_terminal_worktree_state(
     record: &WorkerRecord,
-    status: &str,
+    status: WorkerState,
 ) -> Option<WorkerWorktreeState> {
     if !worker_status_is_terminal(status) {
         return None;
@@ -6358,7 +6376,7 @@ fn worker_terminal_worktree_state(
     })
 }
 
-fn plan_worker_terminal_worktree(record: &mut WorkerRecord, status: &str) {
+fn plan_worker_terminal_worktree(record: &mut WorkerRecord, status: WorkerState) {
     let Some(state) = worker_terminal_worktree_state(record, status) else {
         return;
     };
@@ -6527,7 +6545,7 @@ fn default_agents(model_provider: &str) -> HashMap<AgentId, AgentRecord> {
             id.clone(),
             AgentRecord {
                 id,
-                role: role.to_owned(),
+                role: role.parse::<AgentRole>().unwrap_or(AgentRole::Specialist),
                 display_name: display_name.to_owned(),
                 parent_agent_id: None,
                 model: model_provider.to_owned(),
@@ -8461,7 +8479,11 @@ fn worker_command_report_json(report: &WorkerCommandReport) -> serde_json::Value
     })
 }
 
-fn write_worker_artifacts(record: &mut WorkerRecord, status: &str, summary: &str) -> Vec<String> {
+fn write_worker_artifacts(
+    record: &mut WorkerRecord,
+    status: WorkerState,
+    summary: &str,
+) -> Vec<String> {
     let mut logs = Vec::new();
     let Some(artifacts) = record.artifacts.clone() else {
         return logs;
@@ -10635,7 +10657,7 @@ mod tests {
                     agent_id: Some(AgentId::from("codex")),
                     parent_agent_id: Some(AgentId::from("main")),
                     agent_session_id: None,
-                    status: "running".to_owned(),
+                    status: WorkerState::Running,
                     cli: None,
                     cwd: None,
                     summary: Some("stale worker".to_owned()),
@@ -10681,7 +10703,7 @@ mod tests {
             .recover_worker_metadata::<WorkerMetadata>()
             .expect("worker metadata should recover");
         assert_eq!(recovered.records.len(), 1);
-        assert_eq!(recovered.records[0].metadata.status, "failed");
+        assert_eq!(recovered.records[0].metadata.status, WorkerState::Failed);
         assert_eq!(
             recovered.records[0].metadata.error_code.as_deref(),
             Some("worker_recovered_stale")
@@ -10792,7 +10814,7 @@ mod tests {
             .recover_worker_metadata::<WorkerMetadata>()
             .expect("worker metadata should recover");
         assert_eq!(recovered.records.len(), 1);
-        assert_eq!(recovered.records[0].metadata.status, "cancelled");
+        assert_eq!(recovered.records[0].metadata.status, WorkerState::Cancelled);
         assert!(recovered.records[0]
             .metadata
             .cancellation_requested_at
@@ -11099,7 +11121,7 @@ mod tests {
             .iter()
             .find(|record| record.metadata.worker_id == worker_id)
             .expect("worker metadata should exist");
-        assert_eq!(worker.metadata.status, "cancelled");
+        assert_eq!(worker.metadata.status, WorkerState::Cancelled);
         assert_eq!(
             worker
                 .metadata
@@ -13820,7 +13842,7 @@ mod tests {
             agent_id: None,
             parent_agent_id: None,
             agent_session_id: None,
-            status: "running".to_owned(),
+            status: WorkerState::Running,
             cli: None,
             cwd: None,
             summary: None,
