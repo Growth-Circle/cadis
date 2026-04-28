@@ -2712,7 +2712,10 @@ fn default_denied_paths_for_enforcement() -> Vec<PathBuf> {
 pub struct WorktreeCleanupExecutor;
 
 impl WorktreeCleanupExecutor {
-    /// Removes the worktree directory and updates metadata to `Removed`.
+    /// Removes a CADIS-owned worker worktree directory and updates project metadata.
+    ///
+    /// This is a daemon-internal privileged operation exempt from tool policy
+    /// because it only operates on worktrees with CADIS-owned metadata records.
     pub fn execute(
         project_store: &ProjectWorkspaceStore,
         worker_id: &str,
@@ -2798,7 +2801,18 @@ impl MediaManifestStore {
     }
 
     /// Appends one entry and saves.
-    pub fn append(&self, entry: MediaManifestEntry) -> Result<(), StoreError> {
+    pub fn append(&self, mut entry: MediaManifestEntry) -> Result<(), StoreError> {
+        const MANIFEST_FIELD_MAX: usize = 512;
+        const MANIFEST_DESC_MAX: usize = 1024;
+        entry.generated_by = entry
+            .generated_by
+            .chars()
+            .take(MANIFEST_FIELD_MAX)
+            .collect();
+        entry.tool = entry.tool.chars().take(MANIFEST_FIELD_MAX).collect();
+        if let Some(ref desc) = entry.description {
+            entry.description = Some(desc.chars().take(MANIFEST_DESC_MAX).collect());
+        }
         let mut manifest = self.load()?;
         manifest.entries.push(entry);
         self.save(&manifest)
@@ -3817,6 +3831,32 @@ mod tests {
         home.remove_profile("test-profile")
             .expect("profile should be removed");
         assert!(home.remove_profile("test-profile").is_err());
+    }
+
+    #[test]
+    fn media_manifest_truncates_long_fields() {
+        let config = test_config("media-manifest-truncate");
+        let root = config.cadis_home.join("project");
+        fs::create_dir_all(&root).expect("project root should be created");
+        let store = MediaManifestStore::new(&root);
+        let long = "x".repeat(1000);
+        let long_desc = "x".repeat(2000);
+        store
+            .append(MediaManifestEntry {
+                path: PathBuf::from("test.png"),
+                generated_by: long.clone(),
+                tool: long,
+                created_at: "2026-01-01T00:00:00Z".to_owned(),
+                description: Some(long_desc),
+            })
+            .unwrap();
+        let manifest = store.load().unwrap();
+        assert_eq!(manifest.entries[0].generated_by.len(), 512);
+        assert_eq!(manifest.entries[0].tool.len(), 512);
+        assert_eq!(
+            manifest.entries[0].description.as_ref().unwrap().len(),
+            1024
+        );
     }
 
     #[test]

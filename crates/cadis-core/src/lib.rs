@@ -1493,6 +1493,12 @@ impl Runtime {
             .map_err(|error| tool_error(error.code, error.message, false))?;
 
         let mut events = Vec::new();
+        if let Some(event) = self.append_worker_log(
+            worker_id,
+            "cleanup: daemon-internal privileged operation on CADIS-owned worktree\n",
+        ) {
+            events.push(event);
+        }
         if let Some(event) =
             self.append_worker_log(worker_id, "cleanup completed: worktree directory removed\n")
         {
@@ -7756,7 +7762,14 @@ fn normalize_agent_name(value: &str, agent_id: &AgentId) -> String {
 }
 
 fn normalize_role(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
+    let collapsed: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return collapsed;
+    }
+    collapsed
+        .parse::<cadis_protocol::AgentRole>()
+        .map(|r| r.as_str().to_owned())
+        .unwrap_or(collapsed)
 }
 
 fn default_agent_name(role: &str, agent_id: &AgentId) -> String {
@@ -11612,7 +11625,7 @@ mod tests {
             .load_metadata()
             .expect("spawned AGENT.toml should parse");
         assert_eq!(metadata.agent.display_name, "Review Scout");
-        assert_eq!(metadata.agent.role, "Review");
+        assert_eq!(metadata.agent.role, "specialist");
         assert_eq!(metadata.agent.parent_agent_id.as_deref(), Some("main"));
     }
 
@@ -12934,7 +12947,7 @@ mod tests {
                 &event.event,
                 CadisEvent::AgentSpawned(payload)
                     if payload.display_name.as_deref() == Some("Builder")
-                        && payload.role.as_deref() == Some("Coding")
+                        && payload.role.as_deref() == Some("specialist")
                         && payload.parent_agent_id.as_ref().map(AgentId::as_str) == Some("main")
                         && payload.model.as_deref() == Some("openai/gpt-5.5")
             )
@@ -13285,12 +13298,12 @@ mod tests {
             _ => None,
         });
         let spawned_agent = spawned_agent.expect("worker action should spawn an agent");
-        assert!(spawned_agent.as_str().starts_with("reviewer_"));
+        assert!(spawned_agent.as_str().starts_with("specialist_"));
         assert!(outcome.events.iter().any(|event| {
             matches!(
                 &event.event,
                 CadisEvent::AgentSpawned(payload)
-                    if payload.role.as_deref() == Some("Reviewer")
+                    if payload.role.as_deref() == Some("specialist")
                         && payload.parent_agent_id.as_ref().map(AgentId::as_str) == Some("main")
             )
         }));
@@ -13707,9 +13720,9 @@ mod tests {
         let content = "Here is the plan:\n[SPAWN Reviewer: check the patch]\n[SPAWN Tester: run unit tests]\nDone.";
         let directives = parse_model_spawn_directives(content);
         assert_eq!(directives.len(), 2);
-        assert_eq!(directives[0].role, "Reviewer");
+        assert_eq!(directives[0].role, "specialist");
         assert_eq!(directives[0].task, "check the patch");
-        assert_eq!(directives[1].role, "Tester");
+        assert_eq!(directives[1].role, "specialist");
         assert_eq!(directives[1].task, "run unit tests");
     }
 
@@ -13754,12 +13767,12 @@ mod tests {
             .iter()
             .filter(|event| {
                 matches!(&event.event, CadisEvent::AgentSpawned(payload)
-                if payload.role.as_deref() == Some("Reviewer"))
+                if payload.role.as_deref() == Some("specialist"))
             })
             .count();
         assert_eq!(
             spawned, 1,
-            "model-driven spawn should create one Reviewer agent"
+            "model-driven spawn should create one specialist agent"
         );
     }
 
@@ -14102,5 +14115,50 @@ mod tests {
             }),
         ));
         assert_rejected(spawn2, "agent_spawn_depth_limit_exceeded");
+    }
+
+    #[test]
+    fn edge_tts_rejects_invalid_voice_id() {
+        let mut provider = EdgeTtsProvider;
+        let result = provider.speak(TtsRequest {
+            text: "hello",
+            voice_id: "invalid voice id!",
+            rate: 0,
+            pitch: 0,
+            volume: 0,
+        });
+        assert_eq!(result.unwrap_err().code, "invalid_voice_id");
+    }
+
+    #[test]
+    fn edge_tts_rejects_empty_voice_id() {
+        let mut provider = EdgeTtsProvider;
+        let result = provider.speak(TtsRequest {
+            text: "hello",
+            voice_id: "",
+            rate: 0,
+            pitch: 0,
+            volume: 0,
+        });
+        assert_eq!(result.unwrap_err().code, "invalid_voice_id");
+    }
+
+    #[test]
+    fn edge_tts_handles_missing_binary() {
+        let mut provider = EdgeTtsProvider;
+        let result = provider.speak(TtsRequest {
+            text: "hello",
+            voice_id: "en-US-AvaNeural",
+            rate: 0,
+            pitch: 0,
+            volume: 0,
+        });
+        // CI likely lacks edge-tts; accept not_found or spawn_failed.
+        let err = result.unwrap_err();
+        assert!(
+            err.code == "edge_tts_not_found" || err.code == "edge_tts_spawn_failed",
+            "unexpected error code: {}",
+            err.code
+        );
     }
 }
