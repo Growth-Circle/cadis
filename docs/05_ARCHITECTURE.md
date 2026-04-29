@@ -416,8 +416,18 @@ Pipeline stages:
 4. Truncation with head/tail preservation
 5. Error-line preservation (errors are never filtered)
 
+Stage 6: Semantic-boundary truncation — breaks at headings, code fences, and function boundaries instead of raw byte limits (inspired by [QMD](https://github.com/tobi/qmd))
+
 The filter runs synchronously after tool execution and before the result is
 returned to the agent. Raw output is preserved in the event log for debugging.
+
+### Search Index
+
+The `file.search` tool uses a trigram-based search index for large workspaces
+(>100 files). The index pre-filters candidate files before line-by-line grep,
+reducing search time significantly. Inspired by
+[QMD](https://github.com/tobi/qmd)'s FTS5 approach but implemented without
+external database dependencies.
 
 ## 16. Stable Error Codes
 

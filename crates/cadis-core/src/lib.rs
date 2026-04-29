@@ -52,6 +52,7 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 mod orchestrator;
+mod search_index;
 mod tools;
 mod voice;
 mod workspace;
@@ -382,6 +383,7 @@ pub struct Runtime {
     next_workspace_grant: u64,
     denied_paths: DeniedPaths,
     cancellation_token: cadis_policy::CancellationToken,
+    search_index_cache: HashMap<PathBuf, search_index::SearchIndex>,
 }
 
 impl Runtime {
@@ -476,6 +478,7 @@ impl Runtime {
             next_workspace_grant,
             denied_paths: DeniedPaths::default(),
             cancellation_token: cadis_policy::CancellationToken::new(),
+            search_index_cache: HashMap::new(),
         }
     }
 
@@ -4182,7 +4185,7 @@ impl Runtime {
     }
 
     fn execute_safe_tool(
-        &self,
+        &mut self,
         workspace: &Path,
         request: &ToolCallRequest,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
@@ -4647,7 +4650,7 @@ impl Runtime {
     }
 
     fn execute_file_search(
-        &self,
+        &mut self,
         workspace: &Path,
         input: &serde_json::Value,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
@@ -4664,7 +4667,30 @@ impl Runtime {
         let root = resolve_inside_workspace(workspace, &root)?;
         let max_results = input_usize(input, "max_results").unwrap_or(FILE_SEARCH_DEFAULT_LIMIT);
         let mut matches = Vec::new();
-        search_files(workspace, &root, &query, max_results, &mut matches);
+
+        // Use trigram index to pre-filter when workspace has >100 files.
+        let idx = self
+            .search_index_cache
+            .entry(workspace.to_path_buf())
+            .or_insert_with(|| search_index::SearchIndex::build(workspace));
+        if idx.file_count() > 100 {
+            let candidates = idx.search(&query, max_results * 10);
+            for hit in candidates {
+                if matches.len() >= max_results {
+                    break;
+                }
+                let Ok(resolved) = hit.path.canonicalize() else {
+                    continue;
+                };
+                if !resolved.starts_with(workspace) {
+                    continue;
+                }
+                search_file(workspace, &resolved, &query, max_results, &mut matches);
+            }
+        } else {
+            search_files(workspace, &root, &query, max_results, &mut matches);
+        }
+
         let truncated = matches.len() >= max_results;
         let summary = if matches.is_empty() {
             "no matches".to_owned()

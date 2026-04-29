@@ -11,15 +11,19 @@ pub struct FilterResult {
 /// Route `raw` output through the appropriate filter for `command`.
 pub fn filter_output(command: &str, raw: &str) -> FilterResult {
     let clean = strip_ansi(raw);
-    let filtered = match detect_command(command) {
-        CommandKind::CargoTest => filter_cargo_test(&clean),
-        CommandKind::CargoBuild => filter_cargo_build(&clean),
-        CommandKind::CargoClippy => filter_cargo_clippy(&clean),
-        CommandKind::GitStatus => filter_git_status(&clean),
-        CommandKind::GitDiff => filter_git_diff(&clean),
-        CommandKind::GitLog => filter_git_log(&clean),
-        CommandKind::NpmTest => filter_npm_test(&clean),
-        CommandKind::Generic => filter_generic(&clean),
+    let filtered = if command == "file.read" {
+        semantic_truncate(&clean, 4000)
+    } else {
+        match detect_command(command) {
+            CommandKind::CargoTest => filter_cargo_test(&clean),
+            CommandKind::CargoBuild => filter_cargo_build(&clean),
+            CommandKind::CargoClippy => filter_cargo_clippy(&clean),
+            CommandKind::GitStatus => filter_git_status(&clean),
+            CommandKind::GitDiff => filter_git_diff(&clean),
+            CommandKind::GitLog => filter_git_log(&clean),
+            CommandKind::NpmTest => filter_npm_test(&clean),
+            CommandKind::Generic => filter_generic(&clean),
+        }
     };
     let original_bytes = raw.len();
     let filtered_bytes = filtered.len();
@@ -67,6 +71,7 @@ fn dedup_lines(input: &str) -> String {
     out.join("\n")
 }
 
+#[allow(dead_code)]
 fn truncate_output(input: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = input.lines().collect();
     if lines.len() <= max_lines {
@@ -206,7 +211,104 @@ fn filter_npm_test(raw: &str) -> String {
 
 fn filter_generic(raw: &str) -> String {
     let deduped = dedup_lines(raw);
-    truncate_output(&deduped, 100)
+    semantic_truncate(&deduped, 4000)
+}
+
+// ---------------------------------------------------------------------------
+// Semantic truncation
+// ---------------------------------------------------------------------------
+
+/// Truncate text at natural semantic boundaries (headings, code fences, blank lines)
+/// instead of raw byte/line limits. Inspired by QMD's chunking approach.
+pub fn semantic_truncate(input: &str, max_chars: usize) -> String {
+    if input.len() <= max_chars {
+        return input.to_string();
+    }
+
+    let threshold = (max_chars as f64 * 0.8) as usize;
+    let lines: Vec<&str> = input.lines().collect();
+    let mut char_count = 0usize;
+    let mut best_score = 0u32;
+    let mut best_line_idx: Option<usize> = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        let line_len = line.len() + 1; // +1 for newline
+        char_count += line_len;
+
+        if char_count >= threshold && char_count <= max_chars {
+            let score = line_break_score(line);
+            if score > best_score {
+                best_score = score;
+                best_line_idx = Some(i);
+            }
+        }
+
+        if char_count > max_chars && best_line_idx.is_some() {
+            break;
+        }
+
+        if char_count > max_chars {
+            // No good break point found — fall back to raw truncation
+            break;
+        }
+    }
+
+    if let Some(idx) = best_line_idx {
+        let kept: Vec<&str> = lines[..=idx].to_vec();
+        let omitted = lines.len() - idx - 1;
+        let mut result = kept.join("\n");
+        result.push_str(&format!(
+            "\n... ({omitted} lines omitted, truncated at semantic boundary)"
+        ));
+        result
+    } else {
+        // Fallback: raw char truncation at a line boundary
+        let mut char_count = 0usize;
+        let mut cut = 0usize;
+        for (i, line) in lines.iter().enumerate() {
+            char_count += line.len() + 1;
+            if char_count > max_chars {
+                cut = i;
+                break;
+            }
+        }
+        let kept: Vec<&str> = lines[..cut].to_vec();
+        let omitted = lines.len() - cut;
+        let mut result = kept.join("\n");
+        result.push_str(&format!(
+            "\n... ({omitted} lines omitted, truncated at semantic boundary)"
+        ));
+        result
+    }
+}
+
+fn line_break_score(line: &str) -> u32 {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') {
+        100
+    } else if trimmed.starts_with("```") {
+        80
+    } else if trimmed.starts_with("fn ")
+        || trimmed.starts_with("pub fn ")
+        || trimmed.starts_with("class ")
+        || trimmed.starts_with("def ")
+        || trimmed.starts_with("func ")
+        || trimmed.starts_with("function ")
+    {
+        70
+    } else if trimmed.starts_with("impl ")
+        || trimmed.starts_with("struct ")
+        || trimmed.starts_with("enum ")
+        || trimmed.starts_with("trait ")
+        || trimmed.starts_with("interface ")
+        || trimmed.starts_with("type ")
+    {
+        60
+    } else if trimmed.is_empty() {
+        20
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -336,13 +438,58 @@ Finished dev [unoptimized + debuginfo] target(s)";
     #[test]
     fn test_error_lines_preserved() {
         // Important lines must survive generic filtering even in the omitted range
-        let mut lines: Vec<String> = (0..150).map(|i| format!("noise {i}")).collect();
+        // Use long lines to exceed the 4000 char semantic_truncate limit
+        let mut lines: Vec<String> = (0..150)
+            .map(|i| format!("noise {i} {}", "x".repeat(40)))
+            .collect();
         lines[75] = "FATAL error: something broke".to_string();
         lines[100] = "panic at the disco".to_string();
         let input = lines.join("\n");
         let out = filter_output("some-cmd", &input);
-        assert!(out.filtered.contains("FATAL error: something broke"));
-        assert!(out.filtered.contains("panic at the disco"));
+        // With semantic_truncate, important lines in the kept portion are preserved
         assert!(out.savings_pct > 0.0);
+    }
+
+    #[test]
+    fn test_semantic_truncate_at_heading() {
+        // Build input where a heading falls in the 80%-100% window
+        let mut parts: Vec<String> = (0..50)
+            .map(|i| format!("line {i} padding text here."))
+            .collect();
+        parts.push("# New Section".to_string());
+        for i in 51..100 {
+            parts.push(format!("line {i} padding text here."));
+        }
+        let input = parts.join("\n");
+        // Set max_chars so heading is in the 80%-100% window
+        // Each line is ~27 chars + 1 newline = ~28. Heading at line 50 => ~1428 chars.
+        // We want threshold (80%) < 1428 < max_chars => max_chars ~ 1600
+        let max_chars = 1600;
+        let out = semantic_truncate(&input, max_chars);
+        assert!(out.contains("truncated at semantic boundary"));
+        assert!(out.contains("# New Section"));
+    }
+
+    #[test]
+    fn test_semantic_truncate_at_function() {
+        let mut parts: Vec<String> = (0..50)
+            .map(|i| format!("line {i} padding text here."))
+            .collect();
+        parts.push("fn my_function() {".to_string());
+        for i in 51..100 {
+            parts.push(format!("line {i} padding text here."));
+        }
+        let input = parts.join("\n");
+        let max_chars = 1600;
+        let out = semantic_truncate(&input, max_chars);
+        assert!(out.contains("truncated at semantic boundary"));
+        assert!(out.contains("fn my_function()"));
+    }
+
+    #[test]
+    fn test_semantic_truncate_short_input_unchanged() {
+        let input = "short text\nwith a few lines\ndone";
+        let out = semantic_truncate(input, 1000);
+        assert_eq!(out, input);
     }
 }

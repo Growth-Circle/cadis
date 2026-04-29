@@ -993,6 +993,9 @@ Tasks:
   result delivery.
 - Preserve raw output in the event log for debugging.
 
+- Semantic-boundary truncation for file.read and generic output (inspired by [QMD](https://github.com/tobi/qmd)).
+- Trigram search index for file.search performance on large workspaces (inspired by [QMD](https://github.com/tobi/qmd)).
+
 Exit criteria:
 
 - Tool output returned to agents is 60-90% smaller than raw output.
