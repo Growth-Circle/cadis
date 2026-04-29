@@ -47,9 +47,42 @@ jobs:
           name: binaries-${{ matrix.target }}
           path: dist/
 
+  build-hud:
+    name: Build HUD (Tauri)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build HUD
+        run: |
+          cd apps/cadis-hud
+          corepack enable
+          pnpm install
+          pnpm tauri build
+      - name: Package HUD artifacts
+        run: |
+          mkdir -p dist
+          cp apps/cadis-hud/src-tauri/target/release/bundle/appimage/*.AppImage dist/ || true
+          cp apps/cadis-hud/src-tauri/target/release/bundle/deb/*.deb dist/ || true
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          for f in *; do
+            sha256sum "$f" > "$f.sha256"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hud-linux
+          path: dist/
+
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, build-hud]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
