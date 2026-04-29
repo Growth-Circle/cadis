@@ -2597,9 +2597,15 @@ fn set_private_file_permissions(_path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_parent_dir(path: &Path) -> Result<(), StoreError> {
     let dir = File::open(path)?;
     dir.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
