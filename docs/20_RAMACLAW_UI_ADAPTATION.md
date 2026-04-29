@@ -11,8 +11,8 @@ The target is 100% product and interaction parity, not necessarily 100% source-c
 Set this locally when auditing or porting:
 
 ```bash
-export RAMACLAW_HUD_SOURCE=/home/ramaaditya/Project/ramaclaw-hud
-export RAMACLAW_SPEC_SOURCE=/home/ramaaditya/docs/superpowers/specs/RamaClaw
+export RAMACLAW_HUD_SOURCE=/path/to/ramaclaw-hud
+export RAMACLAW_SPEC_SOURCE=/path/to/ramaclaw-specs
 ```
 
 Important source files:

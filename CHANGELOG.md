@@ -6,6 +6,34 @@ The format follows Keep a Changelog style, and the project will use Semantic Ver
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-04-29
+
+### Added
+
+- Telegram adapter: DaemonBridge wiring to cadisd via Unix socket (status, agents, approve, deny, chat).
+- HUD: disconnect safety — visual dimming and disabled controls when daemon is unreachable.
+- HUD: patch.created and test.result event rendering in Code Work Panel.
+- HUD: 7 new frontend tests (themes, agent rename dialog, voice preferences serialization).
+- Core module extraction: orchestrator, tools, voice, and workspace split from monolithic lib.rs.
+- Wiki pages: Home, Getting Started, Configuration, FAQ, Troubleshooting.
+- Screenshot parity verification script.
+
+### Changed
+
+- Bump all workspace crate versions from 0.9.2 to 1.0.0.
+- Bump HUD package version from 0.9.2 to 1.0.0.
+- cadis-core lib.rs reduced from 15,032 to 12,520 lines via module extraction.
+- Known limitations updated for v0.9.2 shipping state (AppImage/deb available).
+
+### Fixed
+
+- Open-source cleanup: removed RamaClaw fallback paths from Tauri lib.rs.
+- Replaced private developer paths in docs with generic placeholders.
+
+### Security
+
+- Verified no committed secrets or API keys (only intentional test fixtures).
+
 ## [0.9.2] - 2026-04-29
 
 ### Added

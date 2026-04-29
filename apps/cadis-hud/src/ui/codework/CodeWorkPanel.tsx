@@ -18,6 +18,8 @@ export function CodeWorkPanel() {
   const owner = worker
     ? agents.find((agent) => agent.spec.id === (worker.agentId ?? worker.parentAgentId))
     : null;
+  const patches = useHud((s) => s.patches);
+  const testResults = useHud((s) => s.testResults);
   const logLines = useMemo(() => recentLogLines(worker?.logTail ?? []), [worker?.logTail]);
   const isTerminal = worker
     ? ["completed", "failed", "cancelled"].includes(worker.status)
@@ -73,6 +75,28 @@ export function CodeWorkPanel() {
           {/* TODO: Inline diff content requires a future daemon `worker.artifact.read` request.
              worker.artifacts.patch is a file PATH, not diff content, so DiffViewer/FileTree
              cannot render useful output until the daemon provides actual content. */}
+
+          {patches.length > 0 && (
+            <section className="code-work-panel__section" aria-labelledby="code-work-patches">
+              <h3 id="code-work-patches">Patches</h3>
+              <ul className="code-work-panel__log">
+                {patches.map((p) => (
+                  <li key={p.id}><code>{p.summary}</code></li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          {testResults.length > 0 && (
+            <section className="code-work-panel__section" aria-labelledby="code-work-tests">
+              <h3 id="code-work-tests">Test Results</h3>
+              <ul className="code-work-panel__log">
+                {testResults.map((t) => (
+                  <li key={t.id}><code>{t.summary}</code></li>
+                ))}
+              </ul>
+            </section>
+          )}
 
           <section className="code-work-panel__section" aria-labelledby="code-work-log">
             <h3 id="code-work-log">Recent Log Tail</h3>

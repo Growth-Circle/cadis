@@ -1,6 +1,6 @@
 # Known Limitations
 
-This document lists known limitations of the current C.A.D.I.S. v0.9 beta.
+This document lists known limitations of the current C.A.D.I.S. v0.9.2 beta.
 
 ## Platform
 
@@ -37,9 +37,8 @@ This document lists known limitations of the current C.A.D.I.S. v0.9 beta.
   scheduling, but individual tool calls within a session execute sequentially.
   Async cancellation is not implemented yet; no cancellation propagation to
   running subprocesses.
-- **No packaged installer.** All binaries are built from source.
-- **No HUD packaging in release artifacts.** The Tauri HUD must be built from
-  source.
+- **No Windows or macOS installer.** Linux users can use the AppImage or .deb
+  from GitHub Releases.
 - **cadis-core lib.rs is monolithic (~15K lines).** Module extraction is
   planned.
 - **Worker artifact view in HUD is read-only.** Apply/discard actions route

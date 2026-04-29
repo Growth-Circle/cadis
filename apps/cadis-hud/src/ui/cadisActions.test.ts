@@ -12,6 +12,7 @@ import {
   persistThemePreference,
   persistBackgroundOpacityPreference,
   persistAvatarStylePreference,
+  persistVoicePreferences,
   sendAgentSpecialistUpdate,
   sendUserMessage,
   sendVoicePreflight,
@@ -611,6 +612,38 @@ describe("cadisActions", () => {
     expect(computeBackoffMs(0, () => 0.5)).toBe(1_000);
     expect(computeBackoffMs(20, () => 0.5)).toBe(30_000);
     expect(computeBackoffMs(0, () => 0)).toBeGreaterThanOrEqual(500);
+  });
+
+  it("serializes voice preferences through daemon via ui.preferences.set", async () => {
+    connect();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
+    invokeMock.mockClear();
+
+    persistVoicePreferences({
+      voiceId: "en-US-AvaNeural",
+      rate: 10,
+      pitch: -5,
+      volume: 20,
+      autoSpeak: true,
+      useCloudTts: true,
+    });
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(sentRequest()).toMatchObject({
+      type: "ui.preferences.set",
+      payload: {
+        patch: {
+          voice: {
+            enabled: true,
+            voice_id: "en-US-AvaNeural",
+            rate: 10,
+            pitch: -5,
+            volume: 20,
+            auto_speak: true,
+          },
+        },
+      },
+    });
   });
 });
 

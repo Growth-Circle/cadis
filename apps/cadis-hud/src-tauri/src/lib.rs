@@ -520,9 +520,7 @@ fn whisper_model_path() -> Result<PathBuf, String> {
     push_env_path(&mut candidates, "WHISPER_MODEL");
     if let Some(home) = env::var_os("HOME").map(PathBuf::from) {
         candidates.push(home.join(".local/share/cadis/whisper-models/ggml-base.bin"));
-        candidates.push(home.join(".local/share/ramaclaw/whisper-models/ggml-base.bin"));
         candidates.push(home.join(".local/share/cadis/whisper-models/ggml-base.en.bin"));
-        candidates.push(home.join(".local/share/ramaclaw/whisper-models/ggml-base.en.bin"));
     }
 
     for candidate in &candidates {
@@ -605,7 +603,6 @@ fn whisper_library_path_env() -> Option<String> {
             home.join(".local/lib"),
             home.join(".local/lib64"),
             home.join(".local/share/cadis/lib"),
-            home.join(".local/share/ramaclaw/lib"),
             home.join(".local/share/whisper.cpp"),
         ] {
             if path.exists() {

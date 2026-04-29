@@ -8,7 +8,7 @@
  * Telegram/HUD/CLI surfaces in sync.
  */
 import { useState, useEffect } from "react";
-import type { ApprovalRecord } from "../hudState.js";
+import { useHud, type ApprovalRecord } from "../hudState.js";
 import { sendApprovalResponse } from "../cadisActions.js";
 
 export type ApprovalCardProps = {
@@ -38,9 +38,11 @@ function useExpiry(expiresAt: string | undefined): { label: string; expired: boo
 }
 
 export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
+  const gateway = useHud((s) => s.gateway);
   const respond = onRespond ?? sendApprovalResponse;
   const cmdLabel = approval.cmd?.length > 120 ? `${approval.cmd.slice(0, 117)}…` : approval.cmd;
   const { label: expiryLabel, expired } = useExpiry(approval.expiresAt);
+  const disconnected = gateway !== "connected";
   return (
     <article
       className="approval-card"
@@ -65,20 +67,25 @@ export function ApprovalCard({ approval, onRespond }: ApprovalCardProps) {
           {expiryLabel}
         </div>
       )}
-      <footer className="approval-card__actions">
+      <footer className="approval-card__actions" style={disconnected ? { opacity: 0.45 } : undefined}>
+        {disconnected && (
+          <span className="approval-card__disconnect-hint">daemon disconnected</span>
+        )}
         <button
           type="button"
           className="approval-card__btn approval-card__btn--deny"
-          disabled={expired}
+          disabled={expired || disconnected}
           onClick={() => respond(approval.id, "deny")}
+          title={disconnected ? "Daemon disconnected" : undefined}
         >
           DENY
         </button>
         <button
           type="button"
           className="approval-card__btn approval-card__btn--ok"
-          disabled={expired}
+          disabled={expired || disconnected}
           onClick={() => respond(approval.id, "approve")}
+          title={disconnected ? "Daemon disconnected" : undefined}
         >
           OK
         </button>

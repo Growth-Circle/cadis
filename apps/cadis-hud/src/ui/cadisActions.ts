@@ -524,6 +524,14 @@ function handleMessage(type: string, payload: unknown, sessionId?: string): void
     handleWorkerEvent(type, payload);
     return;
   }
+  if (type === "patch.created") {
+    handlePatchCreated(payload);
+    return;
+  }
+  if (type === "test.result") {
+    handleTestResult(payload);
+    return;
+  }
 }
 
 function handleDaemonStatus(payload: unknown): void {
@@ -841,6 +849,20 @@ function handleRequestRejected(payload: unknown): void {
   const p = asRecord(payload);
   const message = stringFrom(p.message) ?? "CADIS request was rejected";
   pushSystem(`(${message})`);
+}
+
+function handlePatchCreated(payload: unknown): void {
+  const p = asRecord(payload);
+  const id = stringFrom(p.patch_id) ?? `patch-${Date.now()}`;
+  const summary = stringFrom(p.summary) ?? "patch created";
+  useHud.getState().pushPatch({ id, summary });
+}
+
+function handleTestResult(payload: unknown): void {
+  const p = asRecord(payload);
+  const status = stringFrom(p.status) ?? "unknown";
+  const summary = stringFrom(p.summary) ?? status;
+  useHud.getState().pushTestResult({ id: `test-${Date.now()}`, summary: `[${status}] ${summary}` });
 }
 
 function parseMentionTargetAgentId(text: string): string | undefined {

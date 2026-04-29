@@ -2,6 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+
+use cadis_protocol::{
+    ApprovalDecision, ApprovalId, ApprovalResponseRequest, ClientId, ClientRequest, ContentKind,
+    EmptyPayload, MessageSendRequest, RequestEnvelope, RequestId,
+};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -12,6 +19,7 @@ use std::fmt;
 pub enum TelegramError {
     Http(reqwest::Error),
     Api(String),
+    Io(std::io::Error),
 }
 
 impl fmt::Display for TelegramError {
@@ -19,6 +27,7 @@ impl fmt::Display for TelegramError {
         match self {
             Self::Http(e) => write!(f, "telegram http error: {e}"),
             Self::Api(msg) => write!(f, "telegram api error: {msg}"),
+            Self::Io(e) => write!(f, "telegram io error: {e}"),
         }
     }
 }
@@ -28,6 +37,12 @@ impl std::error::Error for TelegramError {}
 impl From<reqwest::Error> for TelegramError {
     fn from(e: reqwest::Error) -> Self {
         Self::Http(e)
+    }
+}
+
+impl From<std::io::Error> for TelegramError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
     }
 }
 
@@ -243,6 +258,125 @@ impl TelegramAdapter {
             }
         }
     }
+
+    /// Long-polling loop that forwards parsed commands to the daemon via `DaemonBridge`.
+    pub async fn poll_and_bridge(&self, bridge: &DaemonBridge) {
+        let mut offset: i64 = 0;
+        loop {
+            let updates = match self.get_updates(offset).await {
+                Ok(u) => u,
+                Err(e) => {
+                    eprintln!("cadis-telegram poll error: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+            for update in &updates {
+                offset = update.update_id + 1;
+                let (text, chat_id) = if let Some(msg) = &update.message {
+                    (msg.text.as_deref(), msg.chat.id)
+                } else if let Some(cb) = &update.callback_query {
+                    (
+                        cb.data.as_deref(),
+                        cb.message.as_ref().map(|m| m.chat.id).unwrap_or(0),
+                    )
+                } else {
+                    continue;
+                };
+                let Some(text) = text else { continue };
+                let request_json = match handle_update(text) {
+                    Some(TelegramCommand::Status) => DaemonBridge::format_status_request(),
+                    Some(TelegramCommand::Agents) => DaemonBridge::format_agents_request(),
+                    Some(TelegramCommand::Approve { approval_id }) => {
+                        DaemonBridge::format_approve_request(&approval_id)
+                    }
+                    Some(TelegramCommand::Deny { approval_id }) => {
+                        DaemonBridge::format_deny_request(&approval_id)
+                    }
+                    _ => {
+                        // Forward unrecognised text as a chat message.
+                        DaemonBridge::format_chat_request(text)
+                    }
+                };
+                let reply = match bridge.send_request(&request_json) {
+                    Ok(r) => r,
+                    Err(e) => format!("⚠️ daemon error: {e}"),
+                };
+                if let Err(e) = self.send_message(chat_id, &reply).await {
+                    eprintln!("cadis-telegram send error: {e}");
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Daemon bridge
+// ---------------------------------------------------------------------------
+
+/// Thin forwarding layer that connects to `cadisd` via Unix socket.
+pub struct DaemonBridge {
+    socket_path: String,
+}
+
+impl DaemonBridge {
+    pub fn new(socket_path: String) -> Self {
+        Self { socket_path }
+    }
+
+    /// Connect to the daemon socket, write `request_json` + newline, read one response line.
+    pub fn send_request(&self, request_json: &str) -> Result<String, TelegramError> {
+        let mut stream = UnixStream::connect(&self.socket_path)?;
+        stream.write_all(request_json.as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        Ok(line.trim_end().to_string())
+    }
+
+    fn envelope(request: ClientRequest) -> String {
+        let env = RequestEnvelope::new(
+            RequestId::new("tg-req"),
+            ClientId::new("cadis-telegram"),
+            request,
+        );
+        serde_json::to_string(&env).expect("serialization cannot fail")
+    }
+
+    pub fn format_status_request() -> String {
+        Self::envelope(ClientRequest::DaemonStatus(EmptyPayload {}))
+    }
+
+    pub fn format_agents_request() -> String {
+        Self::envelope(ClientRequest::AgentList(EmptyPayload {}))
+    }
+
+    pub fn format_approve_request(approval_id: &str) -> String {
+        Self::envelope(ClientRequest::ApprovalRespond(ApprovalResponseRequest {
+            approval_id: ApprovalId::new(approval_id),
+            decision: ApprovalDecision::Approved,
+            reason: None,
+        }))
+    }
+
+    pub fn format_deny_request(approval_id: &str) -> String {
+        Self::envelope(ClientRequest::ApprovalRespond(ApprovalResponseRequest {
+            approval_id: ApprovalId::new(approval_id),
+            decision: ApprovalDecision::Denied,
+            reason: None,
+        }))
+    }
+
+    pub fn format_chat_request(message: &str) -> String {
+        Self::envelope(ClientRequest::MessageSend(MessageSendRequest {
+            session_id: None,
+            target_agent_id: None,
+            content: message.to_string(),
+            content_kind: ContentKind::Chat,
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -412,5 +546,51 @@ mod tests {
         assert!(url.contains(adapter.bot_token()));
         assert!(url.starts_with("https://api.telegram.org/bot"));
         assert!(url.ends_with("/getMe"));
+    }
+
+    // --- DaemonBridge format tests ---
+
+    #[test]
+    fn format_status_request_json() {
+        let json = DaemonBridge::format_status_request();
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["type"], "daemon.status");
+        assert!(v["request_id"].is_string());
+        assert_eq!(v["client_id"], "cadis-telegram");
+    }
+
+    #[test]
+    fn format_agents_request_json() {
+        let json = DaemonBridge::format_agents_request();
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["type"], "agent.list");
+        assert_eq!(v["client_id"], "cadis-telegram");
+    }
+
+    #[test]
+    fn format_approve_request_json() {
+        let json = DaemonBridge::format_approve_request("req-42");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["type"], "approval.respond");
+        assert_eq!(v["payload"]["approval_id"], "req-42");
+        assert_eq!(v["payload"]["decision"], "approved");
+    }
+
+    #[test]
+    fn format_deny_request_json() {
+        let json = DaemonBridge::format_deny_request("req-99");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["type"], "approval.respond");
+        assert_eq!(v["payload"]["approval_id"], "req-99");
+        assert_eq!(v["payload"]["decision"], "denied");
+    }
+
+    #[test]
+    fn format_chat_request_json() {
+        let json = DaemonBridge::format_chat_request("hello world");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["type"], "message.send");
+        assert_eq!(v["payload"]["content"], "hello world");
+        assert_eq!(v["payload"]["content_kind"], "chat");
     }
 }

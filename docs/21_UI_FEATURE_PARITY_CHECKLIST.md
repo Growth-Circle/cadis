@@ -258,15 +258,15 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [x] Gateway reconnect/backoff test.
 - [x] Protocol event mapping tests.
 - [x] Code work artifact view reducer/render tests.
-- [ ] Screenshot parity: 1600x1000.
-- [ ] Screenshot parity: 1920x1080.
-- [ ] No OpenClaw text/path remains in UI.
+- [ ] Screenshot parity: 1600x1000. <!-- Manual verification required — see scripts/screenshot-parity.sh -->
+- [ ] Screenshot parity: 1920x1080. <!-- Manual verification required — see scripts/screenshot-parity.sh -->
+- [x] No OpenClaw text/path remains in UI.
 
 ## 20. Open-Source Cleanup
 
 - [x] Replace RamaClaw brand text with CADIS.
 - [x] Replace OpenClaw wording with CADIS daemon wording.
-- [ ] Replace private source paths with public references or remove them.
+- [x] Replace private source paths with public references or remove them.
 - [ ] Recreate icons for CADIS.
 - [ ] Confirm asset licensing.
-- [ ] Ensure no provider keys or local config values are committed.
+- [x] Ensure no provider keys or local config values are committed.

@@ -445,6 +445,8 @@ export function ChatPanel() {
             e.preventDefault();
             submit();
           }}
+          style={gateway !== "connected" ? { opacity: 0.45 } : undefined}
+          title={gateway !== "connected" ? "Daemon disconnected" : undefined}
         >
           <button
             type="button"
