@@ -18,12 +18,14 @@ use std::thread;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener as TokioTcpListener;
+use tokio::sync::mpsc as tokio_mpsc;
 #[cfg(unix)]
 use tokio::net::UnixListener as TokioUnixListener;
 
-use cadis_core::{PendingMessageGeneration, Runtime, RuntimeOptions};
+use cadis_core::{parse_tool_call_directives, PendingMessageGeneration, Runtime, RuntimeOptions};
 use cadis_models::{
-    provider_from_config, ModelError, ModelRequest, ModelStreamControl, ModelStreamEvent,
+    provider_from_config, ModelError, ModelInvocation, ModelRequest, ModelStreamControl,
+    ModelStreamEvent,
 };
 use cadis_protocol::{
     ClientRequest, DaemonResponse, ErrorPayload, EventEnvelope, EventId, EventSubscriptionRequest,
@@ -483,6 +485,16 @@ where
     Ok(())
 }
 
+/// Result of one tool loop iteration, used to avoid holding MutexGuard across await points.
+enum ToolLoopResult {
+    Break(Vec<EventEnvelope>),
+    Continue {
+        events: Vec<EventEnvelope>,
+        follow_up_prompt: String,
+        pending: Box<PendingMessageGeneration>,
+    },
+}
+
 async fn serve_pending_message_generation_async<W>(
     writer: &mut W,
     runtime: Arc<Mutex<Runtime>>,
@@ -498,72 +510,200 @@ where
         emit_event_async(writer, event_log, event_bus, event).await?;
     }
 
-    let provider = Arc::clone(&pending.provider);
-    let rt = Arc::clone(&runtime);
-    let result = tokio::task::spawn_blocking(move || {
-        let mut invocation = None;
-        let mut final_content = String::new();
-        let mut emitted_delta = false;
-        let stream_result = provider.stream_chat(
-            ModelRequest::new(&pending.prompt)
-                .with_selected_model(pending.selected_model.as_deref()),
-            &mut |event| {
-                if rt
+    let mut current_prompt = pending.prompt.clone();
+    let mut current_selected_model = pending.selected_model.clone();
+    let mut current_pending = pending;
+
+    loop {
+        let handle = current_pending.handle();
+        let (delta_tx, mut delta_rx) = tokio_mpsc::channel::<ModelStreamEvent>(64);
+
+        let provider = Arc::clone(&current_pending.provider);
+        let rt = Arc::clone(&runtime);
+        let prompt_for_blocking = current_prompt.clone();
+        let selected_model_for_blocking = current_selected_model.clone();
+        let blocking_handle = tokio::task::spawn_blocking(move || {
+            let mut invocation = None;
+            let mut final_content = String::new();
+            let mut emitted_delta = false;
+            let stream_result = provider.stream_chat(
+                ModelRequest::new(&prompt_for_blocking)
+                    .with_selected_model(selected_model_for_blocking.as_deref()),
+                &mut |event| {
+                    if rt
+                        .lock()
+                        .map_err(|_| {
+                            ModelError::with_code(
+                                "runtime_lock_failed",
+                                "runtime mutex was poisoned",
+                                false,
+                            )
+                        })?
+                        .message_generation_cancelled(&current_pending)
+                    {
+                        return Ok(ModelStreamControl::Cancel);
+                    }
+
+                    match &event {
+                        ModelStreamEvent::Started(started)
+                        | ModelStreamEvent::Completed(started) => {
+                            invocation = Some(started.clone());
+                        }
+                        ModelStreamEvent::Delta(delta) => {
+                            final_content.push_str(delta);
+                            emitted_delta = true;
+                        }
+                        ModelStreamEvent::Failed(_) | ModelStreamEvent::Cancelled(_) => {}
+                    }
+                    let _ = delta_tx.blocking_send(event);
+                    Ok(ModelStreamControl::Continue)
+                },
+            );
+            (stream_result, final_content, emitted_delta, current_pending)
+        });
+
+        // Receive streaming events and emit deltas in real-time.
+        let mut invocation: Option<ModelInvocation> = None;
+        while let Some(event) = delta_rx.recv().await {
+            match event {
+                ModelStreamEvent::Started(ref started)
+                | ModelStreamEvent::Completed(ref started) => {
+                    invocation = Some(started.clone());
+                }
+                ModelStreamEvent::Delta(delta) => {
+                    let delta_event = runtime
+                        .lock()
+                        .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+                        .message_delta_event_from_handle(&handle, delta, invocation.as_ref());
+                    emit_event_async(writer, event_log, event_bus, delta_event).await?;
+                }
+                ModelStreamEvent::Failed(_) | ModelStreamEvent::Cancelled(_) => {}
+            }
+        }
+
+        let (stream_result, final_content, emitted_delta, pending_back) = blocking_handle
+            .await
+            .map_err(|e| io::Error::other(format!("spawn_blocking join error: {e}")))?;
+
+        match stream_result {
+            Ok(response) => {
+                // Check for tool call directives before completing.
+                let directives = parse_tool_call_directives(&final_content);
+                if directives.is_empty() {
+                    // No tool calls — complete normally.
+                    let final_events = runtime
+                        .lock()
+                        .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+                        .complete_message_generation(
+                            pending_back,
+                            response,
+                            final_content,
+                            emitted_delta,
+                        );
+                    for event in final_events {
+                        emit_event_async(writer, event_log, event_bus, event).await?;
+                    }
+                    break;
+                }
+
+                // Tool loop: execute directives and prepare follow-up.
+                let tool_loop_result = {
+                    let mut rt_guard = runtime
+                        .lock()
+                        .map_err(|_| io::Error::other("runtime mutex was poisoned"))?;
+
+                    // Consume a step for this tool loop iteration.
+                    let (step_event, budget_exceeded) =
+                        rt_guard.consume_step_for_tool_loop(&handle.agent_session_id);
+
+                    if budget_exceeded {
+                        let mut all_events = step_event.into_iter().collect::<Vec<_>>();
+                        let final_events = rt_guard.complete_message_generation(
+                            pending_back,
+                            response,
+                            final_content,
+                            emitted_delta,
+                        );
+                        all_events.extend(final_events);
+                        ToolLoopResult::Break(all_events)
+                    } else {
+                        let mut tool_events: Vec<EventEnvelope> =
+                            step_event.into_iter().collect();
+                        let mut tool_results: Vec<(String, String)> = Vec::new();
+                        let mut approval_blocked = false;
+
+                        for directive in &directives {
+                            let (events, summary) = rt_guard.execute_tool_in_loop(
+                                &handle.session_id,
+                                &handle.agent_id,
+                                directive,
+                            );
+                            let blocked = summary.starts_with("[tool blocked]");
+                            tool_events.extend(events);
+                            tool_results.push((directive.tool_name.clone(), summary));
+                            if blocked {
+                                approval_blocked = true;
+                                break;
+                            }
+                        }
+
+                        if approval_blocked {
+                            let final_events = rt_guard.complete_message_generation(
+                                pending_back,
+                                response,
+                                final_content,
+                                emitted_delta,
+                            );
+                            tool_events.extend(final_events);
+                            ToolLoopResult::Break(tool_events)
+                        } else {
+                            let follow_up_prompt = rt_guard.build_tool_loop_prompt(
+                                &handle.agent_id,
+                                &final_content,
+                                &tool_results,
+                            );
+                            ToolLoopResult::Continue {
+                                events: tool_events,
+                                follow_up_prompt,
+                                pending: Box::new(pending_back),
+                            }
+                        }
+                    }
+                };
+
+                match tool_loop_result {
+                    ToolLoopResult::Break(events) => {
+                        for event in events {
+                            emit_event_async(writer, event_log, event_bus, event).await?;
+                        }
+                        break;
+                    }
+                    ToolLoopResult::Continue {
+                        events,
+                        follow_up_prompt,
+                        mut pending,
+                    } => {
+                        for event in events {
+                            emit_event_async(writer, event_log, event_bus, event).await?;
+                        }
+                        current_prompt = follow_up_prompt;
+                        current_selected_model = pending.selected_model.clone();
+                        pending.prompt = current_prompt.clone();
+                        current_pending = *pending;
+                    }
+                }
+            }
+            Err(error) => {
+                let final_events = runtime
                     .lock()
-                    .map_err(|_| {
-                        ModelError::with_code(
-                            "runtime_lock_failed",
-                            "runtime mutex was poisoned",
-                            false,
-                        )
-                    })?
-                    .message_generation_cancelled(&pending)
-                {
-                    return Ok(ModelStreamControl::Cancel);
+                    .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+                    .fail_message_generation(pending_back, error);
+                for event in final_events {
+                    emit_event_async(writer, event_log, event_bus, event).await?;
                 }
-
-                match event {
-                    ModelStreamEvent::Started(started) | ModelStreamEvent::Completed(started) => {
-                        invocation = Some(started);
-                    }
-                    ModelStreamEvent::Delta(delta) => {
-                        final_content.push_str(&delta);
-                        emitted_delta = true;
-                    }
-                    ModelStreamEvent::Failed(_) | ModelStreamEvent::Cancelled(_) => {}
-                }
-                Ok(ModelStreamControl::Continue)
-            },
-        );
-        (stream_result, final_content, emitted_delta, pending)
-    })
-    .await
-    .map_err(|e| io::Error::other(format!("spawn_blocking join error: {e}")))?;
-
-    let (stream_result, final_content, emitted_delta, pending) = result;
-
-    // Emit deltas that were collected during blocking streaming
-    if !final_content.is_empty() {
-        let delta_event = runtime
-            .lock()
-            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
-            .message_delta_event(&pending, final_content.clone(), None);
-        emit_event_async(writer, event_log, event_bus, delta_event).await?;
-    }
-
-    let final_events = match stream_result {
-        Ok(response) => runtime
-            .lock()
-            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
-            .complete_message_generation(pending, response, final_content, emitted_delta),
-        Err(error) => runtime
-            .lock()
-            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
-            .fail_message_generation(pending, error),
-    };
-
-    for event in final_events {
-        emit_event_async(writer, event_log, event_bus, event).await?;
+                break;
+            }
+        }
     }
 
     Ok(())
@@ -602,67 +742,155 @@ fn serve_pending_message_generation<W: Write>(
         emit_event(writer, event_log, event_bus, event)?;
     }
 
-    let provider = Arc::clone(&pending.provider);
-    let mut invocation = None;
-    let mut final_content = String::new();
-    let mut emitted_delta = false;
-    let stream_result = provider.stream_chat(
-        ModelRequest::new(&pending.prompt).with_selected_model(pending.selected_model.as_deref()),
-        &mut |event| {
-            if runtime
-                .lock()
-                .map_err(|_| {
-                    ModelError::with_code(
-                        "runtime_lock_failed",
-                        "runtime mutex was poisoned",
-                        false,
-                    )
-                })?
-                .message_generation_cancelled(&pending)
-            {
-                return Ok(ModelStreamControl::Cancel);
-            }
+    let mut current_pending = pending;
 
-            match event {
-                ModelStreamEvent::Started(started) | ModelStreamEvent::Completed(started) => {
-                    invocation = Some(started);
+    loop {
+        let provider = Arc::clone(&current_pending.provider);
+        let mut invocation = None;
+        let mut final_content = String::new();
+        let mut emitted_delta = false;
+        let stream_result = provider.stream_chat(
+            ModelRequest::new(&current_pending.prompt)
+                .with_selected_model(current_pending.selected_model.as_deref()),
+            &mut |event| {
+                if runtime
+                    .lock()
+                    .map_err(|_| {
+                        ModelError::with_code(
+                            "runtime_lock_failed",
+                            "runtime mutex was poisoned",
+                            false,
+                        )
+                    })?
+                    .message_generation_cancelled(&current_pending)
+                {
+                    return Ok(ModelStreamControl::Cancel);
                 }
-                ModelStreamEvent::Delta(delta) => {
-                    final_content.push_str(&delta);
-                    emitted_delta = true;
-                    let event = runtime
+
+                match event {
+                    ModelStreamEvent::Started(started) | ModelStreamEvent::Completed(started) => {
+                        invocation = Some(started);
+                    }
+                    ModelStreamEvent::Delta(delta) => {
+                        final_content.push_str(&delta);
+                        emitted_delta = true;
+                        let event = runtime
+                            .lock()
+                            .map_err(|_| {
+                                ModelError::with_code(
+                                    "runtime_lock_failed",
+                                    "runtime mutex was poisoned",
+                                    false,
+                                )
+                            })?
+                            .message_delta_event(&current_pending, delta, invocation.as_ref());
+                        emit_event(writer, event_log, event_bus, event).map_err(|error| {
+                            ModelError::with_code("event_write_failed", error.to_string(), false)
+                        })?;
+                    }
+                    ModelStreamEvent::Failed(_) | ModelStreamEvent::Cancelled(_) => {}
+                }
+                Ok(ModelStreamControl::Continue)
+            },
+        );
+
+        match stream_result {
+            Ok(response) => {
+                let directives = parse_tool_call_directives(&final_content);
+                if directives.is_empty() {
+                    let final_events = runtime
                         .lock()
-                        .map_err(|_| {
-                            ModelError::with_code(
-                                "runtime_lock_failed",
-                                "runtime mutex was poisoned",
-                                false,
-                            )
-                        })?
-                        .message_delta_event(&pending, delta, invocation.as_ref());
-                    emit_event(writer, event_log, event_bus, event).map_err(|error| {
-                        ModelError::with_code("event_write_failed", error.to_string(), false)
-                    })?;
+                        .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+                        .complete_message_generation(
+                            current_pending,
+                            response,
+                            final_content,
+                            emitted_delta,
+                        );
+                    for event in final_events {
+                        emit_event(writer, event_log, event_bus, event)?;
+                    }
+                    break;
                 }
-                ModelStreamEvent::Failed(_) | ModelStreamEvent::Cancelled(_) => {}
+
+                // Tool loop iteration.
+                let mut rt_guard = runtime
+                    .lock()
+                    .map_err(|_| io::Error::other("runtime mutex was poisoned"))?;
+
+                let handle = current_pending.handle();
+                let (step_event, budget_exceeded) =
+                    rt_guard.consume_step_for_tool_loop(&handle.agent_session_id);
+                if let Some(event) = step_event {
+                    emit_event(writer, event_log, event_bus, event)?;
+                }
+                if budget_exceeded {
+                    let final_events = rt_guard.complete_message_generation(
+                        current_pending,
+                        response,
+                        final_content,
+                        emitted_delta,
+                    );
+                    drop(rt_guard);
+                    for event in final_events {
+                        emit_event(writer, event_log, event_bus, event)?;
+                    }
+                    break;
+                }
+
+                let mut tool_results: Vec<(String, String)> = Vec::new();
+                let mut approval_blocked = false;
+                for directive in &directives {
+                    let (events, summary) = rt_guard.execute_tool_in_loop(
+                        &handle.session_id,
+                        &handle.agent_id,
+                        directive,
+                    );
+                    let blocked = summary.starts_with("[tool blocked]");
+                    for event in events {
+                        emit_event(writer, event_log, event_bus, event)?;
+                    }
+                    tool_results.push((directive.tool_name.clone(), summary));
+                    if blocked {
+                        approval_blocked = true;
+                        break;
+                    }
+                }
+
+                if approval_blocked {
+                    let final_events = rt_guard.complete_message_generation(
+                        current_pending,
+                        response,
+                        final_content,
+                        emitted_delta,
+                    );
+                    drop(rt_guard);
+                    for event in final_events {
+                        emit_event(writer, event_log, event_bus, event)?;
+                    }
+                    break;
+                }
+
+                let follow_up_prompt = rt_guard.build_tool_loop_prompt(
+                    &handle.agent_id,
+                    &final_content,
+                    &tool_results,
+                );
+                drop(rt_guard);
+
+                current_pending.prompt = follow_up_prompt;
             }
-            Ok(ModelStreamControl::Continue)
-        },
-    );
-
-    let final_events = match stream_result {
-        Ok(response) => runtime
-            .lock()
-            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
-            .complete_message_generation(pending, response, final_content, emitted_delta),
-        Err(error) => runtime
-            .lock()
-            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
-            .fail_message_generation(pending, error),
-    };
-
-    for event in final_events {
-        emit_event(writer, event_log, event_bus, event)?;
+            Err(error) => {
+                let final_events = runtime
+                    .lock()
+                    .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+                    .fail_message_generation(current_pending, error);
+                for event in final_events {
+                    emit_event(writer, event_log, event_bus, event)?;
+                }
+                break;
+            }
+        }
     }
 
     Ok(())

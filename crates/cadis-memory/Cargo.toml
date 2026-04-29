@@ -1,5 +1,5 @@
 [package]
-name = "cadis-core"
+name = "cadis-memory"
 version = "1.1.3"
 edition.workspace = true
 license.workspace = true
@@ -8,14 +8,12 @@ homepage.workspace = true
 readme = "README.md"
 
 [dependencies]
-cadis-memory.workspace = true
-cadis-models.workspace = true
-cadis-policy.workspace = true
-cadis-protocol.workspace = true
-cadis-store.workspace = true
-chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

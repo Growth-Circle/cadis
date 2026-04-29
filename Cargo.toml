@@ -6,6 +6,7 @@ members = [
     "crates/cadis-core",
     "crates/cadis-daemon",
     "crates/cadis-hud",
+    "crates/cadis-memory",
     "crates/cadis-models",
     "crates/cadis-policy",
     "crates/cadis-protocol",
@@ -23,6 +24,7 @@ readme = "README.md"
 [workspace.dependencies]
 cadis-avatar = { path = "crates/cadis-avatar" }
 cadis-core = { path = "crates/cadis-core" }
+cadis-memory = { path = "crates/cadis-memory" }
 cadis-models = { path = "crates/cadis-models" }
 cadis-policy = { path = "crates/cadis-policy" }
 cadis-protocol = { path = "crates/cadis-protocol" }

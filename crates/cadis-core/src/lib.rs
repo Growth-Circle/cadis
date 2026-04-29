@@ -16,6 +16,7 @@ use cadis_models::{
     provider_catalog_for_config, ModelCatalogConfig, ModelInvocation, ModelProvider, ModelRequest,
     ModelResponse, ModelStreamControl, ModelStreamEvent, ProviderCatalogEntry, ProviderReadiness,
 };
+use cadis_memory::MemoryStore;
 use cadis_policy::{PolicyDecision, PolicyEngine};
 use cadis_protocol::{
     AgentEventPayload, AgentId, AgentListPayload, AgentModelChangedPayload, AgentRenamedPayload,
@@ -265,6 +266,75 @@ pub struct PendingMessageGeneration {
     /// Optional provider/model selected on the routed agent.
     pub selected_model: Option<String>,
     context: MessageGenerationContext,
+}
+
+/// Cloneable handle extracted from [`PendingMessageGeneration`] for use
+/// after the pending value has been moved into a blocking task.
+#[derive(Clone, Debug)]
+pub struct MessageGenerationHandle {
+    pub session_id: SessionId,
+    pub agent_session_id: AgentSessionId,
+    pub content_kind: ContentKind,
+    pub agent_id: AgentId,
+    pub agent_name: String,
+}
+
+impl PendingMessageGeneration {
+    /// Returns a cloneable handle that captures the routing context needed
+    /// to emit delta events without holding the full pending value.
+    pub fn handle(&self) -> MessageGenerationHandle {
+        MessageGenerationHandle {
+            session_id: self.context.session_id.clone(),
+            agent_session_id: self.context.agent_session_id.clone(),
+            content_kind: self.context.content_kind,
+            agent_id: self.context.agent_id.clone(),
+            agent_name: self.context.agent_name.clone(),
+        }
+    }
+}
+
+/// A tool call directive parsed from model output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCallDirective {
+    /// Tool name, e.g. `file.read`.
+    pub tool_name: String,
+    /// Structured JSON input for the tool.
+    pub input: serde_json::Value,
+}
+
+/// Maximum tool call directives parsed from a single model response.
+const MAX_TOOL_CALL_DIRECTIVES: usize = 5;
+
+/// Parses `[TOOL tool_name: {"input": "json"}]` directives from model output.
+pub fn parse_tool_call_directives(content: &str) -> Vec<ToolCallDirective> {
+    let mut directives = Vec::new();
+    for line in content.lines() {
+        if directives.len() >= MAX_TOOL_CALL_DIRECTIVES {
+            break;
+        }
+        let trimmed = line.trim();
+        let Some(inner) = trimmed
+            .strip_prefix("[TOOL ")
+            .and_then(|s| s.strip_suffix(']'))
+        else {
+            continue;
+        };
+        let Some((name, json_str)) = inner.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let json_str = json_str.trim();
+        if name.is_empty() || json_str.is_empty() {
+            continue;
+        }
+        if let Ok(input) = serde_json::from_str::<serde_json::Value>(json_str) {
+            directives.push(ToolCallDirective {
+                tool_name: name.to_owned(),
+                input,
+            });
+        }
+    }
+    directives
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1278,9 +1348,191 @@ impl Runtime {
         )
     }
 
+    /// Creates a daemon event for a streamed model delta using a cloneable handle.
+    pub fn message_delta_event_from_handle(
+        &mut self,
+        handle: &MessageGenerationHandle,
+        delta: String,
+        invocation: Option<&ModelInvocation>,
+    ) -> EventEnvelope {
+        let approx_tokens = (delta.len() as u64).div_ceil(4);
+        if let Some(record) = self.agent_sessions.get_mut(&handle.agent_session_id) {
+            record.tokens_used = record.tokens_used.saturating_add(approx_tokens);
+        }
+        let model = invocation.map(model_invocation_payload);
+        self.session_event(
+            handle.session_id.clone(),
+            CadisEvent::MessageDelta(MessageDeltaPayload {
+                delta,
+                content_kind: handle.content_kind,
+                agent_id: Some(handle.agent_id.clone()),
+                agent_name: Some(handle.agent_name.clone()),
+                model,
+            }),
+        )
+    }
+
     /// Returns whether a prepared model generation has been cancelled by the runtime.
     pub fn message_generation_cancelled(&self, pending: &PendingMessageGeneration) -> bool {
         self.agent_session_cancelled(&pending.context.agent_session_id)
+    }
+
+    /// Executes a single tool directive within the tool loop.
+    ///
+    /// Only safe-read (auto-execute) tools run automatically. Approval-gated
+    /// tools emit `ApprovalRequested` and signal the caller to break the loop.
+    pub fn execute_tool_in_loop(
+        &mut self,
+        session_id: &SessionId,
+        agent_id: &AgentId,
+        directive: &ToolCallDirective,
+    ) -> (Vec<EventEnvelope>, String) {
+        let Some(tool) = self.tools.get(&directive.tool_name) else {
+            return (
+                Vec::new(),
+                format!("[tool error] unknown tool: {}", directive.tool_name),
+            );
+        };
+
+        let risk_class = tool.risk_class;
+        let policy_decision = self.policy.decide(risk_class);
+        let is_auto_execute = tool.execution == ToolExecutionMode::AutoExecute;
+        let policy_reason = tool.policy_reason();
+
+        // Only auto-execute safe-read tools in the loop.
+        if policy_decision != PolicyDecision::Allow || !is_auto_execute {
+            let tool_call_id = self.next_tool_call_id();
+            let mut events = vec![self.session_event(
+                session_id.clone(),
+                CadisEvent::ToolRequested(ToolEventPayload {
+                    tool_call_id,
+                    tool_name: directive.tool_name.clone(),
+                    summary: Some(format!(
+                        "tool requires approval (risk={:?})",
+                        risk_class
+                    )),
+                    risk_class: Some(risk_class),
+                    output: None,
+                }),
+            )];
+            events.push(self.session_event(
+                session_id.clone(),
+                CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                    agent_id: agent_id.clone(),
+                    status: AgentStatus::WaitingApproval,
+                    task: Some(format!("waiting for approval: {}", directive.tool_name)),
+                }),
+            ));
+            return (
+                events,
+                format!(
+                    "[tool blocked] {} requires approval and cannot auto-execute in the tool loop",
+                    directive.tool_name
+                ),
+            );
+        }
+
+        let required_access = required_tool_access(&directive.tool_name);
+        let workspace = match self.resolved_granted_workspace(
+            session_id,
+            Some(agent_id),
+            &directive.input,
+            required_access,
+        ) {
+            Ok(ws) => ws,
+            Err(error) => {
+                return (
+                    Vec::new(),
+                    format!("[tool error] {}: {}", error.code, error.message),
+                );
+            }
+        };
+
+        let tool_call_id = self.next_tool_call_id();
+        let mut events = vec![self.session_event(
+            session_id.clone(),
+            CadisEvent::ToolRequested(ToolEventPayload {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: directive.tool_name.clone(),
+                summary: Some(policy_reason.clone()),
+                risk_class: Some(risk_class),
+                output: None,
+            }),
+        )];
+
+        let request = ToolCallRequest {
+            session_id: Some(session_id.clone()),
+            agent_id: Some(agent_id.clone()),
+            tool_name: directive.tool_name.clone(),
+            input: directive.input.clone(),
+        };
+
+        match self.execute_safe_tool(&workspace.root, &request) {
+            Ok(result) => {
+                events.push(self.session_event(
+                    session_id.clone(),
+                    CadisEvent::ToolCompleted(ToolEventPayload {
+                        tool_call_id,
+                        tool_name: directive.tool_name.clone(),
+                        summary: Some(result.summary.clone()),
+                        risk_class: Some(risk_class),
+                        output: Some(result.output),
+                    }),
+                ));
+                (events, result.summary)
+            }
+            Err(error) => {
+                events.push(self.session_event(
+                    session_id.clone(),
+                    CadisEvent::ToolFailed(ToolFailedPayload {
+                        tool_call_id,
+                        tool_name: directive.tool_name.clone(),
+                        error: error.clone(),
+                        risk_class: Some(risk_class),
+                    }),
+                ));
+                (events, format!("[tool error] {}: {}", error.code, error.message))
+            }
+        }
+    }
+
+    /// Builds a follow-up prompt that includes tool results for the next
+    /// model iteration in the tool loop.
+    pub fn build_tool_loop_prompt(
+        &self,
+        agent_id: &AgentId,
+        original_content: &str,
+        tool_results: &[(String, String)],
+    ) -> String {
+        let mut prompt = self.agent_prompt(agent_id, original_content);
+        prompt.push_str("\n\nTool results from your previous response:\n");
+        for (tool_name, result) in tool_results {
+            prompt.push_str(&format!("\n[RESULT {tool_name}]:\n{result}\n"));
+        }
+        prompt.push_str("\nContinue based on the tool results above. If you need more tools, use [TOOL name: {{\"input\": \"json\"}}] directives. Otherwise, provide your final answer.");
+        prompt
+    }
+
+    /// Returns the remaining budget steps for an agent session.
+    pub fn agent_session_remaining_steps(&self, agent_session_id: &AgentSessionId) -> u32 {
+        self.agent_sessions
+            .get(agent_session_id)
+            .map(|r| r.budget_steps.saturating_sub(r.steps_used))
+            .unwrap_or(0)
+    }
+
+    /// Consumes one step from the agent session budget. Returns the event
+    /// and whether the budget is now exceeded.
+    pub fn consume_step_for_tool_loop(
+        &mut self,
+        agent_session_id: &AgentSessionId,
+    ) -> (Option<EventEnvelope>, bool) {
+        let event = self.consume_agent_session_step(agent_session_id);
+        let exceeded = self
+            .agent_sessions
+            .get(agent_session_id)
+            .is_some_and(|r| r.status == AgentSessionStatus::BudgetExceeded);
+        (event, exceeded)
     }
 
     /// Finalizes a successful streamed model generation.
@@ -2568,6 +2820,27 @@ impl Runtime {
         let Some(agent) = self.agents.get(agent_id) else {
             return content.to_owned();
         };
+
+        // Memory capsule injection
+        let memory_prefix = {
+            let store = MemoryStore::new(self.profile_home.root());
+            let scope = cadis_memory::MemoryScope::Agent(agent_id.as_str().to_owned());
+            match store.compile_capsule(Some(&scope), 2048) {
+                Ok(capsule) if !capsule.entries.is_empty() => {
+                    format!("\n\nRelevant memory:\n{}\n", capsule.entries.join("\n"))
+                }
+                _ => {
+                    // Fall back to global scope
+                    match store.compile_capsule(None, 2048) {
+                        Ok(capsule) if !capsule.entries.is_empty() => {
+                            format!("\n\nRelevant memory:\n{}\n", capsule.entries.join("\n"))
+                        }
+                        _ => String::new(),
+                    }
+                }
+            }
+        };
+
         let specialist = if agent.persona.trim().is_empty() {
             String::new()
         } else {
@@ -2586,13 +2859,13 @@ impl Runtime {
         };
         if agent.id.as_str() == "main" {
             return format!(
-                "You are CADIS, a local-first AI assistant and the orchestrator for the local CADIS agent cluster. You have access to file, shell, and git tools. Always ask for approval before risky operations. Use the runtime state to route work, avoid duplicate work, and summarize what other agents are doing when useful.{}{}\n\nUser request:\n{}",
-                specialist, runtime_context, content
+                "You are CADIS, a local-first AI assistant and the orchestrator for the local CADIS agent cluster. You have access to file, shell, and git tools. Always ask for approval before risky operations. Use the runtime state to route work, avoid duplicate work, and summarize what other agents are doing when useful.{}{}{}\n\nUser request:\n{}",
+                specialist, runtime_context, memory_prefix, content
             );
         }
         format!(
-            "You are {} ({}) in the CADIS multi-agent runtime. Answer only for your role and keep the response concise unless the user asks for detail. Always respect CADIS approval and tool safety policy.{}\n\nUser request:\n{}",
-            agent.display_name, agent.role.as_str(), specialist, content
+            "You are {} ({}) in the CADIS multi-agent runtime. Answer only for your role and keep the response concise unless the user asks for detail. Always respect CADIS approval and tool safety policy.{}{}\n\nUser request:\n{}",
+            agent.display_name, agent.role.as_str(), specialist, memory_prefix, content
         )
     }
 
@@ -12899,5 +13172,37 @@ mod tests {
         );
         assert_eq!(err.code, "file_patch_concurrent_edit");
         assert!(err.retryable);
+    }
+
+    #[test]
+    fn parse_tool_call_directives_parses_valid_directives() {
+        let content = r#"Let me read the file.
+[TOOL file.read: {"path": "src/main.rs"}]
+And check git status.
+[TOOL git.status: {"path": "."}]
+Done."#;
+        let directives = parse_tool_call_directives(content);
+        assert_eq!(directives.len(), 2);
+        assert_eq!(directives[0].tool_name, "file.read");
+        assert_eq!(directives[0].input["path"], "src/main.rs");
+        assert_eq!(directives[1].tool_name, "git.status");
+        assert_eq!(directives[1].input["path"], ".");
+    }
+
+    #[test]
+    fn parse_tool_call_directives_ignores_malformed() {
+        let content = "[TOOL ]\n[TOOL :{}]\n[TOOL name:]\n[TOOL name: not json]\nnormal text";
+        let directives = parse_tool_call_directives(content);
+        assert!(directives.is_empty());
+    }
+
+    #[test]
+    fn parse_tool_call_directives_caps_at_max() {
+        let content = (0..10)
+            .map(|i| format!("[TOOL file.read: {{\"path\": \"file{i}.rs\"}}]"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let directives = parse_tool_call_directives(&content);
+        assert_eq!(directives.len(), 5);
     }
 }
