@@ -32,6 +32,17 @@ chore: update CI toolchain
 - Logs do not expose secrets.
 - Generated files are not committed unless required.
 
+## For Maintainers: PR Review Workflow
+
+After every push to `main`, maintainers must triage open PRs before tagging
+any release. See `docs/standards/22_PR_REVIEW_WORKFLOW_STANDARD.md` for the
+full workflow. Summary:
+
+1. `gh pr list --state open` — review every PR
+2. For each: merge, apply manually (credit author), request changes, or close
+3. Verify CI is green
+4. Only then tag a release
+
 ## Design Changes
 
 For architecture-level changes, open or update an ADR in `docs/11_DECISIONS.md` before implementation.

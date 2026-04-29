@@ -31,6 +31,7 @@ These standards are mandatory for contributors and AI agents unless a maintainer
 | 19 | `19_LICENSE_DEPENDENCY_STANDARD.md` | License policy, dependency approval, NOTICE, source imports |
 | 20 | `20_CI_CD_STANDARD.md` | CI checks, required status, security scans, release automation |
 | 21 | `21_RELEASE_NOTES_STANDARD.md` | Release notes format, sections, template, attribution, checksums |
+| 22 | `22_PR_REVIEW_WORKFLOW_STANDARD.md` | Mandatory PR triage after every push, release gate, contributor credit |
 
 ## Priority Tiers
 

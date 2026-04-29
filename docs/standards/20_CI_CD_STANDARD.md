@@ -227,3 +227,4 @@ When CI fails:
 - `docs/14_SECURITY_THREAT_MODEL.md`
 - `docs/28_PLATFORM_BASELINE.md`
 - `docs/standards/07_RELEASE_STANDARD.md`
+- `docs/standards/22_PR_REVIEW_WORKFLOW_STANDARD.md`

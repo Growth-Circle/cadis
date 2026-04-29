@@ -56,6 +56,7 @@ For UI work, also read:
 - Do not make Node.js a core daemon dependency.
 - Keep risky actions behind central approval.
 - Follow `docs/standards/21_RELEASE_NOTES_STANDARD.md` for every release — update `RELEASE_NOTES.md` before tagging.
+- Follow `docs/standards/22_PR_REVIEW_WORKFLOW_STANDARD.md` — after every push, check open PRs, triage them, and verify CI before releasing.
 
 ## Working Order
 
