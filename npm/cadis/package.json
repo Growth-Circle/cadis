@@ -13,14 +13,10 @@
     "cadis": "bin/cadis",
     "cadisd": "bin/cadisd"
   },
-  "files": ["bin", "README.md", "LICENSE"],
-  "optionalDependencies": {
-    "@growthcircle/cadis-linux-x64": "1.1.2",
-    "@growthcircle/cadis-linux-arm64": "1.1.2",
-    "@growthcircle/cadis-darwin-x64": "1.1.2",
-    "@growthcircle/cadis-darwin-arm64": "1.1.2",
-    "@growthcircle/cadis-win32-x64": "1.1.2"
+  "scripts": {
+    "postinstall": "node scripts/install.js"
   },
+  "files": ["bin", "scripts", "native", "README.md", "LICENSE"],
   "engines": {
     "node": ">=16"
   }

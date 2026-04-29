@@ -4,46 +4,14 @@ const { execFileSync } = require("child_process");
 const path = require("path");
 const os = require("os");
 
-const PLATFORMS = {
-  "linux-x64": "@growthcircle/cadis-linux-x64",
-  "linux-arm64": "@growthcircle/cadis-linux-arm64",
-  "darwin-x64": "@growthcircle/cadis-darwin-x64",
-  "darwin-arm64": "@growthcircle/cadis-darwin-arm64",
-  "win32-x64": "@growthcircle/cadis-win32-x64",
-};
-
-const platform = os.platform();
-const arch = os.arch();
-const key = `${platform}-${arch}`;
-const pkg = PLATFORMS[key];
-
-if (!pkg) {
-  console.error(
-    `cadis: unsupported platform ${platform}-${arch}. Supported: ${Object.keys(PLATFORMS).join(", ")}`
-  );
-  process.exit(1);
-}
-
-let binDir;
-try {
-  binDir = path.dirname(require.resolve(`${pkg}/package.json`));
-} catch {
-  console.error(
-    `cadis: missing platform package ${pkg}.\nReinstall: npm install -g cadis@latest`
-  );
-  process.exit(1);
-}
-
-const name = path.basename(process.argv[1]).replace(/\.js$/, "");
-const ext = platform === "win32" ? ".exe" : "";
-const bin = path.join(binDir, `${name}${ext}`);
+const ext = os.platform() === "win32" ? ".exe" : "";
+const bin = path.join(__dirname, "..", "native", `cadis${ext}`);
 
 try {
-  const result = execFileSync(bin, process.argv.slice(2), {
-    stdio: "inherit",
-    env: process.env,
-  });
+  execFileSync(bin, process.argv.slice(2), { stdio: "inherit" });
 } catch (e) {
-  if (e.status !== null) process.exit(e.status);
-  throw e;
+  if (e.status != null) process.exit(e.status);
+  console.error(`cadis: binary not found at ${bin}`);
+  console.error("Run: npm rebuild @growthcircle/cadis");
+  process.exit(1);
 }
