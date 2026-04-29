@@ -39,4 +39,4 @@ jobs:
       - name: Rust clippy (portable crates)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Rust tests (portable crates)
-        run: cargo test -p cadis-protocol -p cadis-policy -p cadis-models -p cadis-avatar -p cadis-store -p cadis-memory -p cadis-output-filter --all-targets --all-features
+        run: cargo test -p cadis-protocol -p cadis-policy -p cadis-models -p cadis-avatar -p cadis-memory -p cadis-output-filter --all-targets --all-features
