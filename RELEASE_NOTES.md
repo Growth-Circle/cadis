@@ -1,11 +1,11 @@
-# C.A.D.I.S. v1.2.0 — Async runtime, memory system, and zero-config launch
+# C.A.D.I.S. v1.2.1 — Async runtime, memory system, and zero-config launch
 
 **Release date:** 2026-04-30
 **Maturity:** beta
 
 ## Highlights
 
-v1.2.0 is the largest feature release since the initial beta. The daemon now runs
+v1.2.1 is the largest feature release since the initial beta. The daemon now runs
 on a fully async Tokio runtime with streaming tool output, a persistent memory
 system, and intelligent output filtering that reduces token usage by 60–90%. The
 CLI launches the daemon and HUD automatically — no manual setup required. This
@@ -75,8 +75,8 @@ npm install -g @growthcircle/cadis@1.2.0
 ### Shell (Linux / macOS)
 
 ```bash
-curl -fsSL https://github.com/Growth-Circle/cadis/releases/download/v1.2.0/cadis-$(uname -m | sed 's/arm64/aarch64/')-$([ "$(uname)" = "Darwin" ] && echo apple-darwin || echo unknown-linux-gnu) -o cadis
-curl -fsSL https://github.com/Growth-Circle/cadis/releases/download/v1.2.0/cadisd-$(uname -m | sed 's/arm64/aarch64/')-$([ "$(uname)" = "Darwin" ] && echo apple-darwin || echo unknown-linux-gnu) -o cadisd
+curl -fsSL https://github.com/Growth-Circle/cadis/releases/download/v1.2.1/cadis-$(uname -m | sed 's/arm64/aarch64/')-$([ "$(uname)" = "Darwin" ] && echo apple-darwin || echo unknown-linux-gnu) -o cadis
+curl -fsSL https://github.com/Growth-Circle/cadis/releases/download/v1.2.1/cadisd-$(uname -m | sed 's/arm64/aarch64/')-$([ "$(uname)" = "Darwin" ] && echo apple-darwin || echo unknown-linux-gnu) -o cadisd
 chmod +x cadis cadisd
 sudo mv cadis cadisd /usr/local/bin/
 ```
@@ -114,4 +114,4 @@ cadisd --check
 
 ## Full Changelog
 
-[v1.1.3...v1.2.0](https://github.com/Growth-Circle/cadis/compare/v1.1.3...v1.2.0)
+[v1.1.3...v1.2.1](https://github.com/Growth-Circle/cadis/compare/v1.1.3...v1.2.1)
