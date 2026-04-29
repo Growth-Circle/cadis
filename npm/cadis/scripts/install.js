@@ -3,6 +3,7 @@
 "use strict";
 
 const { execSync } = require("child_process");
+const crypto = require("crypto");
 const fs = require("fs");
 const https = require("https");
 const os = require("os");
@@ -59,6 +60,23 @@ function download(url) {
   });
 }
 
+function checksumSha256(buffer) {
+  return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+function parseSha256File(text, expectedFileName) {
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const [hash, ...rest] = line.split(/\s+/);
+    if (!hash || !/^[a-f0-9]{64}$/i.test(hash)) continue;
+    if (rest.length === 0) return hash.toLowerCase();
+    const fileToken = rest.join(" ").replace(/^\*/, "");
+    if (fileToken === expectedFileName) return hash.toLowerCase();
+  }
+  throw new Error(`Could not parse SHA256 for ${expectedFileName}`);
+}
+
 async function main() {
   const target = getTarget();
   const version = getVersion();
@@ -81,10 +99,17 @@ async function main() {
   fs.mkdirSync(dir, { recursive: true });
 
   for (const name of BINARIES) {
-    const url = `${base}/${name}-${target}${ext}`;
+    const artifactName = `${name}-${target}${ext}`;
+    const url = `${base}/${artifactName}`;
+    const checksumUrl = `${url}.sha256`;
     process.stdout.write(`Downloading ${name} v${version} for ${target}...`);
     try {
-      const buf = await download(url);
+      const [buf, checksumBuf] = await Promise.all([download(url), download(checksumUrl)]);
+      const expected = parseSha256File(checksumBuf.toString("utf8"), artifactName);
+      const actual = checksumSha256(buf);
+      if (actual !== expected) {
+        throw new Error(`Checksum mismatch for ${artifactName} (expected ${expected}, got ${actual})`);
+      }
       const dest = path.join(dir, `${name}${ext}`);
       fs.writeFileSync(dest, buf, { mode: 0o755 });
       console.log(" ok");
@@ -92,6 +117,7 @@ async function main() {
       console.log(" failed");
       console.error(`  ${err.message}`);
       console.error(`  You can download manually from: ${url}`);
+      console.error(`  Checksum file: ${checksumUrl}`);
       process.exit(0); // don't break npm install
     }
   }
