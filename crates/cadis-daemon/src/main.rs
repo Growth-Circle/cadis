@@ -4,7 +4,7 @@ use std::error::Error;
 #[cfg(unix)]
 use std::fs;
 use std::io::{self, BufRead, Write};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::io::{BufReader, BufWriter};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
@@ -13,7 +13,7 @@ use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::thread;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -1065,18 +1065,18 @@ mod tests {
     #[cfg(unix)]
     use cadis_models::{ModelInvocation, ModelProvider, ModelResponse};
     use cadis_protocol::{
-        CadisEvent, DaemonResponse, EmptyPayload, EventId, RequestId, SessionEventPayload,
-        SessionId, Timestamp,
+        CadisEvent, EmptyPayload, EventId, SessionEventPayload, SessionId, Timestamp,
     };
     #[cfg(unix)]
     use cadis_protocol::{
-        ClientId, ContentKind, MessageSendRequest, RequestEnvelope, ServerFrame,
-        SessionCreateRequest, SessionTargetRequest,
+        ClientId, ContentKind, DaemonResponse, MessageSendRequest, RequestEnvelope, RequestId,
+        ServerFrame, SessionCreateRequest, SessionTargetRequest,
     };
     #[cfg(unix)]
     use std::os::unix::net::{UnixListener, UnixStream};
     #[cfg(unix)]
     use std::sync::Condvar;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     #[test]

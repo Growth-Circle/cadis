@@ -21,7 +21,8 @@ jobs:
           fetch-depth: 0
       - name: Install gitleaks
         run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_8.24.3_linux_x64.tar.gz | tar xz
+          GITLEAKS_VERSION=$(curl -sSf https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/')
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz
           chmod +x gitleaks
       - name: Run gitleaks
         run: ./gitleaks detect --source . --no-banner -v
