@@ -356,10 +356,21 @@ fn protected_system_paths() -> Vec<PathBuf> {
 
     if cfg!(windows) {
         let drive = std::env::var_os("SystemDrive")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("C:"));
-        for segment in ["Windows", "Program Files", "Program Files (x86)", "ProgramData"] {
-            let mut path = drive.clone();
+            .and_then(|value| value.to_str().map(str::to_owned))
+            .unwrap_or_else(|| "C:".to_owned());
+        let drive_root = if drive.ends_with('\\') || drive.ends_with('/') {
+            drive
+        } else {
+            format!("{drive}\\")
+        };
+        let drive_root = PathBuf::from(drive_root);
+        for segment in [
+            "Windows",
+            "Program Files",
+            "Program Files (x86)",
+            "ProgramData",
+        ] {
+            let mut path = drive_root.clone();
             path.push(segment);
             protected.push(path);
         }
