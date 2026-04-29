@@ -6,10 +6,10 @@ The format follows Keep a Changelog style, and the project will use Semantic Ver
 
 ## [Unreleased]
 
-## [1.1.1] - 2026-04-29
+## [1.1.2] - 2026-04-29
 
 ### Added
-- npm distribution: `npm install -g cadis` with platform-specific binary packages
+- npm distribution: `npm install -g @growthcircle/cadis` with platform-specific binary packages
 - Platform packages: @growthcircle/cadis-{linux-x64,linux-arm64,darwin-x64,darwin-arm64,win32-x64}
 - GitHub Actions npm-publish workflow (triggers on release)
 

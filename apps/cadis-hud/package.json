@@ -1,6 +1,6 @@
 {
   "name": "cadis-hud",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "description": "CADIS Linux desktop multi-agent HUD (Tauri + React)",
   "packageManager": "pnpm@10.33.2",

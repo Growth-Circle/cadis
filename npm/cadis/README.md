@@ -7,7 +7,7 @@ Local-first multi-agent runtime for desktop work, native tools, approvals, voice
 ## Install
 
 ```bash
-npm install -g cadis
+npm install -g @growthcircle/cadis
 ```
 
 ## Usage

@@ -173,7 +173,7 @@ presence without moving core orchestration out of `cadisd`.
 ### Install via npm (recommended)
 
 ```bash
-npm install -g cadis
+npm install -g @growthcircle/cadis
 ```
 
 Then run:
