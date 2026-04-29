@@ -323,12 +323,65 @@ pub(crate) fn normalize_aliases(aliases: Vec<String>) -> Vec<String> {
     aliases
 }
 
-pub(crate) fn canonical_workspace_root(root: &str) -> Result<PathBuf, std::io::Error> {
-    let path = if let Some(rest) = root.strip_prefix("~/") {
-        std::env::var_os("HOME")
+fn canonical_home_dir() -> Option<PathBuf> {
+    let mut candidates = vec![
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("USERPROFILE").map(PathBuf::from),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+
+    if let (Some(home_drive), Some(home_path)) =
+        (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+    {
+        let mut joined = PathBuf::from(home_drive);
+        joined.push(PathBuf::from(home_path));
+        candidates.push(joined);
+    }
+
+    candidates
+        .into_iter()
+        .find_map(|candidate| candidate.canonicalize().ok())
+}
+
+fn protected_system_paths() -> Vec<PathBuf> {
+    let mut protected = vec![
+        PathBuf::from("/etc"),
+        PathBuf::from("/dev"),
+        PathBuf::from("/proc"),
+        PathBuf::from("/sys"),
+        PathBuf::from("/run"),
+    ];
+
+    if cfg!(windows) {
+        let drive = std::env::var_os("SystemDrive")
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("~"))
-            .join(rest)
+            .unwrap_or_else(|| PathBuf::from("C:"));
+        for segment in ["Windows", "Program Files", "Program Files (x86)", "ProgramData"] {
+            let mut path = drive.clone();
+            path.push(segment);
+            protected.push(path);
+        }
+    }
+
+    protected
+        .into_iter()
+        .map(|path| path.canonicalize().unwrap_or(path))
+        .collect()
+}
+
+fn is_protected_system_path(path: &Path) -> bool {
+    protected_system_paths()
+        .iter()
+        .any(|denied| path == denied || path.starts_with(denied))
+}
+
+pub(crate) fn canonical_workspace_root(root: &str) -> Result<PathBuf, std::io::Error> {
+    let path = if let Some(rest) = root.strip_prefix("~/").or_else(|| root.strip_prefix("~\\")) {
+        canonical_home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(root))
     } else {
         PathBuf::from(root)
     };
@@ -344,10 +397,7 @@ pub(crate) fn validate_workspace_root(root: &Path, cadis_home: &Path) -> Result<
         ));
     }
 
-    if ["/etc", "/dev", "/proc", "/sys", "/run"]
-        .iter()
-        .any(|path| root == Path::new(path))
-    {
+    if is_protected_system_path(root) {
         return Err(tool_error(
             "workspace_root_denied",
             format!(
@@ -358,10 +408,7 @@ pub(crate) fn validate_workspace_root(root: &Path, cadis_home: &Path) -> Result<
         ));
     }
 
-    if let Some(home) = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .and_then(|path| path.canonicalize().ok())
-    {
+    if let Some(home) = canonical_home_dir() {
         if root == home || home.starts_with(root) {
             return Err(tool_error(
                 "workspace_root_too_broad",
@@ -407,21 +454,15 @@ pub(crate) fn validate_shell_cwd(cwd: &Path, cadis_home: &Path) -> Result<(), Er
         ));
     }
 
-    for denied in ["/etc", "/dev", "/proc", "/sys", "/run"] {
-        let denied = Path::new(denied);
-        if cwd == denied || cwd.starts_with(denied) {
-            return Err(tool_error(
-                "shell_cwd_denied",
-                format!("shell.run cwd {} is a protected system path", cwd.display()),
-                false,
-            ));
-        }
+    if is_protected_system_path(cwd) {
+        return Err(tool_error(
+            "shell_cwd_denied",
+            format!("shell.run cwd {} is a protected system path", cwd.display()),
+            false,
+        ));
     }
 
-    if let Some(home) = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .and_then(|path| path.canonicalize().ok())
-    {
+    if let Some(home) = canonical_home_dir() {
         if cwd == home || home.starts_with(cwd) {
             return Err(tool_error(
                 "shell_cwd_denied",
