@@ -1,0 +1,41 @@
+{
+  "projectName": "cadis",
+  "projectOwner": "Growth-Circle",
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "files": ["README.md"],
+  "imageSize": 80,
+  "commit": false,
+  "commitConvention": "angular",
+  "contributors": [
+    {
+      "login": "RamaAditya49",
+      "name": "Rama Aditya",
+      "avatar_url": "https://avatars.githubusercontent.com/u/213913142?v=4",
+      "profile": "https://github.com/RamaAditya49",
+      "contributions": ["code", "doc", "infra", "maintenance"]
+    },
+    {
+      "login": "shintaaurelia",
+      "name": "Shinta Aurelia",
+      "avatar_url": "https://avatars.githubusercontent.com/u/271351134?v=4",
+      "profile": "https://github.com/shintaaurelia",
+      "contributions": ["code", "doc"]
+    },
+    {
+      "login": "wulanrlestari",
+      "name": "Wulan R Lestari",
+      "avatar_url": "https://avatars.githubusercontent.com/u/271922236?v=4",
+      "profile": "https://github.com/wulanrlestari",
+      "contributions": ["code", "design"]
+    },
+    {
+      "login": "DeryFerd",
+      "name": "DeryFerd",
+      "avatar_url": "https://avatars.githubusercontent.com/u/109969595?v=4",
+      "profile": "https://github.com/DeryFerd",
+      "contributions": ["code"]
+    }
+  ],
+  "contributorsPerLine": 7
+}

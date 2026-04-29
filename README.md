@@ -293,6 +293,21 @@ cadis/
 - [Storage Format and Migration](docs/31_STORAGE_FORMAT.md)
 - [Stable CLI Reference](docs/30_STABLE_CLI.md)
 
+## Contributors
+
+Thanks to everyone who has contributed to C.A.D.I.S.!
+
+<!-- ALL-CONTRIBUTORS-LIST:START -->
+<table>
+  <tr>
+    <td align="center"><a href="https://github.com/RamaAditya49"><img src="https://avatars.githubusercontent.com/u/213913142?v=4" width="80" style="border-radius:50%;" alt="RamaAditya49"/><br /><sub><b>Rama Aditya</b></sub></a></td>
+    <td align="center"><a href="https://github.com/shintaaurelia"><img src="https://avatars.githubusercontent.com/u/271351134?v=4" width="80" style="border-radius:50%;" alt="shintaaurelia"/><br /><sub><b>Shinta Aurelia</b></sub></a></td>
+    <td align="center"><a href="https://github.com/wulanrlestari"><img src="https://avatars.githubusercontent.com/u/271922236?v=4" width="80" style="border-radius:50%;" alt="wulanrlestari"/><br /><sub><b>Wulan R Lestari</b></sub></a></td>
+    <td align="center"><a href="https://github.com/DeryFerd"><img src="https://avatars.githubusercontent.com/u/109969595?v=4" width="80" style="border-radius:50%;" alt="DeryFerd"/><br /><sub><b>DeryFerd</b></sub></a></td>
+  </tr>
+</table>
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
 ## Contributing
 
 Start with [AGENT.md](AGENT.md), [CONTRIBUTING.md](CONTRIBUTING.md), and
