@@ -1,6 +1,6 @@
 {
   "name": "cadis",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "C.A.D.I.S. — Coordinated Agentic Distributed Intelligence System. Local-first multi-agent runtime for desktop work.",
   "license": "Apache-2.0",
   "repository": {
@@ -15,11 +15,11 @@
   },
   "files": ["bin", "README.md", "LICENSE"],
   "optionalDependencies": {
-    "@growthcircle/cadis-linux-x64": "1.1.0",
-    "@growthcircle/cadis-linux-arm64": "1.1.0",
-    "@growthcircle/cadis-darwin-x64": "1.1.0",
-    "@growthcircle/cadis-darwin-arm64": "1.1.0",
-    "@growthcircle/cadis-win32-x64": "1.1.0"
+    "@growthcircle/cadis-linux-x64": "1.1.1",
+    "@growthcircle/cadis-linux-arm64": "1.1.1",
+    "@growthcircle/cadis-darwin-x64": "1.1.1",
+    "@growthcircle/cadis-darwin-arm64": "1.1.1",
+    "@growthcircle/cadis-win32-x64": "1.1.1"
   },
   "engines": {
     "node": ">=16"
