@@ -83,8 +83,6 @@ jobs:
             os: ubuntu-latest
           - platform: macos
             os: macos-latest
-          - platform: windows
-            os: windows-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install system dependencies (Linux)
@@ -156,21 +154,5 @@ jobs:
           generate_release_notes: true
           files: artifacts/*
 
-  npm-publish:
-    name: Publish to npm
-    needs: [release]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org
-      - name: Sync version and publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          cd npm/cadis
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-          npm publish --access public
+  # npm publishing is handled by .github/workflows/npm-publish.yml
+  # triggered by the release event created above.

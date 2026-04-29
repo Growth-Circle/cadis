@@ -198,7 +198,12 @@ impl MemoryStore {
         self.write_all(&records)
     }
 
-    pub fn search(&self, query: &str, scope: Option<&MemoryScope>, limit: usize) -> Result<Vec<MemoryHit>> {
+    pub fn search(
+        &self,
+        query: &str,
+        scope: Option<&MemoryScope>,
+        limit: usize,
+    ) -> Result<Vec<MemoryHit>> {
         let records = self.read_all()?;
         let query_words = extract_keywords(query);
         let mut hits: Vec<MemoryHit> = records
@@ -213,12 +218,20 @@ impl MemoryStore {
                 }
             })
             .collect();
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(limit);
         Ok(hits)
     }
 
-    pub fn compile_capsule(&self, scope: Option<&MemoryScope>, max_chars: usize) -> Result<MemoryCapsule> {
+    pub fn compile_capsule(
+        &self,
+        scope: Option<&MemoryScope>,
+        max_chars: usize,
+    ) -> Result<MemoryCapsule> {
         let records = self.read_all()?;
         let confirmed: Vec<&MemoryRecord> = records
             .iter()
@@ -248,8 +261,8 @@ impl MemoryStore {
 // ── Helpers ────────────────────────────────────────────────────────
 
 const STOPWORDS: &[&str] = &[
-    "a", "an", "the", "is", "it", "in", "on", "of", "to", "and", "or", "for",
-    "with", "at", "by", "from", "as", "be", "was", "are", "this", "that",
+    "a", "an", "the", "is", "it", "in", "on", "of", "to", "and", "or", "for", "with", "at", "by",
+    "from", "as", "be", "was", "are", "this", "that",
 ];
 
 pub fn extract_keywords(content: &str) -> Vec<String> {
@@ -310,7 +323,9 @@ mod tests {
     #[test]
     fn propose_and_search() {
         let (_dir, store) = temp_store();
-        let record = store.propose(sample_record("Rust workspace uses cargo")).unwrap();
+        let record = store
+            .propose(sample_record("Rust workspace uses cargo"))
+            .unwrap();
         assert!(!record.id.is_empty());
         assert_eq!(record.status, MemoryStatus::Candidate);
 
@@ -322,7 +337,9 @@ mod tests {
     #[test]
     fn promote_and_capsule() {
         let (_dir, store) = temp_store();
-        let r = store.propose(sample_record("Always run tests before commit")).unwrap();
+        let r = store
+            .propose(sample_record("Always run tests before commit"))
+            .unwrap();
         store.promote(&r.id).unwrap();
 
         let capsule = store.compile_capsule(None, 4096).unwrap();
@@ -334,8 +351,12 @@ mod tests {
     #[test]
     fn compile_capsule_truncation() {
         let (_dir, store) = temp_store();
-        let r1 = store.propose(sample_record("First fact about the project")).unwrap();
-        let r2 = store.propose(sample_record("Second fact about the project")).unwrap();
+        let r1 = store
+            .propose(sample_record("First fact about the project"))
+            .unwrap();
+        let r2 = store
+            .propose(sample_record("Second fact about the project"))
+            .unwrap();
         store.promote(&r1.id).unwrap();
         store.promote(&r2.id).unwrap();
 

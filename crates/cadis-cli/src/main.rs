@@ -1158,7 +1158,9 @@ fn check_daemon_alive(config: &cadis_store::CadisConfig) -> bool {
     }
     let addr = config.effective_tcp_address();
     std::net::TcpStream::connect_timeout(
-        &addr.parse().unwrap_or_else(|_| "127.0.0.1:7433".parse().unwrap()),
+        &addr
+            .parse()
+            .unwrap_or_else(|_| "127.0.0.1:7433".parse().unwrap()),
         std::time::Duration::from_millis(200),
     )
     .is_ok()
@@ -1212,9 +1214,7 @@ fn interactive_chat() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse(["status"].map(String::from))?;
 
     // Show quick status first.
-    if let Ok(frames) =
-        send_request(&cli, ClientRequest::DaemonStatus(EmptyPayload::default()))
-    {
+    if let Ok(frames) = send_request(&cli, ClientRequest::DaemonStatus(EmptyPayload::default())) {
         for frame in &frames {
             if let ServerFrame::Response(resp) = frame {
                 if let DaemonResponse::DaemonStatus(status) = &resp.response {

@@ -12,11 +12,11 @@ use std::time::{Duration as StdDuration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+use cadis_memory::MemoryStore;
 use cadis_models::{
     provider_catalog_for_config, ModelCatalogConfig, ModelInvocation, ModelProvider, ModelRequest,
     ModelResponse, ModelStreamControl, ModelStreamEvent, ProviderCatalogEntry, ProviderReadiness,
 };
-use cadis_memory::MemoryStore;
 use cadis_policy::{PolicyDecision, PolicyEngine};
 use cadis_protocol::{
     AgentEventPayload, AgentId, AgentListPayload, AgentModelChangedPayload, AgentRenamedPayload,
@@ -1407,10 +1407,7 @@ impl Runtime {
                 CadisEvent::ToolRequested(ToolEventPayload {
                     tool_call_id,
                     tool_name: directive.tool_name.clone(),
-                    summary: Some(format!(
-                        "tool requires approval (risk={:?})",
-                        risk_class
-                    )),
+                    summary: Some(format!("tool requires approval (risk={:?})", risk_class)),
                     risk_class: Some(risk_class),
                     output: None,
                 }),
@@ -1491,7 +1488,10 @@ impl Runtime {
                         risk_class: Some(risk_class),
                     }),
                 ));
-                (events, format!("[tool error] {}: {}", error.code, error.message))
+                (
+                    events,
+                    format!("[tool error] {}: {}", error.code, error.message),
+                )
             }
         }
     }
@@ -1627,13 +1627,12 @@ impl Runtime {
                     ));
                     // Create an agent session for the spawned agent so the task
                     // is tracked and the agent transitions to Running.
-                    let (child_session_id, child_session_event) = self
-                        .start_agent_session(
-                            context.session_id.clone(),
-                            format!("spawn_route_{}", record.id),
-                            record.id.clone(),
-                            directive.task.clone(),
-                        );
+                    let (child_session_id, child_session_event) = self.start_agent_session(
+                        context.session_id.clone(),
+                        format!("spawn_route_{}", record.id),
+                        record.id.clone(),
+                        directive.task.clone(),
+                    );
                     events.push(child_session_event);
                     events.push(self.session_event(
                         context.session_id.clone(),
@@ -1800,9 +1799,9 @@ impl Runtime {
             let paths: Vec<PathBuf> = ops.iter().map(|op| PathBuf::from(op.path())).collect();
             let path_refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
             let id = format!("ckpt_{}", chrono::Utc::now().format("%Y%m%d%H%M%S%3f"));
-            let _ = self
-                .checkpoint_manager()
-                .create(&id, "pre-tool checkpoint", workspace, &path_refs);
+            let _ =
+                self.checkpoint_manager()
+                    .create(&id, "pre-tool checkpoint", workspace, &path_refs);
         }
     }
 
@@ -4812,10 +4811,18 @@ impl Runtime {
         input: &serde_json::Value,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
         let branch = input_string(input, "branch").ok_or_else(|| {
-            tool_error("invalid_tool_input", "git.worktree.create requires branch", false)
+            tool_error(
+                "invalid_tool_input",
+                "git.worktree.create requires branch",
+                false,
+            )
         })?;
         let path = input_string(input, "path").ok_or_else(|| {
-            tool_error("invalid_tool_input", "git.worktree.create requires path", false)
+            tool_error(
+                "invalid_tool_input",
+                "git.worktree.create requires path",
+                false,
+            )
         })?;
 
         // Validate branch name: alphanumeric, hyphens, underscores, slashes only.
@@ -4835,7 +4842,13 @@ impl Runtime {
 
         // Try with -b first (new branch); fall back to existing branch.
         let output = Command::new("git")
-            .args(["worktree", "add", &resolved.to_string_lossy(), "-b", &branch])
+            .args([
+                "worktree",
+                "add",
+                &resolved.to_string_lossy(),
+                "-b",
+                &branch,
+            ])
             .current_dir(workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -4867,7 +4880,11 @@ impl Runtime {
         };
 
         if !success {
-            let detail = if !stderr.trim().is_empty() { stderr.trim() } else { "unknown error" };
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim()
+            } else {
+                "unknown error"
+            };
             return Err(tool_error(
                 "git_worktree_create_failed",
                 format!("git worktree add failed: {detail}"),
@@ -4892,7 +4909,11 @@ impl Runtime {
         input: &serde_json::Value,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
         let path = input_string(input, "path").ok_or_else(|| {
-            tool_error("invalid_tool_input", "git.worktree.remove requires path", false)
+            tool_error(
+                "invalid_tool_input",
+                "git.worktree.remove requires path",
+                false,
+            )
         })?;
 
         let resolved = workspace.join(&path);
@@ -4910,7 +4931,11 @@ impl Runtime {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if !output.status.success() {
-            let detail = if !stderr.trim().is_empty() { stderr.trim() } else { "unknown error" };
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim()
+            } else {
+                "unknown error"
+            };
             return Err(tool_error(
                 "git_worktree_remove_failed",
                 format!("git worktree remove failed: {detail}"),
@@ -4939,8 +4964,7 @@ impl Runtime {
             .map_err(|e| tool_error("file_list_failed", e.to_string(), false))?;
         let mut items: Vec<serde_json::Value> = Vec::new();
         for entry in entries {
-            let entry = entry
-                .map_err(|e| tool_error("file_list_failed", e.to_string(), false))?;
+            let entry = entry.map_err(|e| tool_error("file_list_failed", e.to_string(), false))?;
             let meta = entry.metadata().ok();
             let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
             let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -4958,7 +4982,10 @@ impl Runtime {
             let a_type = a["type"].as_str().unwrap_or("");
             let b_type = b["type"].as_str().unwrap_or("");
             b_type.cmp(a_type).then_with(|| {
-                a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+                a["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["name"].as_str().unwrap_or(""))
             })
         });
         let count = items.len();
@@ -5003,7 +5030,11 @@ impl Runtime {
             let stderr = redact(&String::from_utf8_lossy(&output.stderr));
             return Err(tool_error(
                 "git_log_failed",
-                if stderr.trim().is_empty() { "git log failed".to_owned() } else { stderr },
+                if stderr.trim().is_empty() {
+                    "git log failed".to_owned()
+                } else {
+                    stderr
+                },
                 false,
             ));
         }
@@ -5028,7 +5059,11 @@ impl Runtime {
             tool_error("invalid_tool_input", "git.commit requires message", false)
         })?;
         if message.trim().is_empty() {
-            return Err(tool_error("invalid_tool_input", "commit message is empty", false));
+            return Err(tool_error(
+                "invalid_tool_input",
+                "commit message is empty",
+                false,
+            ));
         }
         // Optional: specific files to stage. If absent, stage all changes.
         let files: Vec<String> = input
@@ -5057,7 +5092,11 @@ impl Runtime {
             .map_err(|e| tool_error("git_add_failed", e.to_string(), false))?;
         if !add_out.status.success() {
             let stderr = redact(&String::from_utf8_lossy(&add_out.stderr));
-            return Err(tool_error("git_add_failed", format!("git add failed: {stderr}"), false));
+            return Err(tool_error(
+                "git_add_failed",
+                format!("git add failed: {stderr}"),
+                false,
+            ));
         }
 
         // Commit
@@ -5072,7 +5111,11 @@ impl Runtime {
         let stdout = redact(&String::from_utf8_lossy(&commit_out.stdout));
         let stderr = redact(&String::from_utf8_lossy(&commit_out.stderr));
         if !commit_out.status.success() {
-            let detail = if !stderr.trim().is_empty() { &stderr } else { "git commit failed" };
+            let detail = if !stderr.trim().is_empty() {
+                &stderr
+            } else {
+                "git commit failed"
+            };
             return Err(tool_error("git_commit_failed", detail.to_string(), false));
         }
 

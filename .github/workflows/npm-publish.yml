@@ -27,12 +27,20 @@ jobs:
       - name: Resolve version
         id: version
         run: |
+          VERSION=""
           if [ -n "${{ github.event.inputs.version }}" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            VERSION="${{ github.event.inputs.version }}"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
           else
-            TAG="${GITHUB_REF#refs/tags/v}"
-            echo "version=$TAG" >> "$GITHUB_OUTPUT"
+            VERSION="${GITHUB_REF#refs/tags/}"
           fi
+          VERSION="${VERSION#v}"
+          if [ -z "$VERSION" ]; then
+            echo "Could not resolve publish version." >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Sync version
         run: |

@@ -18,9 +18,9 @@ use std::thread;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener as TokioTcpListener;
-use tokio::sync::mpsc as tokio_mpsc;
 #[cfg(unix)]
 use tokio::net::UnixListener as TokioUnixListener;
+use tokio::sync::mpsc as tokio_mpsc;
 
 use cadis_core::{parse_tool_call_directives, PendingMessageGeneration, Runtime, RuntimeOptions};
 use cadis_models::{
@@ -419,8 +419,11 @@ where
                         }
                         Err(outcome) => {
                             let outcome = *outcome;
-                            write_frame_async(&mut writer, &ServerFrame::Response(outcome.response))
-                                .await?;
+                            write_frame_async(
+                                &mut writer,
+                                &ServerFrame::Response(outcome.response),
+                            )
+                            .await?;
                             for event in outcome.events {
                                 emit_event_async(&mut writer, &event_log, &event_bus, event)
                                     .await?;
@@ -627,8 +630,7 @@ where
                         all_events.extend(final_events);
                         ToolLoopResult::Break(all_events)
                     } else {
-                        let mut tool_events: Vec<EventEnvelope> =
-                            step_event.into_iter().collect();
+                        let mut tool_events: Vec<EventEnvelope> = step_event.into_iter().collect();
                         let mut tool_results: Vec<(String, String)> = Vec::new();
                         let mut approval_blocked = false;
 

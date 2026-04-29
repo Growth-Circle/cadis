@@ -28,7 +28,12 @@ pub fn filter_output(command: &str, raw: &str) -> FilterResult {
     } else {
         (1.0 - filtered_bytes as f64 / original_bytes as f64) * 100.0
     };
-    FilterResult { filtered, original_bytes, filtered_bytes, savings_pct }
+    FilterResult {
+        filtered,
+        original_bytes,
+        filtered_bytes,
+        savings_pct,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +95,10 @@ fn truncate_output(input: &str, max_lines: usize) -> String {
 
 fn is_important(line: &str) -> bool {
     let lower = line.to_lowercase();
-    lower.contains("error") || lower.contains("failed") || lower.contains("panic") || lower.contains("warn")
+    lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("panic")
+        || lower.contains("warn")
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +125,11 @@ fn filter_cargo_build(raw: &str) -> String {
     let mut out = Vec::new();
     for line in raw.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("error") || trimmed.starts_with("warning") || trimmed.starts_with("Finished") || is_important(line) {
+        if trimmed.starts_with("error")
+            || trimmed.starts_with("warning")
+            || trimmed.starts_with("Finished")
+            || is_important(line)
+        {
             out.push(line);
         }
     }
@@ -150,7 +162,11 @@ fn filter_git_diff(raw: &str) -> String {
     let mut out = Vec::new();
     let mut hunk_changed = 0usize;
     for line in &lines {
-        if line.starts_with("diff --git") || line.starts_with("---") || line.starts_with("+++") || line.starts_with("@@") {
+        if line.starts_with("diff --git")
+            || line.starts_with("---")
+            || line.starts_with("+++")
+            || line.starts_with("@@")
+        {
             out.push(*line);
             hunk_changed = 0;
         } else if (line.starts_with('+') || line.starts_with('-')) && hunk_changed < 5 {
@@ -172,7 +188,11 @@ fn filter_npm_test(raw: &str) -> String {
     let mut out = Vec::new();
     for line in raw.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("FAIL") || trimmed.starts_with("✕") || trimmed.starts_with("×") || is_important(line) {
+        if trimmed.starts_with("FAIL")
+            || trimmed.starts_with("✕")
+            || trimmed.starts_with("×")
+            || is_important(line)
+        {
             out.push(line);
         }
     }
