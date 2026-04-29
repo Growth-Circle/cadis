@@ -71,6 +71,22 @@ impl ToolRegistry {
                 10,
                 ToolWorkspaceBehavior::PathScoped,
             ),
+            ToolDefinition::safe_read(
+                "file.list",
+                "List directory contents inside an approved workspace",
+                ToolInputSchema::FileList,
+                &[ToolSideEffect::ListFiles],
+                5,
+                ToolWorkspaceBehavior::PathScoped,
+            ),
+            ToolDefinition::safe_read(
+                "git.log",
+                "Read git log inside an approved workspace",
+                ToolInputSchema::GitLog,
+                &[ToolSideEffect::ReadGitLog],
+                10,
+                ToolWorkspaceBehavior::PathScoped,
+            ),
             ToolDefinition::approval_placeholder(
                 "file.write",
                 "Write or replace files inside an approved workspace",
@@ -138,6 +154,18 @@ impl ToolRegistry {
                 ToolWorkspaceBehavior::RequiresWorkspace,
                 false,
                 true,
+            ),
+            ToolDefinition::approval_placeholder(
+                "git.commit",
+                "Stage and commit changes inside an approved workspace",
+                cadis_protocol::RiskClass::WorkspaceEdit,
+                ToolInputSchema::GitMutation,
+                &[ToolSideEffect::GitCommit],
+                30,
+                ToolCancellationBehavior::Cooperative,
+                ToolWorkspaceBehavior::PathScoped,
+                false,
+                false,
             ),
         ])
     }
@@ -263,11 +291,15 @@ impl ToolDefinition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum ToolInputSchema {
     FileRead,
     FileSearch,
+    FileList,
     GitStatus,
     GitDiff,
+    GitLog,
+    GitCommit,
     ShellRun,
     WorkspaceMutation,
     GitMutation,
@@ -283,12 +315,15 @@ pub(crate) enum ToolExecutionMode {
 pub(crate) enum ToolSideEffect {
     ReadFiles,
     SearchFiles,
+    ListFiles,
     ReadGitMetadata,
+    ReadGitLog,
     EditWorkspace,
     ReadGitDiff,
     CreateWorktree,
     RemoveWorktree,
     RunSubprocess,
+    GitCommit,
 }
 
 impl ToolSideEffect {
@@ -296,12 +331,15 @@ impl ToolSideEffect {
         match self {
             Self::ReadFiles => "read_files",
             Self::SearchFiles => "search_files",
+            Self::ListFiles => "list_files",
             Self::ReadGitMetadata => "read_git_metadata",
+            Self::ReadGitLog => "read_git_log",
             Self::EditWorkspace => "edit_workspace",
             Self::ReadGitDiff => "read_git_diff",
             Self::CreateWorktree => "create_worktree",
             Self::RemoveWorktree => "remove_worktree",
             Self::RunSubprocess => "run_subprocess",
+            Self::GitCommit => "git_commit",
         }
     }
 }

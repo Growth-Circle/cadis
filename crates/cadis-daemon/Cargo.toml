@@ -17,6 +17,7 @@ cadis-models.workspace = true
 cadis-protocol.workspace = true
 cadis-store.workspace = true
 serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal"] }
 
 [lints]
 workspace = true

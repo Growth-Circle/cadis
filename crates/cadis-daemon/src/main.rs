@@ -3,17 +3,23 @@ use std::env;
 use std::error::Error;
 #[cfg(unix)]
 use std::fs;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{self, BufRead, Write};
+#[cfg(test)]
+use std::io::{BufReader, BufWriter};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+
+#[cfg(test)]
 use std::thread;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::net::TcpListener as TokioTcpListener;
+#[cfg(unix)]
+use tokio::net::UnixListener as TokioUnixListener;
 
 use cadis_core::{PendingMessageGeneration, Runtime, RuntimeOptions};
 use cadis_models::{
@@ -31,13 +37,17 @@ use cadis_store::{
 const EVENT_REPLAY_LIMIT: usize = 256;
 
 fn main() {
-    if let Err(error) = run() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime should build");
+    if let Err(error) = rt.block_on(run()) {
         eprintln!("cadisd: {error}");
         process::exit(1);
     }
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
+async fn run() -> Result<(), Box<dyn Error>> {
     let args = Args::parse(env::args().skip(1))?;
 
     if args.version {
@@ -69,7 +79,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         let stdin = io::stdin();
         let stdout = io::stdout();
         let shutdown = AtomicBool::new(false);
-        serve_lines(
+        serve_lines_sync(
             stdin.lock(),
             stdout.lock(),
             runtime,
@@ -83,14 +93,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     if use_tcp {
         let addr = config.effective_tcp_address();
         let addr = tcp_port.map(|p| format!("127.0.0.1:{p}")).unwrap_or(addr);
-        return run_tcp(&addr, runtime, event_log, event_bus);
+        return run_tcp(&addr, runtime, event_log, event_bus).await;
     }
 
     #[cfg(unix)]
     {
         let socket_path = socket_path
             .ok_or_else(|| invalid_input("socket path required (use --tcp-port on Windows)"))?;
-        run_socket(socket_path, runtime, event_log, event_bus)
+        run_socket(socket_path, runtime, event_log, event_bus).await
     }
 
     #[cfg(not(unix))]
@@ -98,7 +108,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         let addr = tcp_port
             .map(|p| format!("127.0.0.1:{p}"))
             .unwrap_or_else(|| config.effective_tcp_address());
-        run_tcp(&addr, runtime, event_log, event_bus)
+        run_tcp(&addr, runtime, event_log, event_bus).await
     }
 }
 
@@ -128,14 +138,13 @@ fn build_runtime(config: &CadisConfig, socket_path: Option<PathBuf>) -> Arc<Mute
     )))
 }
 
-fn run_tcp(
+async fn run_tcp(
     addr: &str,
     runtime: Arc<Mutex<Runtime>>,
     event_log: EventLog,
     event_bus: EventBus,
 ) -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind(addr)?;
-    listener.set_nonblocking(true)?;
+    let listener = TokioTcpListener::bind(addr).await?;
     eprintln!("cadisd listening on tcp://{addr}");
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -144,26 +153,29 @@ fn run_tcp(
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let runtime = Arc::clone(&runtime);
-                let event_log = event_log.clone();
-                let event_bus = event_bus.clone();
-                let shutdown = Arc::clone(&shutdown);
-                thread::spawn(move || {
-                    if let Err(error) =
-                        serve_tcp_stream(stream, runtime, event_log, event_bus, &shutdown)
-                    {
-                        eprintln!("cadisd client error: {error}");
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, _)) => {
+                        let runtime = Arc::clone(&runtime);
+                        let event_log = event_log.clone();
+                        let event_bus = event_bus.clone();
+                        let shutdown = Arc::clone(&shutdown);
+                        tokio::spawn(async move {
+                            let (reader, writer) = stream.into_split();
+                            let reader = tokio::io::BufReader::new(reader);
+                            if let Err(error) = serve_connection(
+                                reader, writer, runtime, event_log, event_bus, shutdown,
+                            ).await {
+                                eprintln!("cadisd client error: {error}");
+                            }
+                        });
                     }
-                });
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(error) => {
-                eprintln!("cadisd accept error: {error}");
-                break;
+                    Err(error) => {
+                        eprintln!("cadisd accept error: {error}");
+                        break;
+                    }
+                }
             }
         }
     }
@@ -172,28 +184,15 @@ fn run_tcp(
     Ok(())
 }
 
-fn serve_tcp_stream(
-    stream: TcpStream,
-    runtime: Arc<Mutex<Runtime>>,
-    event_log: EventLog,
-    event_bus: EventBus,
-    shutdown: &AtomicBool,
-) -> Result<(), Box<dyn Error>> {
-    let reader = BufReader::new(stream.try_clone()?);
-    let writer = BufWriter::new(stream);
-    serve_lines(reader, writer, runtime, event_log, event_bus, shutdown)
-}
-
 #[cfg(unix)]
-fn run_socket(
+async fn run_socket(
     socket_path: PathBuf,
     runtime: Arc<Mutex<Runtime>>,
     event_log: EventLog,
     event_bus: EventBus,
 ) -> Result<(), Box<dyn Error>> {
     prepare_socket_path(&socket_path)?;
-    let listener = UnixListener::bind(&socket_path)?;
-    listener.set_nonblocking(true)?;
+    let listener = TokioUnixListener::bind(&socket_path)?;
     eprintln!("cadisd listening on {}", socket_path.display());
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -202,26 +201,29 @@ fn run_socket(
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let runtime = Arc::clone(&runtime);
-                let event_log = event_log.clone();
-                let event_bus = event_bus.clone();
-                let shutdown = Arc::clone(&shutdown);
-                thread::spawn(move || {
-                    if let Err(error) =
-                        serve_unix_stream(stream, runtime, event_log, event_bus, &shutdown)
-                    {
-                        eprintln!("cadisd client error: {error}");
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, _)) => {
+                        let runtime = Arc::clone(&runtime);
+                        let event_log = event_log.clone();
+                        let event_bus = event_bus.clone();
+                        let shutdown = Arc::clone(&shutdown);
+                        tokio::spawn(async move {
+                            let (reader, writer) = stream.into_split();
+                            let reader = tokio::io::BufReader::new(reader);
+                            if let Err(error) = serve_connection(
+                                reader, writer, runtime, event_log, event_bus, shutdown,
+                            ).await {
+                                eprintln!("cadisd client error: {error}");
+                            }
+                        });
                     }
-                });
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(error) => {
-                eprintln!("cadisd accept error: {error}");
-                break;
+                    Err(error) => {
+                        eprintln!("cadisd accept error: {error}");
+                        break;
+                    }
+                }
             }
         }
     }
@@ -231,20 +233,7 @@ fn run_socket(
     Ok(())
 }
 
-#[cfg(unix)]
-fn serve_unix_stream(
-    stream: UnixStream,
-    runtime: Arc<Mutex<Runtime>>,
-    event_log: EventLog,
-    event_bus: EventBus,
-    shutdown: &AtomicBool,
-) -> Result<(), Box<dyn Error>> {
-    let reader = BufReader::new(stream.try_clone()?);
-    let writer = BufWriter::new(stream);
-    serve_lines(reader, writer, runtime, event_log, event_bus, shutdown)
-}
-
-fn serve_lines<R, W>(
+fn serve_lines_sync<R, W>(
     reader: R,
     writer: W,
     runtime: Arc<Mutex<Runtime>>,
@@ -365,6 +354,239 @@ where
         }
     }
 
+    Ok(())
+}
+
+async fn serve_connection<R, W>(
+    reader: R,
+    mut writer: W,
+    runtime: Arc<Mutex<Runtime>>,
+    event_log: EventLog,
+    event_bus: EventBus,
+    shutdown: Arc<AtomicBool>,
+) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut lines = reader.lines();
+
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        match serde_json::from_str::<RequestEnvelope>(&line) {
+            Ok(envelope) => {
+                let subscription = match &envelope.request {
+                    ClientRequest::EventsSubscribe(request) => {
+                        Some(EventBusSubscription::all(request))
+                    }
+                    ClientRequest::SessionSubscribe(request) => {
+                        Some(EventBusSubscription::session(request))
+                    }
+                    _ => None,
+                };
+                let snapshot_only = matches!(envelope.request, ClientRequest::EventsSnapshot(_));
+                if matches!(envelope.request, ClientRequest::DaemonShutdown(_)) {
+                    let response = ResponseEnvelope::new(
+                        envelope.request_id,
+                        DaemonResponse::RequestAccepted(cadis_protocol::RequestAcceptedPayload {
+                            request_id: RequestId::from("daemon.shutdown"),
+                        }),
+                    );
+                    write_frame_async(&mut writer, &ServerFrame::Response(response)).await?;
+                    shutdown.store(true, Ordering::SeqCst);
+                    return Ok(());
+                }
+                if matches!(envelope.request, ClientRequest::MessageSend(_)) {
+                    let pending = runtime
+                        .lock()
+                        .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+                        .begin_message_request(envelope);
+                    match pending {
+                        Ok(pending) => {
+                            serve_pending_message_generation_async(
+                                &mut writer,
+                                Arc::clone(&runtime),
+                                &event_log,
+                                &event_bus,
+                                pending,
+                            )
+                            .await?;
+                        }
+                        Err(outcome) => {
+                            let outcome = *outcome;
+                            write_frame_async(&mut writer, &ServerFrame::Response(outcome.response))
+                                .await?;
+                            for event in outcome.events {
+                                emit_event_async(&mut writer, &event_log, &event_bus, event)
+                                    .await?;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let outcome = runtime
+                    .lock()
+                    .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+                    .handle_request(envelope);
+                let accepted_subscription = matches!(
+                    &outcome.response.response,
+                    DaemonResponse::RequestAccepted(_)
+                )
+                .then_some(subscription)
+                .flatten();
+
+                write_frame_async(&mut writer, &ServerFrame::Response(outcome.response)).await?;
+
+                if let Some(subscription) = accepted_subscription {
+                    for event in outcome.events {
+                        write_frame_async(&mut writer, &ServerFrame::Event(event)).await?;
+                    }
+
+                    let (replay, receiver) = event_bus.subscribe(subscription);
+                    for event in replay {
+                        write_frame_async(&mut writer, &ServerFrame::Event(event)).await?;
+                    }
+                    for event in receiver {
+                        write_frame_async(&mut writer, &ServerFrame::Event(event)).await?;
+                    }
+                    return Ok(());
+                }
+
+                if snapshot_only {
+                    for event in outcome.events {
+                        write_frame_async(&mut writer, &ServerFrame::Event(event)).await?;
+                    }
+                    continue;
+                }
+
+                for event in outcome.events {
+                    emit_event_async(&mut writer, &event_log, &event_bus, event).await?;
+                }
+            }
+            Err(error) => {
+                let response = ResponseEnvelope::new(
+                    RequestId::from("req_invalid"),
+                    DaemonResponse::RequestRejected(ErrorPayload {
+                        code: "invalid_request".to_owned(),
+                        message: format!("request JSON was invalid: {error}"),
+                        retryable: false,
+                    }),
+                );
+                write_frame_async(&mut writer, &ServerFrame::Response(response)).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn serve_pending_message_generation_async<W>(
+    writer: &mut W,
+    runtime: Arc<Mutex<Runtime>>,
+    event_log: &EventLog,
+    event_bus: &EventBus,
+    pending: PendingMessageGeneration,
+) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send,
+{
+    write_frame_async(writer, &ServerFrame::Response(pending.response.clone())).await?;
+    for event in pending.initial_events.clone() {
+        emit_event_async(writer, event_log, event_bus, event).await?;
+    }
+
+    let provider = Arc::clone(&pending.provider);
+    let rt = Arc::clone(&runtime);
+    let result = tokio::task::spawn_blocking(move || {
+        let mut invocation = None;
+        let mut final_content = String::new();
+        let mut emitted_delta = false;
+        let stream_result = provider.stream_chat(
+            ModelRequest::new(&pending.prompt)
+                .with_selected_model(pending.selected_model.as_deref()),
+            &mut |event| {
+                if rt
+                    .lock()
+                    .map_err(|_| {
+                        ModelError::with_code(
+                            "runtime_lock_failed",
+                            "runtime mutex was poisoned",
+                            false,
+                        )
+                    })?
+                    .message_generation_cancelled(&pending)
+                {
+                    return Ok(ModelStreamControl::Cancel);
+                }
+
+                match event {
+                    ModelStreamEvent::Started(started) | ModelStreamEvent::Completed(started) => {
+                        invocation = Some(started);
+                    }
+                    ModelStreamEvent::Delta(delta) => {
+                        final_content.push_str(&delta);
+                        emitted_delta = true;
+                    }
+                    ModelStreamEvent::Failed(_) | ModelStreamEvent::Cancelled(_) => {}
+                }
+                Ok(ModelStreamControl::Continue)
+            },
+        );
+        (stream_result, final_content, emitted_delta, pending)
+    })
+    .await
+    .map_err(|e| io::Error::other(format!("spawn_blocking join error: {e}")))?;
+
+    let (stream_result, final_content, emitted_delta, pending) = result;
+
+    // Emit deltas that were collected during blocking streaming
+    if !final_content.is_empty() {
+        let delta_event = runtime
+            .lock()
+            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+            .message_delta_event(&pending, final_content.clone(), None);
+        emit_event_async(writer, event_log, event_bus, delta_event).await?;
+    }
+
+    let final_events = match stream_result {
+        Ok(response) => runtime
+            .lock()
+            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+            .complete_message_generation(pending, response, final_content, emitted_delta),
+        Err(error) => runtime
+            .lock()
+            .map_err(|_| io::Error::other("runtime mutex was poisoned"))?
+            .fail_message_generation(pending, error),
+    };
+
+    for event in final_events {
+        emit_event_async(writer, event_log, event_bus, event).await?;
+    }
+
+    Ok(())
+}
+
+async fn emit_event_async<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    event_log: &EventLog,
+    event_bus: &EventBus,
+    event: EventEnvelope,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    publish_event(event_log, event_bus, &event);
+    write_frame_async(writer, &ServerFrame::Event(event)).await
+}
+
+async fn write_frame_async<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    frame: &ServerFrame,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut buf = serde_json::to_vec(frame)?;
+    buf.push(b'\n');
+    writer.write_all(&buf).await?;
+    writer.flush().await?;
     Ok(())
 }
 
@@ -621,6 +843,8 @@ mod tests {
         ClientId, ContentKind, MessageSendRequest, RequestEnvelope, ServerFrame,
         SessionCreateRequest, SessionTargetRequest,
     };
+    #[cfg(unix)]
+    use std::os::unix::net::{UnixListener, UnixStream};
     #[cfg(unix)]
     use std::sync::Condvar;
     use std::time::{Duration, Instant};
@@ -1394,6 +1618,19 @@ mod tests {
     }
 }
 
+#[cfg(all(unix, test))]
+fn serve_unix_stream(
+    stream: std::os::unix::net::UnixStream,
+    runtime: Arc<Mutex<Runtime>>,
+    event_log: EventLog,
+    event_bus: EventBus,
+    shutdown: &AtomicBool,
+) -> Result<(), Box<dyn Error>> {
+    let reader = BufReader::new(stream.try_clone()?);
+    let writer = BufWriter::new(stream);
+    serve_lines_sync(reader, writer, runtime, event_log, event_bus, shutdown)
+}
+
 fn write_frame(writer: &mut impl Write, frame: &ServerFrame) -> Result<(), Box<dyn Error>> {
     serde_json::to_writer(&mut *writer, frame)?;
     writer.write_all(b"\n")?;
@@ -1412,7 +1649,7 @@ fn prepare_socket_path(socket_path: &Path) -> Result<(), Box<dyn Error>> {
 
     match fs::symlink_metadata(socket_path) {
         Ok(metadata) => {
-            if UnixStream::connect(socket_path).is_ok() {
+            if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!(

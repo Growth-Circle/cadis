@@ -564,12 +564,15 @@ pub fn is_dangerous_delete_command(command: &str) -> bool {
 
 fn classify_tool(tool_name: &str) -> Option<RiskClass> {
     match tool_name {
-        "file.read" | "file.search" | "git.status" => Some(RiskClass::SafeRead),
+        "file.read" | "file.search" | "file.list" | "git.status" | "git.log" => {
+            Some(RiskClass::SafeRead)
+        }
         "file.write"
         | "file.patch"
         | "git.diff"
         | "git.worktree.create"
-        | "git.worktree.remove" => Some(RiskClass::WorkspaceEdit),
+        | "git.worktree.remove"
+        | "git.commit" => Some(RiskClass::WorkspaceEdit),
         "shell.run" => Some(RiskClass::SystemChange),
         _ => None,
     }

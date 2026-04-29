@@ -602,7 +602,24 @@ impl Runtime {
                 );
                 self.accept(request_id, vec![event])
             }
-            ClientRequest::ConfigReload(_) => self.accept(request_id, Vec::new()),
+            ClientRequest::ConfigReload(_) => match cadis_store::load_config() {
+                Ok(new_config) => {
+                    self.options.ollama_model = new_config.model.ollama_model;
+                    self.options.openai_model = new_config.model.openai_model;
+                    self.accept(request_id, Vec::new())
+                }
+                Err(err) => {
+                    let event = self.event(
+                        None,
+                        CadisEvent::DaemonError(ErrorPayload {
+                            code: "config_reload_failed".to_owned(),
+                            message: redact(&format!("{err}")),
+                            retryable: true,
+                        }),
+                    );
+                    self.accept(request_id, vec![event])
+                }
+            },
             ClientRequest::DaemonShutdown(_) => self.accept(request_id, Vec::new()),
             ClientRequest::ToolCall(request) => self.handle_tool_call(request_id, request),
             ClientRequest::ApprovalRespond(request) => {
@@ -1240,6 +1257,14 @@ impl Runtime {
         delta: String,
         invocation: Option<&ModelInvocation>,
     ) -> EventEnvelope {
+        // Approximate token tracking: ~4 chars per token.
+        let approx_tokens = (delta.len() as u64).div_ceil(4);
+        if let Some(record) = self
+            .agent_sessions
+            .get_mut(&pending.context.agent_session_id)
+        {
+            record.tokens_used = record.tokens_used.saturating_add(approx_tokens);
+        }
         let model = invocation.map(model_invocation_payload);
         self.session_event(
             pending.context.session_id.clone(),
@@ -1334,6 +1359,8 @@ impl Runtime {
         events.extend(self.auto_speech_events(&context.session_id, context.content_kind, &content));
 
         // Model-driven spawn: parse [SPAWN Role: task] directives from model output.
+        // Spawned agents receive an agent session with the task so they can be
+        // picked up by a subsequent message round.
         for directive in parse_model_spawn_directives(&content) {
             match self.spawn_agent_record(AgentSpawnRequest {
                 role: directive.role.clone(),
@@ -1346,12 +1373,39 @@ impl Runtime {
                         context.session_id.clone(),
                         CadisEvent::AgentSpawned(record.clone().event_payload()),
                     ));
+                    // Create an agent session for the spawned agent so the task
+                    // is tracked and the agent transitions to Running.
+                    let (child_session_id, child_session_event) = self
+                        .start_agent_session(
+                            context.session_id.clone(),
+                            format!("spawn_route_{}", record.id),
+                            record.id.clone(),
+                            directive.task.clone(),
+                        );
+                    events.push(child_session_event);
+                    events.push(self.session_event(
+                        context.session_id.clone(),
+                        CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
+                            agent_id: record.id.clone(),
+                            status: AgentStatus::Running,
+                            task: Some(directive.task.clone()),
+                        }),
+                    ));
+                    // Complete the child session immediately with the task as
+                    // pending work — the agent will execute on the next message
+                    // round when addressed via @mention or orchestrator routing.
+                    if let Some(event) = self.complete_agent_session(
+                        &child_session_id,
+                        format!("Spawned with task: {}", directive.task),
+                    ) {
+                        events.push(event);
+                    }
                     events.push(self.session_event(
                         context.session_id.clone(),
                         CadisEvent::AgentStatusChanged(AgentStatusChangedPayload {
                             agent_id: record.id,
                             status: AgentStatus::Idle,
-                            task: Some(format!("model-driven spawn: {}", directive.task)),
+                            task: Some(format!("ready: {}", directive.task)),
                         }),
                     ));
                 }
@@ -1486,6 +1540,18 @@ impl Runtime {
     /// Creates a checkpoint manager for the active profile.
     pub fn checkpoint_manager(&self) -> CheckpointManager {
         CheckpointManager::new(&self.profile_home)
+    }
+
+    /// Best-effort checkpoint before a file-mutating tool.
+    fn try_checkpoint(&self, workspace: &Path, input: &serde_json::Value) {
+        if let Ok(ops) = parse_file_patch_operations(input) {
+            let paths: Vec<PathBuf> = ops.iter().map(|op| PathBuf::from(op.path())).collect();
+            let path_refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
+            let id = format!("ckpt_{}", chrono::Utc::now().format("%Y%m%d%H%M%S%3f"));
+            let _ = self
+                .checkpoint_manager()
+                .create(&id, "pre-tool checkpoint", workspace, &path_refs);
+        }
     }
 
     /// Creates a media manifest store for a project root.
@@ -2784,6 +2850,8 @@ impl Runtime {
             timeout_at: timestamp_after_seconds(self.agent_runtime.default_timeout_sec),
             budget_steps: self.agent_runtime.max_steps_per_session,
             steps_used: 0,
+            token_budget: 0,
+            tokens_used: 0,
             result: None,
             error_code: None,
             error: None,
@@ -3873,8 +3941,10 @@ impl Runtime {
                 let result = match name.as_str() {
                     "file.read" => self.execute_file_read(&ws, &input),
                     "file.search" => self.execute_file_search(&ws, &input),
+                    "file.list" => self.execute_file_list(&ws, &input),
                     "git.status" => self.execute_git_status(&ws, &input),
                     "git.diff" => self.execute_git_diff(&ws, &input),
+                    "git.log" => self.execute_git_log(&ws, &input),
                     _ => Err(tool_error(
                         "tool_not_implemented",
                         format!("{name} has no native execution backend"),
@@ -4121,8 +4191,14 @@ impl Runtime {
         }
 
         match request.tool_name.as_str() {
+            "file.patch" | "file.write" => {
+                self.try_checkpoint(workspace, &request.input);
+                self.execute_file_patch(workspace, &request.input)
+            }
             "shell.run" => self.execute_shell_run(workspace, &request.input, tool_timeout_secs),
-            "file.patch" => self.execute_file_patch(workspace, &request.input),
+            "git.worktree.create" => self.execute_git_worktree_create(workspace, &request.input),
+            "git.worktree.remove" => self.execute_git_worktree_remove(workspace, &request.input),
+            "git.commit" => self.execute_git_commit(workspace, &request.input),
             tool_name => Err(tool_error(
                 "tool_not_implemented",
                 format!("{tool_name} has no approved execution backend"),
@@ -4446,6 +4522,286 @@ impl Runtime {
                 "pathspec": pathspec,
                 "diff": diff,
                 "truncated": truncated
+            }),
+        })
+    }
+
+    fn execute_git_worktree_create(
+        &self,
+        workspace: &Path,
+        input: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, ErrorPayload> {
+        let branch = input_string(input, "branch").ok_or_else(|| {
+            tool_error("invalid_tool_input", "git.worktree.create requires branch", false)
+        })?;
+        let path = input_string(input, "path").ok_or_else(|| {
+            tool_error("invalid_tool_input", "git.worktree.create requires path", false)
+        })?;
+
+        // Validate branch name: alphanumeric, hyphens, underscores, slashes only.
+        if !branch
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '/')
+            || branch.contains("..")
+        {
+            return Err(tool_error(
+                "invalid_tool_input",
+                "branch name contains invalid characters",
+                false,
+            ));
+        }
+
+        let resolved = workspace.join(&path);
+
+        // Try with -b first (new branch); fall back to existing branch.
+        let output = Command::new("git")
+            .args(["worktree", "add", &resolved.to_string_lossy(), "-b", &branch])
+            .current_dir(workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| tool_error("git_spawn_failed", e.to_string(), false))?;
+
+        let (stdout, stderr, success) = if output.status.success() {
+            (
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+                true,
+            )
+        } else {
+            // Branch may already exist — retry without -b.
+            let retry = Command::new("git")
+                .args(["worktree", "add", &resolved.to_string_lossy(), &branch])
+                .current_dir(workspace)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .map_err(|e| tool_error("git_spawn_failed", e.to_string(), false))?;
+            (
+                String::from_utf8_lossy(&retry.stdout).to_string(),
+                String::from_utf8_lossy(&retry.stderr).to_string(),
+                retry.status.success(),
+            )
+        };
+
+        if !success {
+            let detail = if !stderr.trim().is_empty() { stderr.trim() } else { "unknown error" };
+            return Err(tool_error(
+                "git_worktree_create_failed",
+                format!("git worktree add failed: {detail}"),
+                false,
+            ));
+        }
+
+        Ok(ToolExecutionResult {
+            summary: format!("created worktree at {} on branch {}", path, branch),
+            output: serde_json::json!({
+                "path": path,
+                "branch": branch,
+                "stdout": redact(&stdout),
+                "stderr": redact(&stderr),
+            }),
+        })
+    }
+
+    fn execute_git_worktree_remove(
+        &self,
+        workspace: &Path,
+        input: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, ErrorPayload> {
+        let path = input_string(input, "path").ok_or_else(|| {
+            tool_error("invalid_tool_input", "git.worktree.remove requires path", false)
+        })?;
+
+        let resolved = workspace.join(&path);
+
+        let output = Command::new("git")
+            .args(["worktree", "remove", &resolved.to_string_lossy(), "--force"])
+            .current_dir(workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| tool_error("git_spawn_failed", e.to_string(), false))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            let detail = if !stderr.trim().is_empty() { stderr.trim() } else { "unknown error" };
+            return Err(tool_error(
+                "git_worktree_remove_failed",
+                format!("git worktree remove failed: {detail}"),
+                false,
+            ));
+        }
+
+        Ok(ToolExecutionResult {
+            summary: format!("removed worktree at {}", path),
+            output: serde_json::json!({
+                "path": path,
+                "stdout": redact(&stdout),
+                "stderr": redact(&stderr),
+            }),
+        })
+    }
+
+    fn execute_file_list(
+        &self,
+        workspace: &Path,
+        input: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, ErrorPayload> {
+        let dir = input_string(input, "path").unwrap_or_else(|| ".".to_owned());
+        let resolved = resolve_inside_workspace(workspace, &dir)?;
+        let entries = std::fs::read_dir(&resolved)
+            .map_err(|e| tool_error("file_list_failed", e.to_string(), false))?;
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        for entry in entries {
+            let entry = entry
+                .map_err(|e| tool_error("file_list_failed", e.to_string(), false))?;
+            let meta = entry.metadata().ok();
+            let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let name = entry.file_name().to_string_lossy().to_string();
+            items.push(serde_json::json!({
+                "name": name,
+                "type": if is_dir { "dir" } else { "file" },
+                "size": size,
+            }));
+            if items.len() >= 500 {
+                break;
+            }
+        }
+        items.sort_by(|a, b| {
+            let a_type = a["type"].as_str().unwrap_or("");
+            let b_type = b["type"].as_str().unwrap_or("");
+            b_type.cmp(a_type).then_with(|| {
+                a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+            })
+        });
+        let count = items.len();
+        Ok(ToolExecutionResult {
+            summary: format!("{count} entries in {dir}"),
+            output: serde_json::json!({
+                "path": display_relative_path(workspace, &resolved),
+                "entries": items,
+            }),
+        })
+    }
+
+    fn execute_git_log(
+        &self,
+        workspace: &Path,
+        input: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, ErrorPayload> {
+        let cwd = input_string(input, "path")
+            .or_else(|| input_string(input, "cwd"))
+            .unwrap_or_else(|| ".".to_owned());
+        let cwd = resolve_inside_workspace(workspace, &cwd)?;
+        let max_count = input
+            .get("max_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(20)
+            .min(100);
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&cwd)
+            .args([
+                "log",
+                "--oneline",
+                "--no-decorate",
+                &format!("-{max_count}"),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| tool_error("git_log_failed", e.to_string(), false))?;
+        if !output.status.success() {
+            let stderr = redact(&String::from_utf8_lossy(&output.stderr));
+            return Err(tool_error(
+                "git_log_failed",
+                if stderr.trim().is_empty() { "git log failed".to_owned() } else { stderr },
+                false,
+            ));
+        }
+        let log = redact(&String::from_utf8_lossy(&output.stdout));
+        Ok(ToolExecutionResult {
+            summary: log.clone(),
+            output: serde_json::json!({
+                "cwd": display_relative_path(workspace, &cwd),
+                "log": log,
+                "max_count": max_count,
+            }),
+        })
+    }
+
+    fn execute_git_commit(
+        &self,
+        workspace: &Path,
+        input: &serde_json::Value,
+    ) -> Result<ToolExecutionResult, ErrorPayload> {
+        let message = input_string(input, "message").ok_or_else(|| {
+            tool_error("invalid_tool_input", "git.commit requires message", false)
+        })?;
+        if message.trim().is_empty() {
+            return Err(tool_error("invalid_tool_input", "commit message is empty", false));
+        }
+        // Optional: specific files to stage. If absent, stage all changes.
+        let files: Vec<String> = input
+            .get("files")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Stage
+        let mut add_cmd = Command::new("git");
+        add_cmd.current_dir(workspace).stdin(Stdio::null());
+        if files.is_empty() {
+            add_cmd.args(["add", "-A"]);
+        } else {
+            add_cmd.arg("add").arg("--");
+            for f in &files {
+                add_cmd.arg(f);
+            }
+        }
+        let add_out = add_cmd
+            .output()
+            .map_err(|e| tool_error("git_add_failed", e.to_string(), false))?;
+        if !add_out.status.success() {
+            let stderr = redact(&String::from_utf8_lossy(&add_out.stderr));
+            return Err(tool_error("git_add_failed", format!("git add failed: {stderr}"), false));
+        }
+
+        // Commit
+        let commit_out = Command::new("git")
+            .current_dir(workspace)
+            .args(["commit", "-m", &message, "--no-verify"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| tool_error("git_commit_failed", e.to_string(), false))?;
+        let stdout = redact(&String::from_utf8_lossy(&commit_out.stdout));
+        let stderr = redact(&String::from_utf8_lossy(&commit_out.stderr));
+        if !commit_out.status.success() {
+            let detail = if !stderr.trim().is_empty() { &stderr } else { "git commit failed" };
+            return Err(tool_error("git_commit_failed", detail.to_string(), false));
+        }
+
+        Ok(ToolExecutionResult {
+            summary: format!("committed: {message}"),
+            output: serde_json::json!({
+                "message": message,
+                "files": files,
+                "stdout": stdout,
+                "stderr": stderr,
             }),
         })
     }
@@ -4975,6 +5331,10 @@ struct AgentSessionRecord {
     timeout_at: Timestamp,
     budget_steps: u32,
     steps_used: u32,
+    /// Approximate token budget for this session (0 = unlimited).
+    token_budget: u64,
+    /// Approximate tokens consumed so far.
+    tokens_used: u64,
     result: Option<String>,
     error_code: Option<String>,
     error: Option<String>,
@@ -4993,6 +5353,10 @@ struct AgentSessionMetadata {
     timeout_at: Timestamp,
     budget_steps: u32,
     steps_used: u32,
+    #[serde(default)]
+    token_budget: u64,
+    #[serde(default)]
+    tokens_used: u64,
     result: Option<String>,
     error_code: Option<String>,
     error: Option<String>,
@@ -5012,6 +5376,8 @@ impl AgentSessionMetadata {
             timeout_at: record.timeout_at.clone(),
             budget_steps: record.budget_steps,
             steps_used: record.steps_used,
+            token_budget: record.token_budget,
+            tokens_used: record.tokens_used,
             result: record.result.clone(),
             error_code: record.error_code.clone(),
             error: record.error.clone(),
@@ -5034,6 +5400,8 @@ impl AgentSessionMetadata {
                 timeout_at: self.timeout_at,
                 budget_steps: self.budget_steps,
                 steps_used: self.steps_used,
+                token_budget: self.token_budget,
+                tokens_used: self.tokens_used,
                 result: self.result,
                 error_code: self.error_code,
                 error: self.error,
@@ -10649,6 +11017,8 @@ mod tests {
                 .expect("test timestamp should be valid"),
             budget_steps: 2,
             steps_used: 1,
+            token_budget: 0,
+            tokens_used: 0,
             result: None,
             error_code: None,
             error: None,

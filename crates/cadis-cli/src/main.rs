@@ -158,6 +158,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             )?;
             render_tool(&frames, cli.json)
         }
+        Command::Profile(command) => run_profile(command),
         Command::Approve(approval_id) => {
             send_approval(&cli, approval_id.clone(), ApprovalDecision::Approved)
         }
@@ -234,6 +235,42 @@ fn run_voice(cli: &Cli, command: &VoiceCommand) -> Result<(), Box<dyn Error>> {
     };
 
     render_voice(&frames, cli.json)
+}
+
+fn run_profile(command: &ProfileCommand) -> Result<(), Box<dyn Error>> {
+    let config = load_config()?;
+    let home = cadis_store::CadisHome::new(&config.cadis_home);
+    match command {
+        ProfileCommand::List => {
+            let profiles = home.list_profiles()?;
+            for id in &profiles {
+                let marker = if *id == config.profile.default_profile {
+                    " (active)"
+                } else {
+                    ""
+                };
+                println!("{id}{marker}");
+            }
+        }
+        ProfileCommand::Create { profile_id } => {
+            home.create_profile(profile_id)?;
+            println!("created profile: {profile_id}");
+        }
+        ProfileCommand::Export { profile_id } => {
+            let content = home.export_profile(profile_id)?;
+            print!("{content}");
+        }
+        ProfileCommand::Import { profile_id, file } => {
+            let content = std::fs::read_to_string(file)?;
+            home.import_profile(profile_id, &content)?;
+            println!("imported profile: {profile_id}");
+        }
+        ProfileCommand::Remove { profile_id } => {
+            home.remove_profile(profile_id)?;
+            println!("removed profile: {profile_id}");
+        }
+    }
+    Ok(())
 }
 
 fn run_workspace(cli: &Cli, command: &WorkspaceCommand) -> Result<(), Box<dyn Error>> {
@@ -1171,6 +1208,7 @@ impl Cli {
                 args.next()
                     .ok_or_else(|| invalid_input("deny requires an ID"))?,
             ),
+            Some("profile") => Command::Profile(parse_profile(args.collect())?),
             Some(other) => return Err(invalid_input(format!("unknown command: {other}")).into()),
         };
 
@@ -1246,8 +1284,18 @@ enum Command {
         tool_name: String,
         input: serde_json::Value,
     },
+    Profile(ProfileCommand),
     Approve(String),
     Deny(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ProfileCommand {
+    List,
+    Create { profile_id: String },
+    Export { profile_id: String },
+    Import { profile_id: String, file: PathBuf },
+    Remove { profile_id: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1374,6 +1422,41 @@ fn parse_voice(args: Vec<String>) -> Result<VoiceCommand, Box<dyn Error>> {
         Some("status") | None => Ok(VoiceCommand::Status),
         Some("doctor") => Ok(VoiceCommand::Doctor),
         Some(other) => Err(invalid_input(format!("unknown voice command: {other}")).into()),
+    }
+}
+
+fn parse_profile(args: Vec<String>) -> Result<ProfileCommand, Box<dyn Error>> {
+    let mut args = args.into_iter();
+    match args.next().as_deref() {
+        Some("list") | None => Ok(ProfileCommand::List),
+        Some("create") => Ok(ProfileCommand::Create {
+            profile_id: args
+                .next()
+                .ok_or_else(|| invalid_input("profile create requires an ID"))?,
+        }),
+        Some("export") => Ok(ProfileCommand::Export {
+            profile_id: args
+                .next()
+                .ok_or_else(|| invalid_input("profile export requires an ID"))?,
+        }),
+        Some("import") => {
+            let profile_id = args
+                .next()
+                .ok_or_else(|| invalid_input("profile import requires an ID"))?;
+            let file = args
+                .next()
+                .ok_or_else(|| invalid_input("profile import requires a FILE path"))?;
+            Ok(ProfileCommand::Import {
+                profile_id,
+                file: PathBuf::from(file),
+            })
+        }
+        Some("remove") => Ok(ProfileCommand::Remove {
+            profile_id: args
+                .next()
+                .ok_or_else(|| invalid_input("profile remove requires an ID"))?,
+        }),
+        Some(other) => Err(invalid_input(format!("unknown profile command: {other}")).into()),
     }
 }
 
@@ -1898,7 +1981,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn print_help() {
     println!(
-        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--tcp] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  worker <COMMAND>       Inspect daemon-owned workers\n  workspace <COMMAND>    Manage registered workspaces and grants\n  session <COMMAND>      Manage session event streams\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKER COMMANDS:\n  worker tail <ID> [--lines COUNT]\n  worker result <ID>\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --tcp                  Connect via TCP (default on Windows, reads CADIS_TCP_PORT)\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
+        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--tcp] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  worker <COMMAND>       Inspect daemon-owned workers\n  workspace <COMMAND>    Manage registered workspaces and grants\n  profile [COMMAND]      Manage daemon profiles\n  session <COMMAND>      Manage session event streams\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKER COMMANDS:\n  worker tail <ID> [--lines COUNT]\n  worker result <ID>\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nPROFILE COMMANDS:\n  profile list           List profiles (default)\n  profile create <ID>    Create a new profile\n  profile export <ID>    Export profile as TOML\n  profile import <ID> <FILE>  Import profile from TOML file\n  profile remove <ID>    Remove a profile\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --tcp                  Connect via TCP (default on Windows, reads CADIS_TCP_PORT)\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -2208,5 +2291,64 @@ mod tests {
         let access = parse_workspace_access_list("read,write").unwrap();
         assert_eq!(access, vec![WorkspaceAccess::Read, WorkspaceAccess::Write]);
         assert!(parse_workspace_access_list("bogus").is_err());
+    }
+
+    // --- profile subcommands ---
+
+    #[test]
+    fn parse_profile_list() {
+        let cli = Cli::parse(args(&["profile", "list"])).unwrap();
+        assert_eq!(cli.command, Command::Profile(ProfileCommand::List));
+    }
+
+    #[test]
+    fn parse_profile_list_default() {
+        let cli = Cli::parse(args(&["profile"])).unwrap();
+        assert_eq!(cli.command, Command::Profile(ProfileCommand::List));
+    }
+
+    #[test]
+    fn parse_profile_create() {
+        let cli = Cli::parse(args(&["profile", "create", "dev"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Profile(ProfileCommand::Create {
+                profile_id: "dev".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_profile_export() {
+        let cli = Cli::parse(args(&["profile", "export", "dev"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Profile(ProfileCommand::Export {
+                profile_id: "dev".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn parse_profile_import() {
+        let cli = Cli::parse(args(&["profile", "import", "dev", "profile.toml"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Profile(ProfileCommand::Import {
+                profile_id: "dev".to_owned(),
+                file: PathBuf::from("profile.toml"),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_profile_remove() {
+        let cli = Cli::parse(args(&["profile", "remove", "dev"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Profile(ProfileCommand::Remove {
+                profile_id: "dev".to_owned()
+            })
+        );
     }
 }

@@ -171,28 +171,57 @@ The main conversation remains readable. Diffs, logs, and test output go to the c
 Important event families:
 
 ```text
+# Session
 session.started
 session.completed
 message.delta
 message.completed
+
+# Agent
 agent.spawned
 agent.status.changed
 agent.completed
+agent.session.started
+agent.session.completed
+agent.session.failed
+agent.session.cancelled
+
+# Worker
 worker.started
 worker.log.delta
 worker.completed
+worker.cancelled
+worker.cleanup.requested
+
+# Tool & Approval
 tool.requested
 tool.started
 tool.completed
 tool.failed
 approval.requested
 approval.resolved
-code.window.opened
 patch.created
 test.result
-tts.started
-tts.completed
-error
+
+# Voice
+voice.started
+voice.completed
+voice.preview.started
+voice.preview.completed
+voice.preview.failed
+voice.status.updated
+voice.doctor.response
+voice.preflight.response
+
+# Daemon
+daemon.started
+daemon.stopping
+daemon.error
+
+# Routing & UI
+orchestrator.route
+ui.preferences.updated
+models.list.response
 ```
 
 All events must be serializable and durable enough for logs.
@@ -249,9 +278,9 @@ Default limits:
 [agents]
 max_depth = 2
 max_children_per_agent = 4
-max_global_agents = 12
+max_global_agents = 32
 default_timeout_sec = 900
-allow_recursive_spawn = false
+allow_recursive_spawn = true
 ```
 
 The desktop MVP now wraps each routed task in an in-memory daemon-owned
@@ -372,3 +401,149 @@ adapters for:
 - notifications
 
 Android starts as a remote controller only.
+
+## 15. Stable Error Codes
+
+All daemon error codes use `snake_case`. No hyphens, no camelCase. Every
+`ErrorPayload`, `RuntimeError`, and `tool_error()` in `cadis-core` follows this
+convention.
+
+### Request rejection codes
+
+Returned via `DaemonResponse::RequestRejected`.
+
+| Code | Context |
+|---|---|
+| `unsupported_protocol_version` | Client protocol version is not supported |
+| `invalid_request_type` | `begin_message_request` received a non-message request |
+| `session_not_found` | Session ID does not exist |
+| `agent_not_found` | Agent ID does not exist |
+| `cannot_kill_main_agent` | Main orchestrator agent cannot be killed |
+| `tool_denied` | Unknown tool or policy denied |
+| `approval_not_found` | Approval ID does not exist |
+| `approval_already_resolved` | Approval was already resolved |
+| `approval_persistence_failed` | Approval record could not be persisted |
+| `worker_not_found` | Worker ID does not exist |
+| `worker_not_terminal` | Worker has not reached a terminal state |
+| `worker_result_unavailable` | Worker result is not yet available |
+| `invalid_workspace_root` | Workspace root path is invalid |
+| `invalid_workspace_revoke` | Revoke request missing required fields |
+| `workspace_not_found` | Workspace is not registered |
+| `workspace_grant_not_found` | No matching workspace grant found |
+| `workspace_registry_persist_failed` | Workspace registry could not be saved |
+| `workspace_grant_persist_failed` | Workspace grant could not be saved |
+
+### Tool error codes
+
+Returned via `ToolFailedPayload` or `tool_error()`.
+
+| Code | Context |
+|---|---|
+| `tool_not_implemented` | Tool has no native execution backend |
+| `tool_not_allowed` | Tool is not auto-allowed for safe-read execution |
+| `tool_not_found` | Approved tool is not registered |
+| `tool_cancelled` | Tool execution was cancelled |
+| `tool_timeout` | Tool exceeded its timeout |
+| `tool_execution_blocked` | Approved execution only available for approval-gated tools |
+| `tool_execution_unavailable` | Approval recovered without process-local context |
+| `invalid_tool_input` | Missing or invalid tool input parameter |
+| `path_denied` | Workspace or path denied by policy |
+| `path_resolution_failed` | Path could not be resolved inside workspace |
+| `protected_path` | Path is protected by policy |
+| `secret_path_rejected` | Tool refuses to access secret-like paths |
+| `outside_workspace` | Path resolves outside the workspace |
+| `file_read_failed` | File could not be read |
+| `file_list_failed` | Directory listing failed |
+| `file_patch_read_failed` | File could not be read for patching |
+| `file_patch_too_large` | File exceeds patch size limit |
+| `file_patch_replace_mismatch` | Replace target not found in file |
+| `file_patch_replace_ambiguous` | Replace target matches multiple locations |
+| `file_patch_concurrent_edit` | File was modified since patch was prepared |
+| `file_patch_write_failed` | Patch could not be written to disk |
+| `unsupported_file_type` | File type is not supported for the operation |
+| `git_status_failed` | `git status` failed |
+| `git_diff_failed` | `git diff` failed |
+| `git_log_failed` | `git log` failed |
+| `git_spawn_failed` | Git process could not be spawned |
+| `git_add_failed` | `git add` failed |
+| `git_commit_failed` | `git commit` failed |
+| `git_worktree_create_failed` | `git worktree add` failed |
+| `git_worktree_remove_failed` | `git worktree remove` failed |
+| `shell_spawn_failed` | Shell process could not be spawned |
+| `shell_wait_failed` | Shell process wait failed |
+| `shell_command_failed` | Shell command exited with non-zero code |
+| `shell_cwd_denied` | Shell working directory denied by policy |
+| `dangerous_delete_blocked` | Recursive delete requires explicit approval |
+| `approval_expired` | Approval expired before execution |
+| `approval_denied` | Approval was denied |
+| `approval_request_mismatch` | Approved tool request did not match record |
+| `policy_denied_at_execution` | Policy denied the tool at execution time |
+| `session_invalid_at_execution` | Session no longer active at execution time |
+| `workspace_required` | Tool call requires a workspace reference |
+| `workspace_grant_required` | No active grant for the workspace |
+| `workspace_root_denied` | Workspace root is denied by policy |
+| `workspace_root_too_broad` | Workspace root is too broad |
+| `worker_worktree_not_owned` | Worker worktree is not CADIS-owned |
+| `worker_worktree_cleanup_failed` | Worktree cleanup failed |
+
+### Runtime error codes
+
+Returned via `RuntimeError` in agent spawn and orchestrator routing.
+
+| Code | Context |
+|---|---|
+| `invalid_agent_role` | Agent role is empty |
+| `parent_agent_not_found` | Parent agent does not exist |
+| `agent_spawn_total_limit_exceeded` | Would exceed `max_total_agents` |
+| `agent_spawn_children_limit_exceeded` | Parent already at `max_children_per_parent` |
+| `agent_spawn_depth_limit_exceeded` | Would exceed `max_depth` |
+| `orchestrator_worker_delegation_disabled` | Worker delegation is disabled |
+| `agent_budget_exceeded` | Agent session exceeded step budget |
+| `agent_timeout` | Agent session exceeded timeout |
+
+### Tool registry validation codes
+
+Returned during `ToolRegistry::builtin()` construction.
+
+| Code | Context |
+|---|---|
+| `duplicate_tool_name` | Tool name is already registered |
+| `invalid_tool_description` | Tool description is empty |
+| `invalid_tool_side_effects` | Tool side_effects field is empty |
+| `invalid_tool_timeout` | Tool timeout is zero |
+
+### Worker lifecycle codes
+
+Used in worker state transitions and recovery.
+
+| Code | Context |
+|---|---|
+| `worker_command_empty` | Worker validation command is empty |
+| `worker_command_failed` | Worker validation command failed |
+| `worker_command_refused` | Worker command cwd validation failed |
+| `worker_command_timeout` | Worker validation command timed out |
+| `worker_metadata_persist_failed` | Worker metadata could not be persisted |
+| `worker_workspace_missing` | Worker project root is unavailable |
+| `worker_worktree_metadata_missing` | Worker has no project-local worktree metadata |
+| `worker_worktree_metadata_unreadable` | Worker worktree metadata could not be read |
+| `worker_worktree_metadata_persist_failed` | Worker worktree metadata could not be updated |
+| `worker_worktree_missing` | Worker worktree path is unavailable |
+
+### Recovery diagnostic codes
+
+Emitted as `DaemonError` events during daemon startup recovery.
+
+| Code | Context |
+|---|---|
+| `session_recovery_failed` | Session metadata scan failed |
+| `agent_recovery_failed` | Agent metadata scan failed |
+| `worker_recovery_failed` | Worker metadata scan failed |
+| `approval_recovery_failed` | Approval metadata scan failed |
+| `agent_session_recovery_failed` | Agent session metadata scan failed |
+| `agent_session_recovery_skipped` | Individual agent session metadata was invalid |
+| `session_metadata_recovery_skipped` | Individual session metadata was invalid |
+| `agent_metadata_recovery_skipped` | Individual agent metadata was invalid |
+| `worker_metadata_recovery_skipped` | Individual worker metadata was invalid |
+| `approval_metadata_recovery_skipped` | Individual approval metadata was invalid |
+| `worker_recovered_stale` | Non-terminal worker marked failed on startup |
+| `worker_recovery_persist_failed` | Recovery state could not be persisted |

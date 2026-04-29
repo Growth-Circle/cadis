@@ -17,7 +17,14 @@ Do not rebuild CADIS as an OpenClaw backend, a UI-first app, or a hosted SaaS. O
 
 ## Current Status
 
-CADIS is an early implementation baseline with open-source docs, protocol types, a desktop MVP `cadisd` plus `cadis` CLI, and a native `cadis-hud` prototype. No production-grade tool runtime, approval engine, worker runtime, or full HUD parity exists yet.
+CADIS has a production-ready daemon (`cadisd`) and CLI (`cadis`) with a native `cadis-hud` prototype. The daemon runs on a Tokio async runtime with TCP and Unix socket transports. Key capabilities:
+
+- **12 native tool backends**: `file.read`, `file.search`, `file.list`, `file.write`, `file.patch`, `shell.run`, `git.status`, `git.diff`, `git.log`, `git.commit`, `git.worktree.create`, `git.worktree.remove`
+- **Agent orchestration**: model-driven sub-agent spawning, token tracking, and budget enforcement across 13 built-in agents with specialist personas
+- **Full approval engine**: risk classification with 10 risk classes, audit trails, and expiry-checked approval state
+- **Worker runtime**: worktree isolation for safe parallel code work
+- **5 model providers**: Echo, Ollama, OpenAI, CodexCli, and Auto — all with native streaming
+- **Durable state persistence**: crash recovery with consistent on-disk state
 
 Start from:
 
