@@ -3,12 +3,15 @@
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::fs::File;
 
 use cadis_protocol::{
     AgentId, AgentSessionId, ApprovalDecision, ApprovalId, EventEnvelope, RiskClass, SessionId,
