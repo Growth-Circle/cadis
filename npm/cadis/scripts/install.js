@@ -9,7 +9,7 @@ const os = require("os");
 const path = require("path");
 
 const REPO = "Growth-Circle/cadis";
-const BINARIES = ["cadis", "cadisd"];
+const BINARIES = ["cadis", "cadisd", "cadis-hud"];
 
 const TARGETS = {
   "linux-x64": "x86_64-unknown-linux-gnu",
@@ -89,12 +89,22 @@ async function main() {
       fs.writeFileSync(dest, buf, { mode: 0o755 });
       console.log(" ok");
     } catch (err) {
-      console.log(" failed");
-      console.error(`  ${err.message}`);
-      console.error(`  You can download manually from: ${url}`);
-      process.exit(0); // don't break npm install
+      console.log(" skipped");
+      // cadis-hud is optional — CLI still works without it
+      if (name !== "cadis-hud") {
+        console.error(`  ${err.message}`);
+        console.error(`  You can download manually from: ${url}`);
+      }
     }
   }
+
+  console.log();
+  console.log("  \x1b[1;36mC.A.D.I.S.\x1b[0m installed successfully!");
+  console.log();
+  console.log("  Run \x1b[1mcadis\x1b[0m to start (launches daemon + HUD)");
+  console.log("  Run \x1b[1mcadis chat \"hello\"\x1b[0m for CLI mode");
+  console.log("  Run \x1b[1mcadis help\x1b[0m for all commands");
+  console.log();
 }
 
 main();

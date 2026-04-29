@@ -1173,11 +1173,15 @@ fn start_daemon_background() -> Result<(), Box<dyn Error>> {
     } else {
         PathBuf::from("cadisd")
     };
-    ProcessCommand::new(&program)
-        .stdin(std::process::Stdio::null())
+    let mut cmd = ProcessCommand::new(&program);
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+        .stderr(std::process::Stdio::null());
+    // On Windows, always use TCP since Unix sockets aren't available.
+    if cfg!(windows) {
+        cmd.args(["--tcp-port", "7433"]);
+    }
+    cmd.spawn()?;
     Ok(())
 }
 
@@ -1193,24 +1197,66 @@ fn launch_hud() -> Result<(), Box<dyn Error>> {
     let status = ProcessCommand::new(&program).status();
     match status {
         Ok(s) if s.success() => Ok(()),
-        Ok(s) => {
-            // HUD exited with error — fall back to CLI status.
-            eprintln!("cadis: HUD exited ({}), showing status instead", s);
-            eprintln!();
-            let cli = Cli::parse(["status"].map(String::from))?;
-            let frames =
-                send_request(&cli, ClientRequest::DaemonStatus(EmptyPayload::default()))?;
-            render_status(&frames, false)
-        }
-        Err(_) => {
-            // HUD binary not found — fall back to CLI status.
-            eprintln!("cadis: HUD not found, showing daemon status\n");
-            let cli = Cli::parse(["status"].map(String::from))?;
-            let frames =
-                send_request(&cli, ClientRequest::DaemonStatus(EmptyPayload::default()))?;
-            render_status(&frames, false)
+        Ok(_) | Err(_) => {
+            // HUD not available — fall back to interactive CLI chat.
+            interactive_chat()
         }
     }
+}
+
+/// Interactive CLI chat loop — fallback when HUD is not available.
+fn interactive_chat() -> Result<(), Box<dyn Error>> {
+    eprintln!("  \x1b[1;36mC.A.D.I.S.\x1b[0m — Interactive Chat");
+    eprintln!("  Type a message and press Enter. Ctrl+C to exit.\n");
+
+    let cli = Cli::parse(["status"].map(String::from))?;
+
+    // Show quick status first.
+    if let Ok(frames) =
+        send_request(&cli, ClientRequest::DaemonStatus(EmptyPayload::default()))
+    {
+        for frame in &frames {
+            if let ServerFrame::Response(resp) = frame {
+                if let DaemonResponse::DaemonStatus(status) = &resp.response {
+                    eprintln!(
+                        "  daemon: {} | model: {} | sessions: {}\n",
+                        status.status, status.model_provider, status.sessions
+                    );
+                }
+            }
+        }
+    }
+
+    let stdin = io::stdin();
+    loop {
+        eprint!("\x1b[1;36mcadis>\x1b[0m ");
+        io::stderr().flush()?;
+
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line)? == 0 {
+            break; // EOF
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "exit" || line == "quit" || line == "/quit" {
+            break;
+        }
+
+        let frames = send_request(
+            &cli,
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: None,
+                content: line.to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        )?;
+        render_chat(&frames, false)?;
+        println!();
+    }
+    Ok(())
 }
 
 /// Create a .desktop entry on Linux so CADIS appears in app launchers.
