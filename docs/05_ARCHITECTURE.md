@@ -402,7 +402,24 @@ adapters for:
 
 Android starts as a remote controller only.
 
-## 15. Stable Error Codes
+## 15. Output Filter Pipeline
+
+Tool outputs are compressed before returning to the agent context to reduce
+token consumption. Inspired by [RTK](https://github.com/rtk-ai/rtk) (Rust
+Token Killer), the `cadis-output-filter` crate applies command-specific
+parsers and a generic filter pipeline to achieve 60-90% token reduction.
+
+Pipeline stages:
+1. Strip ANSI escape codes
+2. Command-specific parser (cargo test, cargo build, git status, git diff, etc.)
+3. Line deduplication with counts
+4. Truncation with head/tail preservation
+5. Error-line preservation (errors are never filtered)
+
+The filter runs synchronously after tool execution and before the result is
+returned to the agent. Raw output is preserved in the event log for debugging.
+
+## 16. Stable Error Codes
 
 All daemon error codes use `snake_case`. No hyphens, no camelCase. Every
 `ErrorPayload`, `RuntimeError`, and `tool_error()` in `cadis-core` follows this

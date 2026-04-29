@@ -25,6 +25,7 @@ CADIS has a production-ready daemon (`cadisd`) and CLI (`cadis`) with a native `
 - **Worker runtime**: worktree isolation for safe parallel code work
 - **5 model providers**: Echo, Ollama, OpenAI, CodexCli, and Auto — all with native streaming
 - **Durable state persistence**: crash recovery with consistent on-disk state
+- **Output filter pipeline** for 60-90% token reduction (inspired by [RTK](https://github.com/rtk-ai/rtk))
 
 Start from:
 

@@ -10,6 +10,7 @@ readme = "README.md"
 [dependencies]
 cadis-memory.workspace = true
 cadis-models.workspace = true
+cadis-output-filter.workspace = true
 cadis-policy.workspace = true
 cadis-protocol.workspace = true
 cadis-store.workspace = true

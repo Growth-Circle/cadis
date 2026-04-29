@@ -970,3 +970,32 @@ Exit criteria:
 - No direct import of third-party source code without ADR.
 - No recursive agent spawning by default.
 - No full Android local runtime before desktop alpha.
+
+## 21. Track J - Output Filter Pipeline
+
+Owner: tool-runtime agents.
+
+Reference: [RTK](https://github.com/rtk-ai/rtk) (Rust Token Killer).
+
+Goal: compress tool output before returning it to the agent context to reduce
+token consumption by 60-90%.
+
+Tasks:
+
+- Create `cadis-output-filter` crate with a staged filter pipeline.
+- Implement ANSI escape code stripping.
+- Implement command-specific parsers for cargo test, cargo build, git status,
+  git diff, and shell output.
+- Implement line deduplication with occurrence counts.
+- Implement truncation with head/tail preservation.
+- Preserve error lines unconditionally.
+- Integrate the filter into the tool runtime between tool execution and agent
+  result delivery.
+- Preserve raw output in the event log for debugging.
+
+Exit criteria:
+
+- Tool output returned to agents is 60-90% smaller than raw output.
+- Error lines are never filtered.
+- Raw output remains available in JSONL logs.
+- Filter runs synchronously and does not block the event bus.

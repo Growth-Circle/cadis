@@ -4630,6 +4630,11 @@ impl Runtime {
             &bytes
         };
         let content = redact(&String::from_utf8_lossy(visible));
+        let content = if content.len() > 5000 {
+            cadis_output_filter::filter_output("file.read", &content).filtered
+        } else {
+            content
+        };
         let relative = display_relative_path(workspace, &path);
 
         Ok(ToolExecutionResult {
@@ -4727,11 +4732,12 @@ impl Runtime {
             ));
         }
         let stdout = redact(&String::from_utf8_lossy(&output.stdout));
+        let filtered = cadis_output_filter::filter_output("git status", &stdout);
         Ok(ToolExecutionResult {
-            summary: stdout.clone(),
+            summary: filtered.filtered.clone(),
             output: serde_json::json!({
                 "cwd": display_relative_path(workspace, &cwd),
-                "status": stdout
+                "status": filtered.filtered
             }),
         })
     }
@@ -4782,10 +4788,11 @@ impl Runtime {
             &output.stdout
         };
         let diff = redact(&String::from_utf8_lossy(visible));
-        let summary = if diff.trim().is_empty() {
+        let filtered = cadis_output_filter::filter_output("git diff", &diff);
+        let summary = if filtered.filtered.trim().is_empty() {
             "no diff".to_owned()
         } else {
-            diff.clone()
+            filtered.filtered.clone()
         };
 
         Ok(ToolExecutionResult {
@@ -4793,7 +4800,7 @@ impl Runtime {
             output: serde_json::json!({
                 "cwd": display_relative_path(workspace, &cwd),
                 "pathspec": pathspec,
-                "diff": diff,
+                "diff": filtered.filtered,
                 "truncated": truncated
             }),
         })
@@ -5001,11 +5008,12 @@ impl Runtime {
             ));
         }
         let log = redact(&String::from_utf8_lossy(&output.stdout));
+        let filtered = cadis_output_filter::filter_output("git log", &log);
         Ok(ToolExecutionResult {
-            summary: log.clone(),
+            summary: filtered.filtered.clone(),
             output: serde_json::json!({
                 "cwd": display_relative_path(workspace, &cwd),
-                "log": log,
+                "log": filtered.filtered,
                 "max_count": max_count,
             }),
         })
@@ -5141,9 +5149,12 @@ impl Runtime {
             ));
         }
 
+        let filtered = cadis_output_filter::filter_output(&command, &stdout);
+        let raw_truncated: String = stdout.chars().take(500).collect();
+
         Ok(ToolExecutionResult {
             summary: shell_summary(
-                &stdout,
+                &filtered.filtered,
                 &stderr,
                 result.stdout.truncated,
                 result.stderr.truncated,
@@ -5151,11 +5162,12 @@ impl Runtime {
             output: serde_json::json!({
                 "cwd": display_relative_path(workspace, &cwd),
                 "exit_code": result.exit_code,
-                "stdout": stdout,
+                "stdout": filtered.filtered,
                 "stderr": stderr,
                 "stdout_truncated": result.stdout.truncated,
                 "stderr_truncated": result.stderr.truncated,
-                "timeout_ms": timeout_ms
+                "timeout_ms": timeout_ms,
+                "raw_truncated": raw_truncated
             }),
         })
     }

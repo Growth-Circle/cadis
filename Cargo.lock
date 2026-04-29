@@ -563,6 +563,7 @@ version = "1.2.0"
 dependencies = [
  "cadis-memory",
  "cadis-models",
+ "cadis-output-filter",
  "cadis-policy",
  "cadis-protocol",
  "cadis-store",
@@ -610,6 +611,13 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "cadis-output-filter"
+version = "1.2.0"
+dependencies = [
+ "regex",
 ]
 
 [[package]]

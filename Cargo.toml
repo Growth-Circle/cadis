@@ -12,6 +12,7 @@ members = [
     "crates/cadis-protocol",
     "crates/cadis-store",
     "crates/cadis-telegram",
+    "crates/cadis-output-filter",
 ]
 
 [workspace.package]
@@ -29,6 +30,7 @@ cadis-models = { path = "crates/cadis-models" }
 cadis-policy = { path = "crates/cadis-policy" }
 cadis-protocol = { path = "crates/cadis-protocol" }
 cadis-store = { path = "crates/cadis-store" }
+cadis-output-filter = { path = "crates/cadis-output-filter" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 eframe = "0.29"
 regex = "1"
