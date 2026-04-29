@@ -136,6 +136,9 @@ export type VoiceDoctorReport = {
   checks: VoiceDiagnosticCheck[];
 };
 
+export type PatchEntry = { id: string; summary: string };
+export type TestResultEntry = { id: string; summary: string };
+
 export type ChatPreferences = {
   thinking: boolean;
   fast: boolean;
@@ -148,6 +151,8 @@ export type HudStore = {
   chat: ChatMessage[];
   approvals: ApprovalRecord[];
   workers: WorkerRecord[];
+  patches: PatchEntry[];
+  testResults: TestResultEntry[];
   selectedWorkerId: string | null;
   codeWorkPanelOpen: boolean;
   theme: ThemeKey;
@@ -196,6 +201,8 @@ export type HudStore = {
   setCodeWorkPanelOpen: (open: boolean) => void;
   upsertWorker: (w: WorkerRecord) => void;
   removeWorker: (id: string) => void;
+  pushPatch: (p: PatchEntry) => void;
+  pushTestResult: (t: TestResultEntry) => void;
 };
 
 export const THEMES: Record<ThemeKey, { hue: number; label: string }> = {
@@ -266,6 +273,8 @@ export const useHud = create<HudStore>((set) => ({
   chat: [],
   approvals: [],
   workers: [],
+  patches: [],
+  testResults: [],
   selectedWorkerId: null,
   codeWorkPanelOpen: false,
   theme: "arc",
@@ -418,6 +427,8 @@ export const useHud = create<HudStore>((set) => ({
       selectedWorkerId: s.selectedWorkerId === id ? null : s.selectedWorkerId,
       codeWorkPanelOpen: s.selectedWorkerId === id ? false : s.codeWorkPanelOpen,
     })),
+  pushPatch: (patch) => set((s) => ({ patches: [...s.patches, patch] })),
+  pushTestResult: (result) => set((s) => ({ testResults: [...s.testResults, result] })),
 }));
 
 export const selectApprovals = (s: HudStore): ApprovalRecord[] => s.approvals;

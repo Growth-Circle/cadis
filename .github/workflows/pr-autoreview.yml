@@ -49,22 +49,17 @@ jobs:
             add_reason "Generated artifacts, local runtime state, and local agent state must not be committed. Remove target, node_modules, dist, coverage, .cadis, .claude, or .codex paths from this PR."
           fi
 
-          added_only="$RUNNER_TEMP/added-only.txt"
-          grep '^\+' "$patch" > "$added_only" || true
-
-          MAINTAINER_HOME="rama" 
-          MAINTAINER_HOME="${MAINTAINER_HOME}aditya"
-          if grep -Eq -- "/home/${MAINTAINER_HOME}/|/home/[^[:space:]]+/Project/(ramaclaw-hud|wulan-contribute)|/home/[^[:space:]]+/docs/superpowers" "$added_only"; then
+          if grep -Eq -- '^\+.*/home/ramaaditya/|^\+.*/home/[^[:space:]]+/Project/(ramaclaw-hud|wulan-contribute)|^\+.*/home/[^[:space:]]+/docs/superpowers' "$patch"; then
             add_reason "Private local machine paths were found in the diff. Public docs and code must use generic placeholders such as /home/user/project."
           fi
 
-          if grep -Eiq -- '-----BEGIN (OPENSSH|RSA|DSA|EC|PGP|PRIVATE) KEY-----|github_pat_[A-Za-z0-9_]{20,}|ghp_[A-Za-z0-9_]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{24,}|xox[baprs]-[A-Za-z0-9-]{20,}' "$added_only"; then
+          if grep -Eiq -- '^\+.*-----BEGIN (OPENSSH|RSA|DSA|EC|PGP|PRIVATE) KEY-----|^\+.*github_pat_[A-Za-z0-9_]{20,}|^\+.*ghp_[A-Za-z0-9_]{20,}|^\+.*sk-proj-[A-Za-z0-9_-]{20,}|^\+.*sk-[A-Za-z0-9_-]{24,}|^\+.*xox[baprs]-[A-Za-z0-9-]{20,}' "$patch"; then
             add_reason "A token or private key pattern was found in the diff. Remove credentials and rotate anything that may have been exposed."
           fi
 
           added_lines="$RUNNER_TEMP/added-lines.txt"
           grep '^+' "$patch" > "$added_lines" || true
-          if grep -Eiq -- '(OPENAI_API_KEY|CADIS_OPENAI_API_KEY|ANTHROPIC_API_KEY|GITHUB_TOKEN|GH_TOKEN|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID)[[:space:]]*=[[:space:]]*["'\'']?[A-Za-z0-9_./+=:-]{12,}' "$added_only"; then
+          if grep -Eiq -- '(OPENAI_API_KEY|CADIS_OPENAI_API_KEY|ANTHROPIC_API_KEY|GITHUB_TOKEN|GH_TOKEN|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID)[[:space:]]*=[[:space:]]*["'\'']?[A-Za-z0-9_./+=:-]{12,}' "$added_lines"; then
             add_reason "A credential-looking environment assignment was found in the diff. Keep secrets in local environment or secret stores, never in committed files."
           fi
 

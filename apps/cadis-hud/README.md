@@ -10,7 +10,7 @@ state as a protocol client. Runtime authority stays in `cadisd`.
 
 The center HUD avatar is configurable from Settings -> Appearance:
 
-- `CADIS Orb`: the default RamaClaw-style orb.
+- `CADIS Orb`: the default orbital orb.
 - `Wulan Arc`: a contributed hologram avatar adapted from
   `wulan-contribute/cadis-arc-avatar-sample`.
 

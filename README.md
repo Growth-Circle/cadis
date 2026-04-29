@@ -273,6 +273,8 @@ cadis/
 
 ## Documentation
 
+📖 [Wiki](https://github.com/Growth-Circle/cadis/wiki) for guides and FAQ.
+
 - [Project Charter](docs/00_PROJECT_CHARTER.md)
 - [Architecture](docs/05_ARCHITECTURE.md)
 - [Implementation Plan](docs/06_IMPLEMENTATION_PLAN.md)
