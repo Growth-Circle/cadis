@@ -20,6 +20,7 @@
   <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8D8?logo=tauri&logoColor=white">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-brightgreen.svg">
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-6f42c1?logo=desktop&logoColor=white">
+  <a href="https://www.npmjs.com/package/@growthcircle/cadis"><img alt="npm" src="https://img.shields.io/npm/v/@growthcircle/cadis?logo=npm&logoColor=white&label=npm"></a>
   <a href="https://github.com/Growth-Circle/cadis/discussions"><img alt="Discussions" src="https://img.shields.io/github/discussions/Growth-Circle/cadis?logo=github&label=discussions"></a>
   <a href="https://github.com/Growth-Circle/cadis/issues"><img alt="Issues" src="https://img.shields.io/github/issues/Growth-Circle/cadis?logo=github"></a>
   <a href="https://github.com/Growth-Circle/cadis/pulls"><img alt="PRs" src="https://img.shields.io/github/issues-pr/Growth-Circle/cadis?logo=github&label=PRs"></a>
@@ -168,53 +169,114 @@ concerns. The `cadis-avatar` crate is the renderer-neutral contract for Wulan
 avatar state so HUD, voice, and future remote clients can render a consistent
 presence without moving core orchestration out of `cadisd`.
 
-## Quick start
+## Installation
 
-### Install via npm (recommended)
+### npm (all platforms)
+
+The fastest way to install C.A.D.I.S. Pre-built binaries are resolved
+automatically for your platform.
 
 ```bash
 npm install -g @growthcircle/cadis
 ```
 
-Then run:
+Supported: Linux x64/arm64, macOS x64/arm64 (Apple Silicon), Windows x64.
+
+### Linux
+
+<details>
+<summary>Terminal (bash / zsh)</summary>
 
 ```bash
-cadisd          # start the daemon
-cadis status    # check daemon status
-cadis doctor    # run diagnostics
-cadis chat "hello"
+# Via npm
+npm install -g @growthcircle/cadis
+
+# Or download the binary directly
+curl -fsSL https://github.com/Growth-Circle/cadis/releases/latest/download/cadis-x86_64-unknown-linux-gnu -o cadis
+curl -fsSL https://github.com/Growth-Circle/cadis/releases/latest/download/cadisd-x86_64-unknown-linux-gnu -o cadisd
+chmod +x cadis cadisd
+sudo mv cadis cadisd /usr/local/bin/
+
+# arm64 users: replace x86_64-unknown-linux-gnu with aarch64-unknown-linux-gnu
 ```
 
-Pre-built binaries are available for Linux (x64, arm64), macOS (x64, arm64),
-and Windows (x64).
+</details>
+
+### macOS
+
+<details>
+<summary>Terminal (zsh)</summary>
+
+```bash
+# Via npm
+npm install -g @growthcircle/cadis
+
+# Or download the binary directly (Apple Silicon)
+curl -fsSL https://github.com/Growth-Circle/cadis/releases/latest/download/cadis-aarch64-apple-darwin -o cadis
+curl -fsSL https://github.com/Growth-Circle/cadis/releases/latest/download/cadisd-aarch64-apple-darwin -o cadisd
+chmod +x cadis cadisd
+sudo mv cadis cadisd /usr/local/bin/
+
+# Intel Mac users: replace aarch64-apple-darwin with x86_64-apple-darwin
+```
+
+</details>
+
+### Windows
+
+<details>
+<summary>PowerShell</summary>
+
+```powershell
+# Via npm
+npm install -g @growthcircle/cadis
+
+# Or download the binary directly
+Invoke-WebRequest -Uri "https://github.com/Growth-Circle/cadis/releases/latest/download/cadis-x86_64-pc-windows-msvc.exe" -OutFile "$env:LOCALAPPDATA\cadis\cadis.exe"
+Invoke-WebRequest -Uri "https://github.com/Growth-Circle/cadis/releases/latest/download/cadisd-x86_64-pc-windows-msvc.exe" -OutFile "$env:LOCALAPPDATA\cadis\cadisd.exe"
+
+# Add to PATH (run once)
+$cadisDir = "$env:LOCALAPPDATA\cadis"
+New-Item -ItemType Directory -Force -Path $cadisDir | Out-Null
+[Environment]::SetEnvironmentVariable("Path", "$cadisDir;$([Environment]::GetEnvironmentVariable('Path', 'User'))", "User")
+```
+
+</details>
 
 ### Build from source
 
+Requires [Rust 1.75+](https://rustup.rs/).
+
 ```bash
+git clone https://github.com/Growth-Circle/cadis.git
+cd cadis
 cargo build --release
+# Binaries: target/release/cadis, target/release/cadisd
 ```
 
-### Start the daemon
+### Verify installation
 
 ```bash
-target/release/cadisd --check
-target/release/cadisd
+cadis --version
+cadisd --check
 ```
 
-> **Windows**: use `target/release/cadisd --tcp-port 7433` (no Unix socket).
-> **macOS**: Unix socket works natively, same as Linux.
-
-### Use the CLI
+## Quick start
 
 ```bash
-target/release/cadis status
-target/release/cadis doctor
-target/release/cadis models
-target/release/cadis agents
-target/release/cadis chat "hello"
+# Start the daemon
+cadisd
+
+# In another terminal
+cadis status          # check daemon status
+cadis doctor          # run diagnostics
+cadis models          # list available models
+cadis agents          # list agents
+cadis chat "hello"    # send a message
 ```
 
-> **Windows**: add `--tcp` to CLI commands, e.g. `cadis --tcp status`.
+> **Windows**: the daemon uses TCP by default (`127.0.0.1:7433`). You can also
+> start it explicitly with `cadisd --tcp-port 7433` and use `cadis --tcp status`.
 
 ### Run the HUD
 
