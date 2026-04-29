@@ -140,6 +140,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build, build-hud]
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
