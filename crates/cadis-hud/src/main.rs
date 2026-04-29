@@ -1,45 +1,31 @@
+mod connection;
+mod theme;
+mod types;
+mod widgets;
+
 use std::env;
 use std::error::Error;
-use std::fmt;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::process;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use cadis_protocol::{
-    AgentId, AgentModelSetRequest, AgentRenameRequest, AgentStatus, ApprovalDecision, ApprovalId,
-    ApprovalResponseRequest, CadisEvent, ClientId, ClientRequest, ContentKind, DaemonResponse,
-    EmptyPayload, ErrorPayload, EventEnvelope, MessageSendRequest, RequestEnvelope, RequestId,
-    ServerFrame, UiPreferencesSetRequest, VoicePreferences, VoicePreviewRequest,
+    AgentId, AgentModelSetRequest, AgentRenameRequest, AgentStatus, CadisEvent, ClientRequest,
+    ContentKind, DaemonResponse, EmptyPayload, ErrorPayload, EventEnvelope,
+    EventSubscriptionRequest, MessageSendRequest, ServerFrame, UiPreferencesSetRequest,
+    VoicePreferences, VoicePreviewRequest,
 };
-use cadis_store::load_config;
 use eframe::egui::{
-    self, Align, Align2, Area, Button, CentralPanel, Color32, ComboBox, Context, FontId, Frame, Id,
-    Key, Layout, Margin, Order, Pos2, Rect, RichText, Rounding, ScrollArea, Sense, Slider, Stroke,
-    TextEdit, TopBottomPanel, Ui, Vec2, ViewportCommand, Window,
+    self, Align, CentralPanel, Color32, Context, Frame, Layout, TopBottomPanel, Vec2,
 };
 
-#[derive(Clone, Debug)]
-enum Transport {
-    #[cfg(unix)]
-    Socket(PathBuf),
-    Tcp(String),
-}
+use connection::{resolve_transport, spawn_request, spawn_subscription, Transport};
+use theme::ThemeKey;
 
-impl fmt::Display for Transport {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            #[cfg(unix)]
-            Self::Socket(p) => write!(f, "{}", p.display()),
-            Self::Tcp(addr) => write!(f, "tcp://{addr}"),
-        }
-    }
-}
+const MAX_MESSAGES: usize = 500;
+use types::{
+    default_agents, AgentView, ApprovalView, ChatMessage, ConfigTab, HudResult, ModelOption,
+};
 
 fn main() {
     if let Err(error) = run() {
@@ -49,7 +35,7 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse(env::args().skip(1))?;
+    let args = types::Args::parse(env::args().skip(1))?;
     if args.version {
         println!("cadis-hud {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -77,92 +63,40 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn resolve_transport(_args: &Args) -> Transport {
-    // Explicit TCP via env var
-    if let Ok(port) = env::var("CADIS_TCP_PORT") {
-        return Transport::Tcp(format!("127.0.0.1:{port}"));
-    }
-
-    #[cfg(unix)]
-    {
-        let socket = _args
-            .socket_path
-            .clone()
-            .or_else(|| env::var_os("CADIS_HUD_SOCKET").map(PathBuf::from))
-            .or_else(|| load_config().ok().and_then(|c| c.effective_socket_path()));
-        if let Some(path) = socket {
-            return Transport::Socket(path);
-        }
-    }
-
-    // Fallback to TCP
-    let config = load_config().unwrap_or_default();
-    Transport::Tcp(config.effective_tcp_address())
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct Args {
-    socket_path: Option<PathBuf>,
-    version: bool,
-}
-
-impl Args {
-    fn parse<I>(args: I) -> Result<Self, Box<dyn Error>>
-    where
-        I: IntoIterator<Item = String>,
-    {
-        let mut parsed = Self::default();
-        let mut args = args.into_iter();
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--socket" => {
-                    parsed.socket_path = Some(PathBuf::from(
-                        args.next()
-                            .ok_or_else(|| invalid_input("--socket requires a path"))?,
-                    ));
-                }
-                "--version" | "-V" => parsed.version = true,
-                "--help" | "-h" => {
-                    print_help();
-                    process::exit(0);
-                }
-                other => return Err(invalid_input(format!("unknown argument: {other}")).into()),
-            }
-        }
-        Ok(parsed)
-    }
-}
-
-fn print_help() {
-    println!(
-        "cadis-hud {}\n\nUSAGE:\n  cadis-hud [--socket PATH]\n\nOPTIONS:\n  --socket <PATH>   Unix socket path for cadisd\n  --version, -V     Print version\n  --help, -h        Print help",
-        env!("CARGO_PKG_VERSION")
-    );
-}
-
-struct HudApp {
-    transport: Transport,
-    tx: Sender<HudResult>,
-    rx: Receiver<HudResult>,
-    connected: bool,
-    connection_label: String,
-    last_status_request: Instant,
-    daemon_status: Option<cadis_protocol::DaemonStatusPayload>,
-    model_catalog: Vec<ModelOption>,
-    agents: Vec<AgentView>,
-    approvals: Vec<ApprovalView>,
-    messages: Vec<ChatMessage>,
-    composer: String,
-    pending_assistant: Option<usize>,
-    config_open: bool,
-    config_tab: ConfigTab,
-    rename_target: Option<AgentId>,
-    rename_value: String,
-    theme: ThemeKey,
-    opacity: u8,
-    always_on_top: bool,
-    selected_voice: String,
-    voice_notice: String,
+pub(crate) struct HudApp {
+    pub(crate) transport: Transport,
+    pub(crate) tx: Sender<HudResult>,
+    pub(crate) rx: Receiver<HudResult>,
+    pub(crate) connected: bool,
+    pub(crate) connection_label: String,
+    pub(crate) last_status_request: Instant,
+    pub(crate) daemon_status: Option<cadis_protocol::DaemonStatusPayload>,
+    pub(crate) model_catalog: Vec<ModelOption>,
+    pub(crate) agents: Vec<AgentView>,
+    pub(crate) approvals: Vec<ApprovalView>,
+    pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) composer: String,
+    pub(crate) pending_assistant: Option<usize>,
+    pub(crate) config_open: bool,
+    pub(crate) config_tab: ConfigTab,
+    pub(crate) rename_target: Option<AgentId>,
+    pub(crate) rename_value: String,
+    pub(crate) theme: ThemeKey,
+    pub(crate) opacity: u8,
+    pub(crate) always_on_top: bool,
+    pub(crate) selected_voice: String,
+    pub(crate) voice_notice: String,
+    pub(crate) events_subscribed: bool,
+    pub(crate) scroll_to_bottom: bool,
+    pub(crate) hud_started_daemon: bool,
+    // Animation state
+    pub(crate) animating: bool,
+    pub(crate) orb_color_current: Color32,
+    pub(crate) orb_color_target: Color32,
+    pub(crate) orb_color_start_time: Instant,
+    pub(crate) panel_opacity: f32,
+    pub(crate) panel_opacity_target: f32,
+    pub(crate) panel_opacity_start_time: Instant,
 }
 
 impl HudApp {
@@ -193,6 +127,16 @@ impl HudApp {
             always_on_top: false,
             selected_voice: "id-ID-GadisNeural".to_owned(),
             voice_notice: "voice preview is daemon-routed".to_owned(),
+            events_subscribed: false,
+            scroll_to_bottom: false,
+            hud_started_daemon: env::var_os("CADIS_HUD_STARTED_DAEMON").is_some(),
+            animating: true,
+            orb_color_current: Color32::from_rgb(235, 180, 72),
+            orb_color_target: Color32::from_rgb(235, 180, 72),
+            orb_color_start_time: Instant::now(),
+            panel_opacity: 1.0,
+            panel_opacity_target: 1.0,
+            panel_opacity_start_time: Instant::now(),
         };
 
         app.request(ClientRequest::DaemonStatus(EmptyPayload::default()));
@@ -201,16 +145,12 @@ impl HudApp {
         app
     }
 
-    fn request(&self, request: ClientRequest) {
-        let tx = self.tx.clone();
-        let transport = self.transport.clone();
-        thread::spawn(move || {
-            let result = send_request(&transport, request).map_err(|error| error.to_string());
-            let _ = tx.send(HudResult { result });
-        });
+    pub(crate) fn request(&self, request: ClientRequest) {
+        spawn_request(self.tx.clone(), self.transport.clone(), request);
     }
 
     fn drain_results(&mut self) {
+        let prev_count = self.messages.len();
         while let Ok(result) = self.rx.try_recv() {
             match result.result {
                 Ok(frames) => {
@@ -224,10 +164,33 @@ impl HudApp {
                     self.connected = false;
                     self.connection_label = "disconnected".to_owned();
                     self.daemon_status = None;
+                    self.events_subscribed = false;
                     self.messages
                         .push(ChatMessage::system(format!("cadisd unavailable: {error}")));
                 }
             }
+        }
+        if self.messages.len() != prev_count {
+            self.scroll_to_bottom = true;
+        }
+        // Cap message history (ring buffer: drop oldest when full)
+        if self.messages.len() > MAX_MESSAGES {
+            let excess = self.messages.len() - MAX_MESSAGES;
+            self.messages.drain(..excess);
+            // Adjust pending_assistant index after drain
+            self.pending_assistant = self.pending_assistant.and_then(|i| i.checked_sub(excess));
+        }
+        // Subscribe to events once connected
+        if self.connected && !self.events_subscribed {
+            self.events_subscribed = true;
+            spawn_subscription(
+                self.tx.clone(),
+                self.transport.clone(),
+                ClientRequest::EventsSubscribe(EventSubscriptionRequest {
+                    replay_limit: Some(50),
+                    ..Default::default()
+                }),
+            );
         }
     }
 
@@ -370,7 +333,7 @@ impl HudApp {
         self.agents.last_mut().expect("agent was just pushed")
     }
 
-    fn send_chat(&mut self) {
+    pub(crate) fn send_chat(&mut self) {
         let message = self.composer.trim().to_owned();
         if message.is_empty() || !self.connected {
             return;
@@ -378,15 +341,33 @@ impl HudApp {
         self.messages.push(ChatMessage::user(message.clone()));
         self.composer.clear();
         self.pending_assistant = None;
+
+        // Parse @mention targeting: "@agent_name rest of message"
+        let (target_agent_id, content) = if message.starts_with('@') {
+            if let Some(space) = message.find(|c: char| c.is_whitespace()) {
+                let agent = &message[1..space];
+                let rest = message[space..].trim_start().to_owned();
+                if rest.is_empty() {
+                    (None, message)
+                } else {
+                    (Some(AgentId::from(agent)), rest)
+                }
+            } else {
+                (None, message)
+            }
+        } else {
+            (None, message)
+        };
+
         self.request(ClientRequest::MessageSend(MessageSendRequest {
             session_id: None,
-            target_agent_id: None,
-            content: message,
+            target_agent_id,
+            content,
             content_kind: ContentKind::Chat,
         }));
     }
 
-    fn send_rename(&mut self) {
+    pub(crate) fn send_rename(&mut self) {
         let Some(agent_id) = self.rename_target.take() else {
             return;
         };
@@ -398,28 +379,28 @@ impl HudApp {
         self.rename_value.clear();
     }
 
-    fn set_theme(&mut self, theme: ThemeKey) {
+    pub(crate) fn set_theme(&mut self, theme: ThemeKey) {
         self.theme = theme;
         self.request(ClientRequest::UiPreferencesSet(UiPreferencesSetRequest {
             patch: serde_json::json!({ "hud": { "theme": theme.key() } }),
         }));
     }
 
-    fn set_opacity(&mut self, opacity: u8) {
+    pub(crate) fn set_opacity(&mut self, opacity: u8) {
         self.opacity = opacity;
         self.request(ClientRequest::UiPreferencesSet(UiPreferencesSetRequest {
             patch: serde_json::json!({ "hud": { "background_opacity": opacity } }),
         }));
     }
 
-    fn set_main_model(&mut self, model: String) {
+    pub(crate) fn set_main_model(&mut self, model: String) {
         self.request(ClientRequest::AgentModelSet(AgentModelSetRequest {
             agent_id: AgentId::from("main"),
             model,
         }));
     }
 
-    fn preview_voice(&mut self) {
+    pub(crate) fn preview_voice(&mut self) {
         self.request(ClientRequest::VoicePreview(VoicePreviewRequest {
             text: "Halo, saya CADIS. Audio test berhasil.".to_owned(),
             prefs: Some(VoicePreferences {
@@ -440,19 +421,44 @@ impl eframe::App for HudApp {
             self.request(ClientRequest::DaemonStatus(EmptyPayload::default()));
         }
 
+        // Update orb color target based on daemon status
         let theme = self.theme.palette();
+        let new_orb_target = if self.daemon_status.is_some() && self.connected {
+            theme.ok
+        } else if self.connected {
+            theme.warn
+        } else {
+            theme.err
+        };
+        if new_orb_target != self.orb_color_target {
+            self.orb_color_current = self.current_orb_color();
+            self.orb_color_target = new_orb_target;
+            self.orb_color_start_time = Instant::now();
+        }
+
+        // Determine if animating (orb always pulses, plus color transitions)
+        let color_transitioning = self.orb_color_start_time.elapsed() < Duration::from_millis(300);
+        let panel_transitioning =
+            self.panel_opacity_start_time.elapsed() < Duration::from_millis(300);
+        self.animating =
+            color_transitioning || panel_transitioning || self.pending_assistant.is_some();
+
+        // Lerp panel opacity for smooth show/hide
+        let panel_t = (self.panel_opacity_start_time.elapsed().as_secs_f32() / 0.3).min(1.0);
+        self.panel_opacity += (self.panel_opacity_target - self.panel_opacity) * panel_t;
+
         let opacity = ((self.opacity as f32 / 100.0) * 255.0).round() as u8;
         let background = Color32::from_rgba_premultiplied(6, 8, 10, opacity);
 
         TopBottomPanel::top("cadis_chrome")
             .frame(Frame::none().fill(background))
             .exact_height(32.0)
-            .show(ctx, |ui| self.window_chrome(ctx, ui, &theme));
+            .show(ctx, |ui| widgets::window_chrome(self, ctx, ui, &theme));
 
         CentralPanel::default()
             .frame(Frame::none().fill(background))
             .show(ctx, |ui| {
-                self.status_bar(ui, &theme);
+                widgets::status_bar(self, ui, &theme);
                 ui.add_space(8.0);
 
                 let chat_height = 280.0;
@@ -460,734 +466,44 @@ impl eframe::App for HudApp {
                 ui.allocate_ui_with_layout(
                     Vec2::new(ui.available_width(), orbital_height),
                     Layout::top_down(Align::Center),
-                    |ui| self.orbital_hud(ui, &theme),
+                    |ui| widgets::orbital_hud(self, ctx, ui, &theme),
                 );
                 ui.add_space(8.0);
-                self.chat_panel(ui, &theme, chat_height);
+                widgets::chat_panel(self, ui, &theme, chat_height);
             });
 
-        self.approval_stack(ctx, &theme);
-        self.config_dialog(ctx, &theme);
-        self.rename_dialog(ctx, &theme);
-        ctx.request_repaint_after(Duration::from_millis(60));
+        widgets::approval_stack(self, ctx, &theme);
+        widgets::config_dialog(self, ctx, &theme);
+        widgets::rename_dialog(self, ctx, &theme);
+
+        // Adaptive framerate
+        if self.animating {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.hud_started_daemon {
+            let _ = connection::send_request(
+                &self.transport,
+                ClientRequest::DaemonShutdown(EmptyPayload::default()),
+            );
+        }
     }
 }
 
 impl HudApp {
-    fn window_chrome(&mut self, ctx: &Context, ui: &mut Ui, theme: &Palette) {
-        ui.horizontal(|ui| {
-            let title_response = ui.add_sized(
-                [ui.available_width() - 190.0, 26.0],
-                egui::Label::new(
-                    RichText::new("CADIS HUD")
-                        .monospace()
-                        .size(14.0)
-                        .color(theme.text),
-                )
-                .sense(Sense::drag()),
-            );
-            if title_response.drag_started() {
-                ctx.send_viewport_cmd(ViewportCommand::StartDrag);
-            }
-
-            if ui
-                .add(Button::new(RichText::new("CFG").monospace()).fill(theme.panel2))
-                .on_hover_text("Open configuration")
-                .clicked()
-            {
-                self.config_open = true;
-            }
-            if ui
-                .add(Button::new(RichText::new("PIN").monospace()).fill(theme.panel2))
-                .on_hover_text("Toggle always on top preference")
-                .clicked()
-            {
-                self.always_on_top = !self.always_on_top;
-            }
-            if ui
-                .add(Button::new(RichText::new("_").monospace()).fill(theme.panel2))
-                .on_hover_text("Minimize")
-                .clicked()
-            {
-                ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
-            }
-            if ui
-                .add(Button::new(RichText::new("X").monospace()).fill(theme.err))
-                .on_hover_text("Close")
-                .clicked()
-            {
-                ctx.send_viewport_cmd(ViewportCommand::Close);
-            }
-        });
+    pub(crate) fn current_orb_color(&self) -> Color32 {
+        let elapsed = self.orb_color_start_time.elapsed().as_secs_f32();
+        let t = (elapsed / 0.3).min(1.0);
+        theme::lerp_color(self.orb_color_current, self.orb_color_target, t)
     }
-
-    fn status_bar(&mut self, ui: &mut Ui, theme: &Palette) {
-        let main = self
-            .agents
-            .iter()
-            .find(|agent| agent.id.as_str() == "main")
-            .cloned()
-            .unwrap_or_else(default_main_agent);
-        let active = self
-            .agents
-            .iter()
-            .filter(|agent| agent.status == AgentStatus::Running)
-            .count();
-        let waiting = self
-            .agents
-            .iter()
-            .filter(|agent| agent.status == AgentStatus::WaitingApproval)
-            .count();
-        let idle = self.agents.len().saturating_sub(active + waiting);
-        let socket = self.transport.to_string();
-
-        Frame::none()
-            .fill(theme.panel)
-            .stroke(Stroke::new(1.0, theme.border))
-            .rounding(Rounding::same(8.0))
-            .inner_margin(Margin::same(10.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(main.name)
-                            .monospace()
-                            .strong()
-                            .size(16.0)
-                            .color(theme.accent),
-                    );
-                    ui.separator();
-                    ui.colored_label(
-                        if self.connected { theme.ok } else { theme.err },
-                        format!("daemon {}", self.connection_label),
-                    );
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format!("model {}", main.model))
-                            .monospace()
-                            .color(theme.text),
-                    );
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format!("active {active} / waiting {waiting} / idle {idle}"))
-                            .monospace()
-                            .color(theme.dim),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(socket).monospace().small().color(theme.faint));
-                    });
-                });
-            });
-    }
-
-    fn orbital_hud(&mut self, ui: &mut Ui, theme: &Palette) {
-        let desired = Vec2::new(ui.available_width(), ui.available_height());
-        let (rect, _response) = ui.allocate_exact_size(desired, Sense::hover());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, Rounding::same(8.0), theme.panel);
-        painter.rect_stroke(rect, Rounding::same(8.0), Stroke::new(1.0, theme.border));
-
-        draw_grid(&painter, rect, theme);
-
-        let center = rect.center();
-        let radius = rect.height().min(rect.width()) * 0.13;
-        painter.circle_stroke(center, radius * 1.8, Stroke::new(1.0, theme.border));
-        painter.circle_stroke(center, radius * 2.45, Stroke::new(1.0, theme.border_dark));
-
-        let pulse = (ui.input(|input| input.time).sin() as f32 + 1.0) * 0.5;
-        painter.circle_filled(
-            center,
-            radius,
-            Color32::from_rgba_premultiplied(
-                theme.accent.r(),
-                theme.accent.g(),
-                theme.accent.b(),
-                (45.0 + pulse * 35.0) as u8,
-            ),
-        );
-        painter.circle_stroke(center, radius, Stroke::new(2.0, theme.accent));
-
-        let main_name = self
-            .agents
-            .iter()
-            .find(|agent| agent.id.as_str() == "main")
-            .map(|agent| agent.name.as_str())
-            .unwrap_or("CADIS");
-        painter.text(
-            center,
-            Align2::CENTER_CENTER,
-            main_name,
-            FontId::monospace(30.0),
-            theme.text,
-        );
-        painter.text(
-            center + Vec2::new(0.0, radius * 0.52),
-            Align2::CENTER_CENTER,
-            if self.connected { "ONLINE" } else { "OFFLINE" },
-            FontId::monospace(13.0),
-            if self.connected { theme.ok } else { theme.err },
-        );
-
-        let orb_rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
-        let orb_response = ui.interact(orb_rect, Id::new("central_orb"), Sense::click());
-        orb_response.context_menu(|ui| {
-            if ui.button("Rename main agent").clicked() {
-                self.rename_target = Some(AgentId::from("main"));
-                self.rename_value = main_name.to_owned();
-                ui.close_menu();
-            }
-        });
-
-        let slots = slot_positions(rect);
-        for (index, position) in slots.into_iter().enumerate() {
-            painter.line_segment(
-                [center, position],
-                Stroke::new(1.0, Color32::from_rgba_premultiplied(120, 180, 220, 55)),
-            );
-            let agent = self
-                .agents
-                .get(index)
-                .cloned()
-                .unwrap_or_else(|| placeholder_agent(index));
-            self.agent_card(ui, &painter, theme, position, agent);
-        }
-    }
-
-    fn agent_card(
-        &mut self,
-        ui: &mut Ui,
-        painter: &egui::Painter,
-        theme: &Palette,
-        center: Pos2,
-        agent: AgentView,
-    ) {
-        let card = Rect::from_center_size(center, Vec2::new(210.0, 86.0));
-        painter.rect_filled(card, Rounding::same(8.0), theme.panel2);
-        painter.rect_stroke(card, Rounding::same(8.0), Stroke::new(1.0, theme.border));
-
-        let status_color = status_color(agent.status, theme);
-        painter.circle_filled(card.left_top() + Vec2::new(18.0, 18.0), 5.0, status_color);
-        painter.text(
-            card.left_top() + Vec2::new(31.0, 10.0),
-            Align2::LEFT_TOP,
-            truncate(&agent.name, 22),
-            FontId::monospace(13.5),
-            theme.text,
-        );
-        painter.text(
-            card.left_top() + Vec2::new(14.0, 35.0),
-            Align2::LEFT_TOP,
-            format!("{} / {:?}", agent.role, agent.status).to_lowercase(),
-            FontId::monospace(11.0),
-            theme.dim,
-        );
-        let detail = agent.task.as_deref().unwrap_or(&agent.model);
-        painter.text(
-            card.left_top() + Vec2::new(14.0, 57.0),
-            Align2::LEFT_TOP,
-            truncate(detail, 30),
-            FontId::monospace(10.5),
-            theme.faint,
-        );
-
-        if !agent.workers.is_empty() {
-            painter.text(
-                card.right_bottom() - Vec2::new(12.0, 18.0),
-                Align2::RIGHT_BOTTOM,
-                format!("{} workers", agent.workers.len()),
-                FontId::monospace(10.5),
-                theme.accent,
-            );
-        }
-
-        let response = ui.interact(card, Id::new(("agent", agent.id.as_str())), Sense::click());
-        response.context_menu(|ui| {
-            if ui.button("Rename agent").clicked() {
-                self.rename_target = Some(agent.id.clone());
-                self.rename_value = agent.name.clone();
-                ui.close_menu();
-            }
-            if ui.button("Use first listed model").clicked() {
-                if let Some(model) = self.model_catalog.first() {
-                    self.set_main_model(model.model.clone());
-                }
-                ui.close_menu();
-            }
-        });
-    }
-
-    fn chat_panel(&mut self, ui: &mut Ui, theme: &Palette, height: f32) {
-        Frame::none()
-            .fill(theme.panel)
-            .stroke(Stroke::new(1.0, theme.border))
-            .rounding(Rounding::same(8.0))
-            .inner_margin(Margin::same(10.0))
-            .show(ui, |ui| {
-                ui.set_min_height(height);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("COMMAND CHANNEL")
-                            .monospace()
-                            .strong()
-                            .color(theme.accent),
-                    );
-                    ui.separator();
-                    for chip in ["yes", "no", "cancel", "expand"] {
-                        if ui
-                            .add(Button::new(RichText::new(chip).monospace()).fill(theme.panel2))
-                            .clicked()
-                        {
-                            self.composer = chip.to_owned();
-                        }
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("models").clicked() {
-                            self.config_open = true;
-                            self.config_tab = ConfigTab::Models;
-                        }
-                        if ui.button("voice").clicked() {
-                            self.config_open = true;
-                            self.config_tab = ConfigTab::Voice;
-                        }
-                    });
-                });
-                ui.separator();
-
-                ScrollArea::vertical()
-                    .stick_to_bottom(true)
-                    .max_height(height - 92.0)
-                    .show(ui, |ui| {
-                        for message in &self.messages {
-                            let color = match message.role {
-                                ChatRole::User => theme.accent,
-                                ChatRole::Assistant => theme.text,
-                                ChatRole::System => theme.dim,
-                            };
-                            ui.label(
-                                RichText::new(format!(
-                                    "{}  {}",
-                                    message.role.label(),
-                                    message.text
-                                ))
-                                .color(color)
-                                .monospace(),
-                            );
-                        }
-                    });
-
-                ui.horizontal(|ui| {
-                    let input = ui.add_sized(
-                        [ui.available_width() - 92.0, 46.0],
-                        TextEdit::multiline(&mut self.composer)
-                            .hint_text(if self.connected {
-                                "type a CADIS command"
-                            } else {
-                                "cadisd is disconnected"
-                            })
-                            .desired_rows(2),
-                    );
-                    let enter_send = input.has_focus()
-                        && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
-                    if ui
-                        .add_enabled(
-                            self.connected,
-                            Button::new(RichText::new("SEND").monospace().strong())
-                                .fill(theme.accent),
-                        )
-                        .clicked()
-                        || enter_send
-                    {
-                        self.send_chat();
-                    }
-                });
-            });
-    }
-
-    fn approval_stack(&mut self, ctx: &Context, theme: &Palette) {
-        if self.approvals.is_empty() {
-            return;
-        }
-
-        Area::new(Id::new("approval_stack"))
-            .order(Order::Foreground)
-            .anchor(Align2::RIGHT_TOP, [-22.0, 84.0])
-            .show(ctx, |ui| {
-                ui.set_width(360.0);
-                for index in 0..self.approvals.len() {
-                    let mut decision = None;
-                    let approval_id = self.approvals[index].id.clone();
-                    let approval = &mut self.approvals[index];
-                    Frame::none()
-                        .fill(theme.panel2)
-                        .stroke(Stroke::new(1.0, theme.warn))
-                        .rounding(Rounding::same(8.0))
-                        .inner_margin(Margin::same(10.0))
-                        .show(ui, |ui| {
-                            ui.label(RichText::new(&approval.title).monospace().color(theme.warn));
-                            ui.label(RichText::new(&approval.risk).monospace().small());
-                            ui.label(&approval.summary);
-                            if !approval.command.is_empty() {
-                                ui.label(RichText::new(&approval.command).monospace().small());
-                            }
-                            if !approval.workspace.is_empty() {
-                                ui.label(RichText::new(&approval.workspace).monospace().small());
-                            }
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(
-                                        !approval.waiting_resolution,
-                                        Button::new("DENY").fill(theme.err),
-                                    )
-                                    .clicked()
-                                {
-                                    approval.waiting_resolution = true;
-                                    decision = Some(ApprovalDecision::Denied);
-                                }
-                                if ui
-                                    .add_enabled(
-                                        !approval.waiting_resolution,
-                                        Button::new("APPROVE").fill(theme.warn),
-                                    )
-                                    .clicked()
-                                {
-                                    approval.waiting_resolution = true;
-                                    decision = Some(ApprovalDecision::Approved);
-                                }
-                            });
-                        });
-                    if let Some(decision) = decision {
-                        self.request(ClientRequest::ApprovalRespond(ApprovalResponseRequest {
-                            approval_id,
-                            decision,
-                            reason: Some("resolved from CADIS HUD".to_owned()),
-                        }));
-                    }
-                    ui.add_space(8.0);
-                }
-            });
-    }
-
-    fn config_dialog(&mut self, ctx: &Context, theme: &Palette) {
-        if !self.config_open {
-            return;
-        }
-
-        let mut open = self.config_open;
-        Window::new("CADIS CONFIG")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(620.0)
-            .frame(
-                Frame::window(&ctx.style())
-                    .fill(theme.panel)
-                    .stroke(Stroke::new(1.0, theme.border))
-                    .rounding(Rounding::same(8.0)),
-            )
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    for tab in ConfigTab::all() {
-                        if ui
-                            .selectable_label(self.config_tab == tab, tab.label())
-                            .clicked()
-                        {
-                            self.config_tab = tab;
-                        }
-                    }
-                });
-                ui.separator();
-                match self.config_tab {
-                    ConfigTab::Voice => self.voice_tab(ui, theme),
-                    ConfigTab::Models => self.models_tab(ui, theme),
-                    ConfigTab::Appearance => self.appearance_tab(ui, theme),
-                    ConfigTab::Window => self.window_tab(ui, theme),
-                }
-            });
-        self.config_open = open;
-    }
-
-    fn voice_tab(&mut self, ui: &mut Ui, theme: &Palette) {
-        ui.label(
-            RichText::new("voice provider route")
-                .monospace()
-                .color(theme.dim),
-        );
-        ComboBox::from_label("voice")
-            .selected_text(&self.selected_voice)
-            .show_ui(ui, |ui| {
-                for voice in VOICES {
-                    ui.selectable_value(&mut self.selected_voice, (*voice).to_owned(), *voice);
-                }
-            });
-        ui.horizontal(|ui| {
-            if ui.button("TEST VOICE").clicked() {
-                self.preview_voice();
-            }
-            if ui.button("STOP").clicked() {
-                self.request(ClientRequest::VoiceStop(EmptyPayload::default()));
-            }
-        });
-        ui.label(
-            RichText::new(&self.voice_notice)
-                .monospace()
-                .color(theme.faint),
-        );
-    }
-
-    fn models_tab(&mut self, ui: &mut Ui, theme: &Palette) {
-        if ui.button("REFRESH MODELS").clicked() {
-            self.request(ClientRequest::ModelsList(EmptyPayload::default()));
-        }
-        ui.separator();
-        let current = self
-            .agents
-            .iter()
-            .find(|agent| agent.id.as_str() == "main")
-            .map(|agent| agent.model.clone())
-            .unwrap_or_else(|| "auto".to_owned());
-        let mut selected = current.clone();
-        ComboBox::from_label("main agent model")
-            .selected_text(&selected)
-            .show_ui(ui, |ui| {
-                for model in &self.model_catalog {
-                    ui.selectable_value(
-                        &mut selected,
-                        model.model.clone(),
-                        format!(
-                            "{}/{} - {}",
-                            model.provider, model.model, model.display_name
-                        ),
-                    );
-                }
-            });
-        if selected != current {
-            self.set_main_model(selected);
-        }
-        ui.label(
-            RichText::new("model changes are confirmed by agent.model.changed")
-                .monospace()
-                .small()
-                .color(theme.faint),
-        );
-    }
-
-    fn appearance_tab(&mut self, ui: &mut Ui, theme: &Palette) {
-        ui.label(RichText::new("theme").monospace().color(theme.dim));
-        ui.horizontal_wrapped(|ui| {
-            for key in ThemeKey::all() {
-                let palette = key.palette();
-                let button = Button::new(key.label())
-                    .fill(palette.accent)
-                    .stroke(Stroke::new(
-                        if self.theme == key { 2.0 } else { 1.0 },
-                        theme.text,
-                    ));
-                if ui.add(button).clicked() {
-                    self.set_theme(key);
-                }
-            }
-        });
-        let mut opacity = self.opacity as f32;
-        if ui
-            .add(Slider::new(&mut opacity, 45.0..=100.0).text("background opacity"))
-            .changed()
-        {
-            self.set_opacity(opacity.round() as u8);
-        }
-    }
-
-    fn window_tab(&mut self, ui: &mut Ui, theme: &Palette) {
-        ui.checkbox(&mut self.always_on_top, "always on top preference");
-        ui.label(
-            RichText::new("window preference is UI-local in this prototype")
-                .monospace()
-                .small()
-                .color(theme.faint),
-        );
-        if ui.button("RECHECK DAEMON").clicked() {
-            self.request(ClientRequest::DaemonStatus(EmptyPayload::default()));
-        }
-    }
-
-    fn rename_dialog(&mut self, ctx: &Context, theme: &Palette) {
-        if self.rename_target.is_none() {
-            return;
-        }
-
-        let target = self
-            .rename_target
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        Window::new(format!("RENAME {target}"))
-            .collapsible(false)
-            .resizable(false)
-            .default_width(360.0)
-            .frame(
-                Frame::window(&ctx.style())
-                    .fill(theme.panel)
-                    .stroke(Stroke::new(1.0, theme.border))
-                    .rounding(Rounding::same(8.0)),
-            )
-            .show(ctx, |ui| {
-                ui.add(
-                    TextEdit::singleline(&mut self.rename_value).hint_text("agent display name"),
-                );
-                ui.horizontal(|ui| {
-                    if ui.button("CANCEL").clicked() {
-                        self.rename_target = None;
-                        self.rename_value.clear();
-                    }
-                    if ui
-                        .add_enabled(self.connected, Button::new("SAVE").fill(theme.accent))
-                        .clicked()
-                    {
-                        self.send_rename();
-                    }
-                });
-                if !self.connected {
-                    ui.label(RichText::new("cadisd disconnected").color(theme.err));
-                }
-            });
-    }
-}
-
-fn send_request(
-    transport: &Transport,
-    request: ClientRequest,
-) -> Result<Vec<ServerFrame>, Box<dyn Error>> {
-    let envelope = RequestEnvelope::new(next_request_id(), ClientId::from("hud_main"), request);
-
-    fn write_and_read(
-        mut stream: impl Read + Write,
-        envelope: &RequestEnvelope,
-    ) -> Result<Vec<ServerFrame>, Box<dyn Error>> {
-        serde_json::to_writer(&mut stream, envelope)?;
-        stream.write_all(b"\n")?;
-        stream.flush()?;
-        let reader = BufReader::new(stream);
-        let mut frames = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
-            if !line.trim().is_empty() {
-                frames.push(serde_json::from_str::<ServerFrame>(&line)?);
-            }
-        }
-        Ok(frames)
-    }
-
-    match transport {
-        #[cfg(unix)]
-        Transport::Socket(path) => {
-            let stream = UnixStream::connect(path).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("could not connect to cadisd at {}: {e}", path.display()),
-                )
-            })?;
-            write_and_read(stream, &envelope)
-        }
-        Transport::Tcp(addr) => {
-            let stream = TcpStream::connect(addr).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("could not connect to cadisd at tcp://{addr}: {e}"),
-                )
-            })?;
-            write_and_read(stream, &envelope)
-        }
-    }
-}
-
-fn next_request_id() -> RequestId {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    RequestId::from(format!("req_hud_{}_{}", process::id(), millis))
-}
-
-fn invalid_input(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
 fn format_error(error: &ErrorPayload) -> String {
     format!("{}: {}", error.code, error.message)
-}
-
-fn draw_grid(painter: &egui::Painter, rect: Rect, theme: &Palette) {
-    let spacing = 42.0;
-    let mut x = rect.left();
-    while x <= rect.right() {
-        painter.line_segment(
-            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            Stroke::new(
-                1.0,
-                Color32::from_rgba_premultiplied(
-                    theme.faint.r(),
-                    theme.faint.g(),
-                    theme.faint.b(),
-                    22,
-                ),
-            ),
-        );
-        x += spacing;
-    }
-    let mut y = rect.top();
-    while y <= rect.bottom() {
-        painter.line_segment(
-            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            Stroke::new(
-                1.0,
-                Color32::from_rgba_premultiplied(
-                    theme.faint.r(),
-                    theme.faint.g(),
-                    theme.faint.b(),
-                    18,
-                ),
-            ),
-        );
-        y += spacing;
-    }
-}
-
-fn slot_positions(rect: Rect) -> [Pos2; 12] {
-    let w = rect.width();
-    let h = rect.height();
-    let p = |x: f32, y: f32| Pos2::new(rect.left() + w * x, rect.top() + h * y);
-    [
-        p(0.18, 0.13),
-        p(0.39, 0.10),
-        p(0.61, 0.10),
-        p(0.82, 0.13),
-        p(0.09, 0.36),
-        p(0.91, 0.36),
-        p(0.09, 0.62),
-        p(0.91, 0.62),
-        p(0.18, 0.86),
-        p(0.39, 0.90),
-        p(0.61, 0.90),
-        p(0.82, 0.86),
-    ]
-}
-
-fn status_color(status: AgentStatus, theme: &Palette) -> Color32 {
-    match status {
-        AgentStatus::Spawning => theme.warn,
-        AgentStatus::Idle => theme.dim,
-        AgentStatus::Running => theme.ok,
-        AgentStatus::WaitingApproval => theme.warn,
-        AgentStatus::Completed => theme.accent,
-        AgentStatus::Failed => theme.err,
-        AgentStatus::Cancelled => theme.dim,
-    }
-}
-
-fn truncate(value: &str, max_chars: usize) -> String {
-    let mut result = value.chars().take(max_chars).collect::<String>();
-    if value.chars().count() > max_chars {
-        result.push('…');
-    }
-    result
 }
 
 fn normalize_agent_name(value: &str, agent_id: &AgentId) -> String {
@@ -1204,273 +520,3 @@ fn normalize_agent_name(value: &str, agent_id: &AgentId) -> String {
     };
     name.chars().take(32).collect()
 }
-
-#[derive(Clone, Debug)]
-struct HudResult {
-    result: Result<Vec<ServerFrame>, String>,
-}
-
-#[derive(Clone, Debug)]
-struct AgentView {
-    id: AgentId,
-    name: String,
-    role: String,
-    status: AgentStatus,
-    task: Option<String>,
-    model: String,
-    workers: Vec<String>,
-}
-
-fn default_agents() -> Vec<AgentView> {
-    vec![
-        default_main_agent(),
-        AgentView {
-            id: AgentId::from("coder"),
-            name: "Coder".to_owned(),
-            role: "worker".to_owned(),
-            status: AgentStatus::Idle,
-            task: None,
-            model: "auto".to_owned(),
-            workers: vec!["tester idle".to_owned(), "reviewer idle".to_owned()],
-        },
-        AgentView {
-            id: AgentId::from("researcher"),
-            name: "Researcher".to_owned(),
-            role: "agent".to_owned(),
-            status: AgentStatus::Idle,
-            task: None,
-            model: "auto".to_owned(),
-            workers: Vec::new(),
-        },
-    ]
-}
-
-fn default_main_agent() -> AgentView {
-    AgentView {
-        id: AgentId::from("main"),
-        name: "CADIS".to_owned(),
-        role: "main".to_owned(),
-        status: AgentStatus::Idle,
-        task: None,
-        model: "auto".to_owned(),
-        workers: Vec::new(),
-    }
-}
-
-fn placeholder_agent(index: usize) -> AgentView {
-    AgentView {
-        id: AgentId::from(format!("slot_{index}")),
-        name: format!("Slot {}", index + 1),
-        role: "reserved".to_owned(),
-        status: AgentStatus::Idle,
-        task: None,
-        model: "waiting".to_owned(),
-        workers: Vec::new(),
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ApprovalView {
-    id: ApprovalId,
-    risk: String,
-    title: String,
-    summary: String,
-    command: String,
-    workspace: String,
-    waiting_resolution: bool,
-}
-
-#[derive(Clone, Debug)]
-struct ModelOption {
-    provider: String,
-    model: String,
-    display_name: String,
-}
-
-#[derive(Clone, Debug)]
-struct ChatMessage {
-    role: ChatRole,
-    text: String,
-}
-
-impl ChatMessage {
-    fn user(text: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::User,
-            text: text.into(),
-        }
-    }
-
-    fn assistant(text: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::Assistant,
-            text: text.into(),
-        }
-    }
-
-    fn system(text: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::System,
-            text: text.into(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChatRole {
-    User,
-    Assistant,
-    System,
-}
-
-impl ChatRole {
-    fn label(self) -> &'static str {
-        match self {
-            Self::User => "USER",
-            Self::Assistant => "CADIS",
-            Self::System => "SYS",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ConfigTab {
-    Voice,
-    Models,
-    Appearance,
-    Window,
-}
-
-impl ConfigTab {
-    fn all() -> [Self; 4] {
-        [Self::Voice, Self::Models, Self::Appearance, Self::Window]
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Voice => "Voice",
-            Self::Models => "Models",
-            Self::Appearance => "Appearance",
-            Self::Window => "Window",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ThemeKey {
-    Arc,
-    Amber,
-    Phosphor,
-    Violet,
-    Alert,
-    Ice,
-}
-
-impl ThemeKey {
-    fn all() -> [Self; 6] {
-        [
-            Self::Arc,
-            Self::Amber,
-            Self::Phosphor,
-            Self::Violet,
-            Self::Alert,
-            Self::Ice,
-        ]
-    }
-
-    fn from_key(value: &str) -> Option<Self> {
-        Some(match value {
-            "arc" => Self::Arc,
-            "amber" => Self::Amber,
-            "phosphor" => Self::Phosphor,
-            "violet" => Self::Violet,
-            "alert" => Self::Alert,
-            "ice" => Self::Ice,
-            _ => return None,
-        })
-    }
-
-    fn key(self) -> &'static str {
-        match self {
-            Self::Arc => "arc",
-            Self::Amber => "amber",
-            Self::Phosphor => "phosphor",
-            Self::Violet => "violet",
-            Self::Alert => "alert",
-            Self::Ice => "ice",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Arc => "ARC",
-            Self::Amber => "AMBER",
-            Self::Phosphor => "PHOSPHOR",
-            Self::Violet => "VIOLET",
-            Self::Alert => "ALERT",
-            Self::Ice => "ICE",
-        }
-    }
-
-    fn palette(self) -> Palette {
-        match self {
-            Self::Arc => Palette::new((20, 28, 36), (65, 185, 240)),
-            Self::Amber => Palette::new((34, 26, 16), (238, 174, 64)),
-            Self::Phosphor => Palette::new((14, 28, 20), (91, 220, 130)),
-            Self::Violet => Palette::new((27, 20, 36), (190, 118, 240)),
-            Self::Alert => Palette::new((38, 18, 16), (245, 96, 68)),
-            Self::Ice => Palette::new((16, 25, 42), (145, 176, 255)),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Palette {
-    panel: Color32,
-    panel2: Color32,
-    border: Color32,
-    border_dark: Color32,
-    text: Color32,
-    dim: Color32,
-    faint: Color32,
-    accent: Color32,
-    ok: Color32,
-    warn: Color32,
-    err: Color32,
-}
-
-impl Palette {
-    fn new(bg: (u8, u8, u8), accent: (u8, u8, u8)) -> Self {
-        Self {
-            panel: Color32::from_rgba_premultiplied(bg.0, bg.1, bg.2, 186),
-            panel2: Color32::from_rgba_premultiplied(
-                bg.0.saturating_add(12),
-                bg.1.saturating_add(12),
-                bg.2.saturating_add(12),
-                212,
-            ),
-            border: Color32::from_rgba_premultiplied(accent.0, accent.1, accent.2, 120),
-            border_dark: Color32::from_rgba_premultiplied(accent.0, accent.1, accent.2, 64),
-            text: Color32::from_rgb(224, 232, 235),
-            dim: Color32::from_rgb(148, 166, 174),
-            faint: Color32::from_rgb(96, 116, 126),
-            accent: Color32::from_rgb(accent.0, accent.1, accent.2),
-            ok: Color32::from_rgb(84, 218, 130),
-            warn: Color32::from_rgb(235, 180, 72),
-            err: Color32::from_rgb(238, 80, 74),
-        }
-    }
-}
-
-const VOICES: &[&str] = &[
-    "id-ID-ArdiNeural",
-    "id-ID-GadisNeural",
-    "ms-MY-OsmanNeural",
-    "ms-MY-YasminNeural",
-    "en-US-AvaNeural",
-    "en-US-AndrewNeural",
-    "en-US-EmmaNeural",
-    "en-US-BrianNeural",
-    "en-GB-SoniaNeural",
-    "en-GB-RyanNeural",
-];

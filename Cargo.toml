@@ -42,3 +42,9 @@ toml = "0.8"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[profile.release]
+opt-level = 'z'
+lto = true
+strip = true
+codegen-units = 1
