@@ -157,6 +157,7 @@ pub(crate) fn draw_grid(painter: &eframe::egui::Painter, rect: Rect, theme: &Pal
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn slot_positions(rect: Rect) -> [Pos2; 12] {
     let w = rect.width();
     let h = rect.height();

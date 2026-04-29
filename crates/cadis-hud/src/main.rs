@@ -23,8 +23,10 @@ use connection::{resolve_transport, spawn_request, spawn_subscription, Transport
 use theme::ThemeKey;
 
 const MAX_MESSAGES: usize = 500;
+use std::collections::VecDeque;
 use types::{
-    default_agents, AgentView, ApprovalView, ChatMessage, ConfigTab, HudResult, ModelOption,
+    default_agents, AgentView, ApprovalView, ChatMessage, ConfigTab, DebugEvent, HudResult,
+    ModelOption,
 };
 
 fn main() {
@@ -97,6 +99,15 @@ pub(crate) struct HudApp {
     pub(crate) panel_opacity: f32,
     pub(crate) panel_opacity_target: f32,
     pub(crate) panel_opacity_start_time: Instant,
+    // Chat UI
+    pub(crate) typing_indicator: bool,
+    // Draggable agent layouts
+    pub(crate) agent_layouts: std::collections::HashMap<String, types::AgentLayout>,
+    // Debug mode
+    pub(crate) debug_enabled: bool,
+    pub(crate) debug_events: VecDeque<DebugEvent>,
+    pub(crate) event_count: u64,
+    pub(crate) frame_times: VecDeque<Instant>,
 }
 
 impl HudApp {
@@ -137,6 +148,12 @@ impl HudApp {
             panel_opacity: 1.0,
             panel_opacity_target: 1.0,
             panel_opacity_start_time: Instant::now(),
+            typing_indicator: false,
+            agent_layouts: std::collections::HashMap::new(),
+            debug_enabled: false,
+            debug_events: VecDeque::new(),
+            event_count: 0,
+            frame_times: VecDeque::new(),
         };
 
         app.request(ClientRequest::DaemonStatus(EmptyPayload::default()));
@@ -211,6 +228,18 @@ impl HudApp {
     }
 
     fn apply_event(&mut self, event: EventEnvelope) {
+        self.event_count += 1;
+        if self.debug_enabled {
+            let label = format!("{:?}", std::mem::discriminant(&event.event));
+            self.debug_events.push_back(DebugEvent {
+                timestamp: Instant::now(),
+                label,
+                detail: String::new(),
+            });
+            if self.debug_events.len() > 20 {
+                self.debug_events.pop_front();
+            }
+        }
         match event.event {
             CadisEvent::SessionStarted(payload) => {
                 if let Some(title) = payload.title {
@@ -219,15 +248,30 @@ impl HudApp {
                 }
             }
             CadisEvent::MessageDelta(payload) => {
+                self.typing_indicator = true;
                 if self.pending_assistant.is_none() {
-                    self.messages.push(ChatMessage::assistant(""));
+                    let name = payload
+                        .agent_name
+                        .clone()
+                        .or_else(|| payload.agent_id.as_ref().map(|id| id.to_string()));
+                    let msg = match name {
+                        Some(n) => ChatMessage::assistant_named("", n),
+                        None => ChatMessage::assistant(""),
+                    };
+                    self.messages.push(msg);
                     self.pending_assistant = Some(self.messages.len() - 1);
                 }
                 if let Some(index) = self.pending_assistant {
                     self.messages[index].text.push_str(&payload.delta);
+                    if self.messages[index].agent_name.is_none() {
+                        self.messages[index].agent_name = payload
+                            .agent_name
+                            .or_else(|| payload.agent_id.map(|id| id.to_string()));
+                    }
                 }
             }
             CadisEvent::MessageCompleted(_) => {
+                self.typing_indicator = false;
                 self.pending_assistant = None;
             }
             CadisEvent::SessionFailed(error) | CadisEvent::DaemonError(error) => {
@@ -367,6 +411,30 @@ impl HudApp {
         }));
     }
 
+    pub(crate) fn clear_chat(&mut self) {
+        self.messages.clear();
+        self.pending_assistant = None;
+        self.typing_indicator = false;
+        self.messages.push(ChatMessage::system("Chat cleared."));
+    }
+
+    pub(crate) fn agent_layout_mut(&mut self, id: &str) -> &mut types::AgentLayout {
+        let count = self.agents.len().max(1);
+        let index = self
+            .agents
+            .iter()
+            .position(|a| a.id.as_str() == id)
+            .unwrap_or(0);
+        self.agent_layouts.entry(id.to_owned()).or_insert_with(|| {
+            let angle =
+                index as f32 * std::f32::consts::TAU / count as f32 - std::f32::consts::FRAC_PI_2;
+            types::AgentLayout {
+                position: egui::Pos2::new(0.5 + 0.35 * angle.cos(), 0.5 + 0.35 * angle.sin()),
+                visible: true,
+            }
+        })
+    }
+
     pub(crate) fn send_rename(&mut self) {
         let Some(agent_id) = self.rename_target.take() else {
             return;
@@ -415,6 +483,12 @@ impl HudApp {
 
 impl eframe::App for HudApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        if self.debug_enabled {
+            self.frame_times.push_back(Instant::now());
+            if self.frame_times.len() > 60 {
+                self.frame_times.pop_front();
+            }
+        }
         self.drain_results();
         if self.last_status_request.elapsed() >= Duration::from_secs(2) {
             self.last_status_request = Instant::now();
@@ -468,7 +542,9 @@ impl eframe::App for HudApp {
                     Layout::top_down(Align::Center),
                     |ui| widgets::orbital_hud(self, ctx, ui, &theme),
                 );
-                ui.add_space(8.0);
+                ui.add_space(4.0);
+                widgets::agent_tray(self, ui, &theme);
+                ui.add_space(4.0);
                 widgets::chat_panel(self, ui, &theme, chat_height);
             });
 

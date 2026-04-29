@@ -7,8 +7,8 @@ use eframe::egui::{
     ViewportCommand, Window,
 };
 
-use crate::theme::{draw_grid, glass_frame, slot_positions, status_color, Palette, ThemeKey};
-use crate::types::{placeholder_agent, AgentView, ChatRole, ConfigTab};
+use crate::theme::{draw_grid, glass_frame, status_color, Palette, ThemeKey};
+use crate::types::{placeholder_agent, ChatRole, ConfigTab};
 use crate::HudApp;
 
 const VOICES: &[&str] = &[
@@ -152,12 +152,11 @@ pub(crate) fn orbital_hud(app: &mut HudApp, _ctx: &Context, ui: &mut Ui, theme: 
 
     // Animated pulsing orb
     let time = ui.input(|input| input.time) as f32;
-    let pulse = time.sin() * 0.5 + 0.5; // 0..1
-    let orb_radius = 38.0 + pulse * 4.0; // 38..42
+    let pulse = time.sin() * 0.5 + 0.5;
+    let orb_radius = 38.0 + pulse * 4.0;
 
     let orb_color = app.current_orb_color();
 
-    // Glow: 3 concentric circles with decreasing alpha
     for (i, alpha) in [40u8, 25, 12].iter().enumerate() {
         let glow_r = orb_radius + (i as f32 + 1.0) * 8.0;
         painter.circle_filled(
@@ -167,7 +166,6 @@ pub(crate) fn orbital_hud(app: &mut HudApp, _ctx: &Context, ui: &mut Ui, theme: 
         );
     }
 
-    // Core orb fill
     painter.circle_filled(
         center,
         orb_radius,
@@ -211,80 +209,160 @@ pub(crate) fn orbital_hud(app: &mut HudApp, _ctx: &Context, ui: &mut Ui, theme: 
         }
     });
 
-    let slots = slot_positions(rect);
-    for (index, position) in slots.into_iter().enumerate() {
+    // Collect agent ids to avoid borrow issues
+    let agent_ids: Vec<String> = app.agents.iter().map(|a| a.id.to_string()).collect();
+
+    // Ensure layouts exist for all agents
+    for id in &agent_ids {
+        let _ = app.agent_layout_mut(id);
+    }
+
+    for agent_id in &agent_ids {
+        let layout = app.agent_layouts.get(agent_id).cloned();
+        let Some(layout) = layout else { continue };
+        if !layout.visible {
+            continue;
+        }
+
+        let pos = Pos2::new(
+            rect.left() + layout.position.x * rect.width(),
+            rect.top() + layout.position.y * rect.height(),
+        );
+
+        // Connection line
         painter.line_segment(
-            [center, position],
+            [center, pos],
             Stroke::new(1.0, Color32::from_rgba_premultiplied(120, 180, 220, 55)),
         );
+
         let agent = app
             .agents
-            .get(index)
+            .iter()
+            .find(|a| a.id.as_str() == agent_id.as_str())
             .cloned()
-            .unwrap_or_else(|| placeholder_agent(index));
-        agent_card(app, ui, &painter, theme, position, agent);
+            .unwrap_or_else(|| placeholder_agent(0));
+
+        // Agent card
+        let card_size = Vec2::new(210.0, 86.0);
+        let card = Rect::from_center_size(pos, card_size);
+        painter.rect_filled(card, Rounding::same(8.0), theme.panel2);
+        painter.rect_stroke(card, Rounding::same(8.0), Stroke::new(1.0, theme.border));
+
+        let sc = status_color(agent.status, theme);
+        painter.circle_filled(card.left_top() + Vec2::new(18.0, 18.0), 5.0, sc);
+        painter.text(
+            card.left_top() + Vec2::new(31.0, 10.0),
+            Align2::LEFT_TOP,
+            truncate(&agent.name, 20),
+            FontId::monospace(13.5),
+            theme.text,
+        );
+        painter.text(
+            card.left_top() + Vec2::new(14.0, 35.0),
+            Align2::LEFT_TOP,
+            format!("{} / {:?}", agent.role, agent.status).to_lowercase(),
+            FontId::monospace(11.0),
+            theme.dim,
+        );
+        let detail = agent.task.as_deref().unwrap_or(&agent.model);
+        painter.text(
+            card.left_top() + Vec2::new(14.0, 57.0),
+            Align2::LEFT_TOP,
+            truncate(detail, 28),
+            FontId::monospace(10.5),
+            theme.faint,
+        );
+        if !agent.workers.is_empty() {
+            painter.text(
+                card.right_bottom() - Vec2::new(12.0, 18.0),
+                Align2::RIGHT_BOTTOM,
+                format!("{} workers", agent.workers.len()),
+                FontId::monospace(10.5),
+                theme.accent,
+            );
+        }
+
+        // Hide button (×) at top-right of card
+        let close_rect =
+            Rect::from_min_size(card.right_top() + Vec2::new(-22.0, 4.0), Vec2::splat(18.0));
+        painter.text(
+            close_rect.center(),
+            Align2::CENTER_CENTER,
+            "×",
+            FontId::monospace(14.0),
+            theme.dim,
+        );
+        let close_resp = ui.interact(
+            close_rect,
+            Id::new(("hide", agent_id.as_str())),
+            Sense::click(),
+        );
+        if close_resp.clicked() {
+            if let Some(l) = app.agent_layouts.get_mut(agent_id) {
+                l.visible = false;
+            }
+        }
+
+        // Drag interaction
+        let drag_resp = ui.interact(card, Id::new(("drag", agent_id.as_str())), Sense::drag());
+        if drag_resp.dragged() {
+            let delta = drag_resp.drag_delta();
+            if let Some(l) = app.agent_layouts.get_mut(agent_id) {
+                l.position.x = (l.position.x + delta.x / rect.width()).clamp(0.05, 0.95);
+                l.position.y = (l.position.y + delta.y / rect.height()).clamp(0.05, 0.95);
+            }
+        }
+
+        // Context menu
+        let click_resp = ui.interact(card, Id::new(("agent", agent_id.as_str())), Sense::click());
+        click_resp.context_menu(|ui| {
+            if ui.button("Rename agent").clicked() {
+                app.rename_target = Some(AgentId::from(agent_id.as_str()));
+                app.rename_value = agent.name.clone();
+                ui.close_menu();
+            }
+            if ui.button("Use first listed model").clicked() {
+                if let Some(model) = app.model_catalog.first() {
+                    app.set_main_model(model.model.clone());
+                }
+                ui.close_menu();
+            }
+        });
     }
 }
 
-pub(crate) fn agent_card(
-    app: &mut HudApp,
-    ui: &mut Ui,
-    painter: &egui::Painter,
-    theme: &Palette,
-    center: Pos2,
-    agent: AgentView,
-) {
-    let card = Rect::from_center_size(center, Vec2::new(210.0, 86.0));
-    painter.rect_filled(card, Rounding::same(8.0), theme.panel2);
-    painter.rect_stroke(card, Rounding::same(8.0), Stroke::new(1.0, theme.border));
-
-    let sc = status_color(agent.status, theme);
-    painter.circle_filled(card.left_top() + Vec2::new(18.0, 18.0), 5.0, sc);
-    painter.text(
-        card.left_top() + Vec2::new(31.0, 10.0),
-        Align2::LEFT_TOP,
-        truncate(&agent.name, 22),
-        FontId::monospace(13.5),
-        theme.text,
-    );
-    painter.text(
-        card.left_top() + Vec2::new(14.0, 35.0),
-        Align2::LEFT_TOP,
-        format!("{} / {:?}", agent.role, agent.status).to_lowercase(),
-        FontId::monospace(11.0),
-        theme.dim,
-    );
-    let detail = agent.task.as_deref().unwrap_or(&agent.model);
-    painter.text(
-        card.left_top() + Vec2::new(14.0, 57.0),
-        Align2::LEFT_TOP,
-        truncate(detail, 30),
-        FontId::monospace(10.5),
-        theme.faint,
-    );
-
-    if !agent.workers.is_empty() {
-        painter.text(
-            card.right_bottom() - Vec2::new(12.0, 18.0),
-            Align2::RIGHT_BOTTOM,
-            format!("{} workers", agent.workers.len()),
-            FontId::monospace(10.5),
-            theme.accent,
-        );
+pub(crate) fn agent_tray(app: &mut HudApp, ui: &mut Ui, theme: &Palette) {
+    let hidden: Vec<String> = app
+        .agent_layouts
+        .iter()
+        .filter(|(_, l)| !l.visible)
+        .map(|(id, _)| id.clone())
+        .collect();
+    if hidden.is_empty() {
+        return;
     }
-
-    let response = ui.interact(card, Id::new(("agent", agent.id.as_str())), Sense::click());
-    response.context_menu(|ui| {
-        if ui.button("Rename agent").clicked() {
-            app.rename_target = Some(agent.id.clone());
-            app.rename_value = agent.name.clone();
-            ui.close_menu();
-        }
-        if ui.button("Use first listed model").clicked() {
-            if let Some(model) = app.model_catalog.first() {
-                app.set_main_model(model.model.clone());
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("hidden:")
+                .monospace()
+                .small()
+                .color(theme.dim),
+        );
+        for id in &hidden {
+            let name = app
+                .agents
+                .iter()
+                .find(|a| a.id.as_str() == id.as_str())
+                .map(|a| a.name.as_str())
+                .unwrap_or(id.as_str());
+            if ui
+                .add(Button::new(RichText::new(name).monospace().small()).fill(theme.panel2))
+                .clicked()
+            {
+                if let Some(l) = app.agent_layouts.get_mut(id) {
+                    l.visible = true;
+                }
             }
-            ui.close_menu();
         }
     });
 }
@@ -309,6 +387,13 @@ pub(crate) fn chat_panel(app: &mut HudApp, ui: &mut Ui, theme: &Palette, height:
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add(Button::new(RichText::new("CLR").monospace()).fill(theme.panel2))
+                    .on_hover_text("Clear chat")
+                    .clicked()
+                {
+                    app.clear_chat();
+                }
                 if ui.button("models").clicked() {
                     app.config_open = true;
                     app.config_tab = ConfigTab::Models;
@@ -321,22 +406,63 @@ pub(crate) fn chat_panel(app: &mut HudApp, ui: &mut Ui, theme: &Palette, height:
         });
         ui.separator();
 
+        let now = std::time::Instant::now();
         ScrollArea::vertical()
             .stick_to_bottom(true)
             .max_height(height - 92.0)
             .show(ui, |ui| {
                 for message in &app.messages {
-                    let color = match message.role {
-                        ChatRole::User => theme.accent,
-                        ChatRole::Assistant => theme.text,
-                        ChatRole::System => theme.dim,
+                    let elapsed = now.duration_since(message.timestamp);
+                    let mins = elapsed.as_secs() / 60;
+                    let secs = elapsed.as_secs() % 60;
+
+                    let (badge_color, text_color) = match message.role {
+                        ChatRole::User => (theme.accent, theme.accent),
+                        ChatRole::Assistant => (theme.ok, theme.text),
+                        ChatRole::System => (theme.dim, theme.dim),
+                    };
+
+                    let badge = match &message.agent_name {
+                        Some(name) => format!("{} ({})", message.role.label(), name),
+                        None => message.role.label().to_owned(),
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("{mins:02}:{secs:02}"))
+                                .monospace()
+                                .small()
+                                .color(theme.faint),
+                        );
+                        ui.label(
+                            RichText::new(&badge)
+                                .monospace()
+                                .strong()
+                                .color(badge_color),
+                        );
+                    });
+
+                    // Render text with code block detection
+                    render_message_body(ui, &message.text, text_color, theme);
+                    ui.add_space(4.0);
+                }
+
+                // Typing indicator
+                if app.typing_indicator {
+                    let time = ui.input(|i| i.time);
+                    let dots = match ((time * 3.0) as usize) % 4 {
+                        0 => ".",
+                        1 => "..",
+                        2 => "...",
+                        _ => "",
                     };
                     ui.label(
-                        RichText::new(format!("{}  {}", message.role.label(), message.text))
-                            .color(color)
-                            .monospace(),
+                        RichText::new(format!("CADIS is typing{dots}"))
+                            .monospace()
+                            .color(theme.dim),
                     );
                 }
+
                 if app.scroll_to_bottom {
                     app.scroll_to_bottom = false;
                     ui.scroll_to_cursor(Some(Align::BOTTOM));
@@ -368,6 +494,61 @@ pub(crate) fn chat_panel(app: &mut HudApp, ui: &mut Ui, theme: &Palette, height:
             }
         });
     });
+}
+
+fn render_message_body(ui: &mut Ui, text: &str, text_color: Color32, theme: &Palette) {
+    let mut in_code = false;
+    let mut code_buf = String::new();
+
+    for line in text.split('\n') {
+        if line.trim_start().starts_with("```") {
+            if in_code {
+                // Close code block
+                egui::Frame::none()
+                    .fill(theme.panel2)
+                    .rounding(Rounding::same(4.0))
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        ui.add(
+                            TextEdit::multiline(&mut code_buf.as_str())
+                                .font(FontId::monospace(12.0))
+                                .desired_width(f32::INFINITY)
+                                .text_color(theme.text),
+                        );
+                    });
+                code_buf.clear();
+                in_code = false;
+            } else {
+                in_code = true;
+            }
+        } else if in_code {
+            if !code_buf.is_empty() {
+                code_buf.push('\n');
+            }
+            code_buf.push_str(line);
+        } else {
+            ui.add(
+                egui::Label::new(RichText::new(line).monospace().color(text_color))
+                    .selectable(true),
+            );
+        }
+    }
+
+    // Unclosed code block — render what we have
+    if in_code && !code_buf.is_empty() {
+        egui::Frame::none()
+            .fill(theme.panel2)
+            .rounding(Rounding::same(4.0))
+            .inner_margin(6.0)
+            .show(ui, |ui| {
+                ui.add(
+                    TextEdit::multiline(&mut code_buf.as_str())
+                        .font(FontId::monospace(12.0))
+                        .desired_width(f32::INFINITY)
+                        .text_color(theme.text),
+                );
+            });
+    }
 }
 
 pub(crate) fn approval_stack(app: &mut HudApp, ctx: &Context, theme: &Palette) {
@@ -460,6 +641,7 @@ pub(crate) fn config_dialog(app: &mut HudApp, ctx: &Context, theme: &Palette) {
                 ConfigTab::Models => models_tab(app, ui, theme),
                 ConfigTab::Appearance => appearance_tab(app, ui, theme),
                 ConfigTab::Window => window_tab(app, ui, theme),
+                ConfigTab::Debug => debug_tab(app, ui, theme),
             }
         });
     app.config_open = open;
@@ -565,6 +747,107 @@ pub(crate) fn window_tab(app: &mut HudApp, ui: &mut Ui, theme: &Palette) {
     );
     if ui.button("RECHECK DAEMON").clicked() {
         app.request(ClientRequest::DaemonStatus(EmptyPayload::default()));
+    }
+}
+
+pub(crate) fn debug_tab(app: &mut HudApp, ui: &mut Ui, theme: &Palette) {
+    ui.checkbox(&mut app.debug_enabled, "Enable debug mode");
+    if !app.debug_enabled {
+        return;
+    }
+    ui.separator();
+
+    // FPS counter
+    let fps = if app.frame_times.len() >= 2 {
+        let span = app
+            .frame_times
+            .back()
+            .unwrap()
+            .duration_since(*app.frame_times.front().unwrap());
+        if span.as_secs_f64() > 0.0 {
+            (app.frame_times.len() as f64 - 1.0) / span.as_secs_f64()
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    ui.label(
+        RichText::new(format!("FPS: {fps:.1}"))
+            .monospace()
+            .color(theme.text),
+    );
+    ui.label(
+        RichText::new(format!("Events received: {}", app.event_count))
+            .monospace()
+            .color(theme.text),
+    );
+    ui.label(
+        RichText::new(format!("Messages: {}", app.messages.len()))
+            .monospace()
+            .color(theme.text),
+    );
+    ui.label(
+        RichText::new(format!("Agents: {}", app.agents.len()))
+            .monospace()
+            .color(theme.text),
+    );
+    ui.separator();
+
+    // Connection info
+    ui.label(
+        RichText::new(format!("Transport: {}", app.transport))
+            .monospace()
+            .color(theme.dim),
+    );
+    ui.label(
+        RichText::new(format!("Connected: {}", app.connected))
+            .monospace()
+            .color(theme.dim),
+    );
+    ui.separator();
+
+    // Agent list
+    ui.label(
+        RichText::new("Agents")
+            .monospace()
+            .strong()
+            .color(theme.accent),
+    );
+    for agent in &app.agents {
+        ui.label(
+            RichText::new(format!(
+                "  {} — {:?} — {}",
+                agent.id, agent.status, agent.model
+            ))
+            .monospace()
+            .color(theme.dim),
+        );
+    }
+    ui.separator();
+
+    // Event log
+    ui.label(
+        RichText::new("Event log (last 20)")
+            .monospace()
+            .strong()
+            .color(theme.accent),
+    );
+    ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+        let now = std::time::Instant::now();
+        for event in app.debug_events.iter().rev() {
+            let age = now.duration_since(event.timestamp);
+            ui.label(
+                RichText::new(format!("{:.1}s ago — {}", age.as_secs_f64(), event.label))
+                    .monospace()
+                    .small()
+                    .color(theme.faint),
+            );
+        }
+    });
+    if ui.button("CLEAR EVENTS").clicked() {
+        app.debug_events.clear();
+        app.event_count = 0;
     }
 }
 

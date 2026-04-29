@@ -2,6 +2,7 @@ use std::io;
 use std::path::PathBuf;
 
 use cadis_protocol::{AgentId, AgentStatus, ApprovalId, ServerFrame};
+use eframe::egui;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Args {
@@ -133,6 +134,8 @@ pub(crate) struct ModelOption {
 pub(crate) struct ChatMessage {
     pub(crate) role: ChatRole,
     pub(crate) text: String,
+    pub(crate) timestamp: std::time::Instant,
+    pub(crate) agent_name: Option<String>,
 }
 
 impl ChatMessage {
@@ -140,6 +143,8 @@ impl ChatMessage {
         Self {
             role: ChatRole::User,
             text: text.into(),
+            timestamp: std::time::Instant::now(),
+            agent_name: None,
         }
     }
 
@@ -147,6 +152,17 @@ impl ChatMessage {
         Self {
             role: ChatRole::Assistant,
             text: text.into(),
+            timestamp: std::time::Instant::now(),
+            agent_name: None,
+        }
+    }
+
+    pub(crate) fn assistant_named(text: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            role: ChatRole::Assistant,
+            text: text.into(),
+            timestamp: std::time::Instant::now(),
+            agent_name: Some(name.into()),
         }
     }
 
@@ -154,6 +170,8 @@ impl ChatMessage {
         Self {
             role: ChatRole::System,
             text: text.into(),
+            timestamp: std::time::Instant::now(),
+            agent_name: None,
         }
     }
 }
@@ -181,11 +199,18 @@ pub(crate) enum ConfigTab {
     Models,
     Appearance,
     Window,
+    Debug,
 }
 
 impl ConfigTab {
-    pub(crate) fn all() -> [Self; 4] {
-        [Self::Voice, Self::Models, Self::Appearance, Self::Window]
+    pub(crate) fn all() -> [Self; 5] {
+        [
+            Self::Voice,
+            Self::Models,
+            Self::Appearance,
+            Self::Window,
+            Self::Debug,
+        ]
     }
 
     pub(crate) fn label(self) -> &'static str {
@@ -194,6 +219,21 @@ impl ConfigTab {
             Self::Models => "Models",
             Self::Appearance => "Appearance",
             Self::Window => "Window",
+            Self::Debug => "Debug",
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AgentLayout {
+    pub(crate) position: egui::Pos2,
+    pub(crate) visible: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DebugEvent {
+    pub(crate) timestamp: std::time::Instant,
+    pub(crate) label: String,
+    #[allow(dead_code)]
+    pub(crate) detail: String,
 }
