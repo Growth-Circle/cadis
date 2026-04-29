@@ -4,7 +4,9 @@ All notable changes to CADIS will be documented in this file.
 
 The format follows Keep a Changelog style, and the project will use Semantic Versioning once the first release exists.
 
-## [Unreleased] — v0.9.2 RC
+## [Unreleased]
+
+## [0.9.2] - 2026-04-29
 
 ### Added
 

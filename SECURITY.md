@@ -4,11 +4,26 @@ CADIS will execute tools, edit files, call models, and coordinate agents. Securi
 
 ## Supported Versions
 
-C.A.D.I.S. v0.9 is the current beta release. Security reports are welcome.
+| Version | Supported |
+| ------- | --------- |
+| 0.9.x   | ✅ Current beta — security fixes applied |
+| 1.0.x   | ✅ Will receive security fixes on release |
+| < 0.9   | ❌ No longer supported |
 
 ## Reporting a Vulnerability
 
-Until a public security contact is created, report privately to the maintainers. Do not open public issues for vulnerabilities involving:
+**Use GitHub Security Advisories.** File a private vulnerability report at:
+
+> <https://github.com/Growth-Circle/cadis/security/advisories/new>
+
+Private vulnerability reporting is enabled on this repository. Do not open
+public issues for security vulnerabilities.
+
+We aim to **acknowledge reports within 48 hours** and provide an initial
+assessment within 7 days. Critical issues affecting approval bypass, command
+execution, or credential leakage will be prioritized for expedited fixes.
+
+Report categories include but are not limited to:
 
 - approval bypass
 - command execution

@@ -289,6 +289,9 @@ cadis/
 - [Wulan Avatar Engine](docs/26_WULAN_AVATAR_ENGINE.md)
 - [Workspace Architecture](docs/27_WORKSPACE_ARCHITECTURE.md)
 - [Platform Baseline](docs/28_PLATFORM_BASELINE.md)
+- [Protocol Freeze](docs/29_PROTOCOL_FREEZE.md)
+- [Storage Format and Migration](docs/31_STORAGE_FORMAT.md)
+- [Stable CLI Reference](docs/30_STABLE_CLI.md)
 
 ## Contributing
 
