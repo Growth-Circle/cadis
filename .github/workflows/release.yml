@@ -18,6 +18,12 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -31,28 +37,56 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      - name: Package artifacts
+      - name: Package artifacts (Unix)
+        if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/cadis dist/cadis-${{ matrix.target }} || true
           cp target/${{ matrix.target }}/release/cadisd dist/cadisd-${{ matrix.target }} || true
-      - name: Generate checksums
+      - name: Package artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/${{ matrix.target }}/release/cadis.exe dist/cadis-${{ matrix.target }}.exe -ErrorAction SilentlyContinue
+          Copy-Item target/${{ matrix.target }}/release/cadisd.exe dist/cadisd-${{ matrix.target }}.exe -ErrorAction SilentlyContinue
+      - name: Generate checksums (Unix)
+        if: runner.os != 'Windows'
         working-directory: dist
         run: |
           for f in *; do
             sha256sum "$f" > "$f.sha256"
           done
+      - name: Generate checksums (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: dist
+        run: |
+          Get-ChildItem -File | ForEach-Object {
+            $hash = (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -Encoding ascii "$($_.Name).sha256"
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.target }}
           path: dist/
 
   build-hud:
-    name: Build HUD (Tauri)
-    runs-on: ubuntu-latest
+    name: Build HUD (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-latest
+          - platform: macos
+            os: macos-latest
+          - platform: windows
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: matrix.platform == 'linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: actions/setup-node@v4
         with:
@@ -64,20 +98,43 @@ jobs:
           corepack enable
           pnpm install
           pnpm tauri build
-      - name: Package HUD artifacts
+      - name: Package HUD artifacts (Linux)
+        if: matrix.platform == 'linux'
         run: |
           mkdir -p dist
           cp apps/cadis-hud/src-tauri/target/release/bundle/appimage/*.AppImage dist/ || true
           cp apps/cadis-hud/src-tauri/target/release/bundle/deb/*.deb dist/ || true
-      - name: Generate checksums
+      - name: Package HUD artifacts (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          mkdir -p dist
+          cp apps/cadis-hud/src-tauri/target/release/bundle/dmg/*.dmg dist/ || true
+      - name: Package HUD artifacts (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item apps/cadis-hud/src-tauri/target/release/bundle/nsis/*.exe dist/ -ErrorAction SilentlyContinue
+          Copy-Item apps/cadis-hud/src-tauri/target/release/bundle/msi/*.msi dist/ -ErrorAction SilentlyContinue
+      - name: Generate checksums (Unix)
+        if: runner.os != 'Windows'
         working-directory: dist
         run: |
           for f in *; do
             sha256sum "$f" > "$f.sha256"
           done
+      - name: Generate checksums (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: dist
+        run: |
+          Get-ChildItem -File | ForEach-Object {
+            $hash = (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -Encoding ascii "$($_.Name).sha256"
+          }
       - uses: actions/upload-artifact@v4
         with:
-          name: hud-linux
+          name: hud-${{ matrix.platform }}
           path: dist/
 
   release:

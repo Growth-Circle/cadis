@@ -89,6 +89,7 @@ export type WorkerArtifactInfo = {
   patch?: string;
   testReport?: string;
   testReportStatus?: string;
+  changedFiles?: string;
 };
 
 export type WorkerRecord = {

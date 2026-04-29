@@ -64,6 +64,7 @@ export function CodeWorkPanel() {
               <Field label="Worktree path" value={worker.worktree?.worktreePath} />
               <Field label="Worker cwd" value={worker.cwd} />
               <Field label="Diff/Patch" value={worker.artifacts?.patch} />
+              <Field label="Changed files" value={worker.artifacts?.changedFiles} />
               <Field
                 label="Test report"
                 value={worker.artifacts?.testReport}
@@ -156,8 +157,9 @@ export function CodeWorkPanel() {
    Restore DiffViewer when daemon can return actual diff content. */
 
 /* ── Item 3: Changed-files list & file tree ─────────────────────── */
-/* TODO [BLOCKED]: Changed-files list and file tree require daemon `worker.artifact.read`
-   to enumerate and read worktree contents. Blocked on daemon support. */
+/* TODO [BLOCKED]: Full changed-files content and file tree require daemon
+   `worker.artifact.read` to read worktree contents. The artifact path reference
+   is shown; inline content is blocked on daemon support. */
 
 /* ── Item 5: Open in editor (Tauri command) ─────────────────────── */
 

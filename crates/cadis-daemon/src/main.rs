@@ -3,7 +3,10 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -44,17 +47,20 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut config = load_config()?;
     apply_args_to_config(&args, &mut config);
     ensure_layout(&config)?;
+
+    let use_tcp = args.tcp_port.is_some() || cfg!(windows);
+    let tcp_port = args.tcp_port.or(config.tcp_port);
     let socket_path = args
         .socket_path
         .clone()
-        .unwrap_or_else(|| config.effective_socket_path());
+        .or_else(|| config.effective_socket_path());
 
     if args.check {
-        print_check(&config, &socket_path);
+        print_check(&config, socket_path.as_deref(), tcp_port);
         return Ok(());
     }
 
-    let runtime = build_runtime(&config, Some(socket_path.clone()));
+    let runtime = build_runtime(&config, socket_path.clone());
     let event_log = EventLog::new(&config);
     let event_bus = EventBus::new(EVENT_REPLAY_LIMIT);
 
@@ -73,7 +79,26 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    run_socket(socket_path, runtime, event_log, event_bus)
+    if use_tcp {
+        let addr = config.effective_tcp_address();
+        let addr = tcp_port.map(|p| format!("127.0.0.1:{p}")).unwrap_or(addr);
+        return run_tcp(&addr, runtime, event_log, event_bus);
+    }
+
+    #[cfg(unix)]
+    {
+        let socket_path = socket_path
+            .ok_or_else(|| invalid_input("socket path required (use --tcp-port on Windows)"))?;
+        run_socket(socket_path, runtime, event_log, event_bus)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let addr = tcp_port
+            .map(|p| format!("127.0.0.1:{p}"))
+            .unwrap_or_else(|| config.effective_tcp_address());
+        run_tcp(&addr, runtime, event_log, event_bus)
+    }
 }
 
 fn build_runtime(config: &CadisConfig, socket_path: Option<PathBuf>) -> Arc<Mutex<Runtime>> {
@@ -102,6 +127,63 @@ fn build_runtime(config: &CadisConfig, socket_path: Option<PathBuf>) -> Arc<Mute
     )))
 }
 
+fn run_tcp(
+    addr: &str,
+    runtime: Arc<Mutex<Runtime>>,
+    event_log: EventLog,
+    event_bus: EventBus,
+) -> Result<(), Box<dyn Error>> {
+    let listener = TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    eprintln!("cadisd listening on tcp://{addr}");
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let runtime = Arc::clone(&runtime);
+                let event_log = event_log.clone();
+                let event_bus = event_bus.clone();
+                let shutdown = Arc::clone(&shutdown);
+                thread::spawn(move || {
+                    if let Err(error) =
+                        serve_tcp_stream(stream, runtime, event_log, event_bus, &shutdown)
+                    {
+                        eprintln!("cadisd client error: {error}");
+                    }
+                });
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => {
+                eprintln!("cadisd accept error: {error}");
+                break;
+            }
+        }
+    }
+
+    eprintln!("cadisd shutting down");
+    Ok(())
+}
+
+fn serve_tcp_stream(
+    stream: TcpStream,
+    runtime: Arc<Mutex<Runtime>>,
+    event_log: EventLog,
+    event_bus: EventBus,
+    shutdown: &AtomicBool,
+) -> Result<(), Box<dyn Error>> {
+    let reader = BufReader::new(stream.try_clone()?);
+    let writer = BufWriter::new(stream);
+    serve_lines(reader, writer, runtime, event_log, event_bus, shutdown)
+}
+
+#[cfg(unix)]
 fn run_socket(
     socket_path: PathBuf,
     runtime: Arc<Mutex<Runtime>>,
@@ -148,6 +230,7 @@ fn run_socket(
     Ok(())
 }
 
+#[cfg(unix)]
 fn serve_unix_stream(
     stream: UnixStream,
     runtime: Arc<Mutex<Runtime>>,
@@ -526,12 +609,18 @@ fn bounded_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use cadis_models::{ModelInvocation, ModelProvider, ModelResponse};
     use cadis_protocol::{
-        CadisEvent, ClientId, ContentKind, DaemonResponse, EmptyPayload, MessageSendRequest,
-        RequestEnvelope, ServerFrame, SessionCreateRequest, SessionEventPayload,
-        SessionTargetRequest, Timestamp,
+        CadisEvent, DaemonResponse, EmptyPayload, EventId, RequestId, SessionEventPayload,
+        SessionId, Timestamp,
     };
+    #[cfg(unix)]
+    use cadis_protocol::{
+        ClientId, ContentKind, MessageSendRequest, RequestEnvelope, ServerFrame,
+        SessionCreateRequest, SessionTargetRequest,
+    };
+    #[cfg(unix)]
     use std::sync::Condvar;
     use std::time::{Duration, Instant};
 
@@ -636,9 +725,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn prepare_socket_path_rejects_existing_regular_file_without_deleting_it() {
-        let cadis_home = test_workspace("cadis-daemon-socket-regular-file");
-        let socket_path = cadis_home.join("run").join("cadisd-test.sock");
+        let cadis_home = test_workspace("cd-regfile");
+        let socket_path = cadis_home.join("run").join("cd.sock");
         fs::create_dir_all(
             socket_path
                 .parent()
@@ -660,12 +750,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn pending_message_generation_leaves_runtime_mutex_available() {
         let entered = Arc::new((Mutex::new(false), Condvar::new()));
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let runtime = Arc::new(Mutex::new(Runtime::new(
             RuntimeOptions {
-                cadis_home: test_workspace("cadis-daemon-runtime-lock"),
+                cadis_home: test_workspace("cd-lock"),
                 profile_id: "default".to_owned(),
                 socket_path: None,
                 model_provider: "waiting".to_owned(),
@@ -725,9 +816,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn socket_clients_share_session_events_while_status_and_agent_list_stay_live() {
-        let cadis_home = test_workspace("cadis-daemon-socket-live-subscribe");
-        let socket_path = cadis_home.join("run").join("cadisd-test.sock");
+        let cadis_home = test_workspace("cd-sub");
+        let socket_path = cadis_home.join("run").join("cd.sock");
         let entered = Arc::new((Mutex::new(false), Condvar::new()));
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let config = CadisConfig {
@@ -887,9 +979,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn session_cancel_propagates_to_active_provider_stream() {
-        let cadis_home = test_workspace("cadis-daemon-provider-cancel");
-        let socket_path = cadis_home.join("run").join("cadisd-test.sock");
+        let cadis_home = test_workspace("cd-cancel");
+        let socket_path = cadis_home.join("run").join("cd.sock");
         let first_delta = Arc::new((Mutex::new(false), Condvar::new()));
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let cancel_seen = Arc::new((Mutex::new(false), Condvar::new()));
@@ -989,12 +1082,14 @@ mod tests {
         wait_for_flag_timeout(&cancel_seen, Duration::from_secs(2));
     }
 
+    #[cfg(unix)]
     #[derive(Clone, Debug)]
     struct WaitingProvider {
         entered: Arc<(Mutex<bool>, Condvar)>,
         release: Arc<(Mutex<bool>, Condvar)>,
     }
 
+    #[cfg(unix)]
     impl ModelProvider for WaitingProvider {
         fn name(&self) -> &str {
             "waiting"
@@ -1028,6 +1123,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[derive(Clone, Debug)]
     struct CancellableProvider {
         first_delta: Arc<(Mutex<bool>, Condvar)>,
@@ -1035,6 +1131,7 @@ mod tests {
         cancel_seen: Arc<(Mutex<bool>, Condvar)>,
     }
 
+    #[cfg(unix)]
     impl ModelProvider for CancellableProvider {
         fn name(&self) -> &str {
             "cancellable"
@@ -1074,6 +1171,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn wait_for_flag(flag: &Arc<(Mutex<bool>, Condvar)>) {
         let (lock, condvar) = &**flag;
         let mut ready = lock.lock().expect("flag mutex should lock");
@@ -1084,12 +1182,14 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn set_flag(flag: &Arc<(Mutex<bool>, Condvar)>) {
         let (lock, condvar) = &**flag;
         *lock.lock().expect("flag mutex should lock") = true;
         condvar.notify_all();
     }
 
+    #[cfg(unix)]
     fn wait_for_flag_timeout(flag: &Arc<(Mutex<bool>, Condvar)>, timeout: Duration) {
         let (lock, condvar) = &**flag;
         let deadline = Instant::now() + timeout;
@@ -1106,11 +1206,13 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct TestClient {
         reader: BufReader<UnixStream>,
         writer: UnixStream,
     }
 
+    #[cfg(unix)]
     impl TestClient {
         fn connect(socket_path: &Path) -> Self {
             let stream = UnixStream::connect(socket_path).expect("test client should connect");
@@ -1167,6 +1269,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn assert_accepted_response(client: &mut TestClient) {
         assert!(matches!(
             client.read_frame(),
@@ -1177,6 +1280,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     fn test_workspace(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "{name}-{}-{}",
@@ -1277,6 +1381,12 @@ mod tests {
     }
 
     #[test]
+    fn args_parse_tcp_port() {
+        let args = Args::parse(["--tcp-port", "7433"].map(String::from)).expect("should parse");
+        assert_eq!(args.tcp_port, Some(7433));
+    }
+
+    #[test]
     fn args_parse_unknown_flag_errors() {
         let result = Args::parse(["--unknown"].map(String::from));
         assert!(result.is_err());
@@ -1290,6 +1400,7 @@ fn write_frame(writer: &mut impl Write, frame: &ServerFrame) -> Result<(), Box<d
     Ok(())
 }
 
+#[cfg(unix)]
 fn prepare_socket_path(socket_path: &Path) -> Result<(), Box<dyn Error>> {
     if let Some(parent) = socket_path.parent() {
         if !parent.exists() {
@@ -1342,6 +1453,7 @@ fn set_private_permissions(path: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 fn set_private_permissions(_path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
@@ -1359,13 +1471,23 @@ fn apply_args_to_config(args: &Args, config: &mut CadisConfig) {
     if let Some(endpoint) = &args.ollama_endpoint {
         config.model.ollama_endpoint = endpoint.clone();
     }
+    if let Some(port) = args.tcp_port {
+        config.tcp_port = Some(port);
+    }
 }
 
-fn print_check(config: &CadisConfig, socket_path: &Path) {
+fn print_check(config: &CadisConfig, socket_path: Option<&Path>, tcp_port: Option<u16>) {
     println!("cadisd check: ok");
     println!("cadis_home: {}", config.cadis_home.display());
     println!("config: {}", config.config_path().display());
-    println!("socket: {}", socket_path.display());
+    if let Some(path) = socket_path {
+        println!("socket: {}", path.display());
+    }
+    if let Some(port) = tcp_port {
+        println!("tcp: 127.0.0.1:{port}");
+    } else if cfg!(windows) {
+        println!("tcp: {}", config.effective_tcp_address());
+    }
     println!("model_provider: {}", config.model.provider);
     println!("ollama_model: {}", config.model.ollama_model);
     println!("ollama_endpoint: {}", config.model.ollama_endpoint);
@@ -1384,6 +1506,7 @@ struct Args {
     stdio: bool,
     dev_echo: bool,
     socket_path: Option<PathBuf>,
+    tcp_port: Option<u16>,
     model_provider: Option<String>,
     ollama_model: Option<String>,
     ollama_endpoint: Option<String>,
@@ -1408,6 +1531,14 @@ impl Args {
                         args.next()
                             .ok_or_else(|| invalid_input("--socket requires a path"))?,
                     ));
+                }
+                "--tcp-port" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| invalid_input("--tcp-port requires a port number"))?;
+                    parsed.tcp_port = Some(value.parse::<u16>().map_err(|e| {
+                        invalid_input(format!("--tcp-port requires a valid port number: {e}"))
+                    })?);
                 }
                 "--model-provider" => {
                     parsed.model_provider = Some(
@@ -1445,7 +1576,7 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 
 fn print_help() {
     println!(
-        "cadisd {}\n\nUSAGE:\n  cadisd [OPTIONS]\n\nOPTIONS:\n  --check                    Validate config and local state layout\n  --version, -V              Print version\n  --stdio                    Serve NDJSON protocol on stdin/stdout\n  --socket <PATH>            Unix socket path\n  --model-provider <NAME>    auto, codex-cli, openai, ollama, or echo\n  --ollama-model <NAME>      Ollama model name\n  --ollama-endpoint <URL>    Ollama endpoint\n  --dev-echo                 Force credential-free local fallback\n  --help, -h                 Print help",
+        "cadisd {}\n\nUSAGE:\n  cadisd [OPTIONS]\n\nOPTIONS:\n  --check                    Validate config and local state layout\n  --version, -V              Print version\n  --stdio                    Serve NDJSON protocol on stdin/stdout\n  --socket <PATH>            Unix socket path\n  --tcp-port <PORT>          Listen on TCP 127.0.0.1:<PORT> instead of Unix socket\n  --model-provider <NAME>    auto, codex-cli, openai, ollama, or echo\n  --ollama-model <NAME>      Ollama model name\n  --ollama-endpoint <URL>    Ollama endpoint\n  --dev-echo                 Force credential-free local fallback\n  --help, -h                 Print help",
         env!("CARGO_PKG_VERSION")
     );
 }

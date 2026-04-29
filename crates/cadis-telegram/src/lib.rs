@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 
 use cadis_protocol::{
@@ -316,24 +318,37 @@ impl TelegramAdapter {
 
 /// Thin forwarding layer that connects to `cadisd` via Unix socket.
 pub struct DaemonBridge {
-    socket_path: String,
+    address: String,
 }
 
 impl DaemonBridge {
-    pub fn new(socket_path: String) -> Self {
-        Self { socket_path }
+    pub fn new(address: String) -> Self {
+        Self { address }
     }
 
-    /// Connect to the daemon socket, write `request_json` + newline, read one response line.
+    /// Connect to the daemon, write `request_json` + newline, read one response line.
     pub fn send_request(&self, request_json: &str) -> Result<String, TelegramError> {
-        let mut stream = UnixStream::connect(&self.socket_path)?;
-        stream.write_all(request_json.as_bytes())?;
-        stream.write_all(b"\n")?;
-        stream.flush()?;
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        Ok(line.trim_end().to_string())
+        fn do_request(
+            mut stream: impl Read + Write,
+            request_json: &str,
+        ) -> Result<String, TelegramError> {
+            stream.write_all(request_json.as_bytes())?;
+            stream.write_all(b"\n")?;
+            stream.flush()?;
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            Ok(line.trim_end().to_string())
+        }
+
+        #[cfg(unix)]
+        if !self.address.contains(':') {
+            let stream = UnixStream::connect(&self.address)?;
+            return do_request(stream, request_json);
+        }
+
+        let stream = TcpStream::connect(&self.address)?;
+        do_request(stream, request_json)
     }
 
     fn envelope(request: ClientRequest) -> String {

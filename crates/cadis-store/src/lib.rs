@@ -200,6 +200,8 @@ pub struct CadisConfig {
     pub log_level: String,
     /// Optional socket path override.
     pub socket_path: Option<PathBuf>,
+    /// Optional TCP port for cross-platform transport (default: None, Unix socket).
+    pub tcp_port: Option<u16>,
     /// Model provider settings.
     pub model: ModelConfig,
     /// HUD settings.
@@ -224,6 +226,7 @@ impl Default for CadisConfig {
             cadis_home: default_cadis_home(),
             log_level: "info".to_owned(),
             socket_path: None,
+            tcp_port: None,
             model: ModelConfig::default(),
             hud: HudConfig::default(),
             voice: VoiceConfig::default(),
@@ -243,12 +246,24 @@ impl CadisConfig {
     }
 
     /// Returns the socket path used by the daemon.
-    pub fn effective_socket_path(&self) -> PathBuf {
+    ///
+    /// On Windows this returns a conventional path, but the daemon should use
+    /// TCP transport instead of Unix sockets. Callers should check
+    /// [`default_socket_path`] for `None` to detect TCP-only platforms.
+    pub fn effective_socket_path(&self) -> Option<PathBuf> {
         if let Some(path) = &self.socket_path {
-            return expand_home(path);
+            return Some(expand_home(path));
         }
 
         default_socket_path(&self.cadis_home)
+    }
+
+    /// Returns the TCP address for cross-platform transport.
+    ///
+    /// Uses the configured `tcp_port` or the default `7433`.
+    pub fn effective_tcp_address(&self) -> String {
+        let port = self.tcp_port.unwrap_or(7433);
+        format!("127.0.0.1:{port}")
     }
 
     /// Returns daemon-owned UI preferences as JSON.
@@ -1942,14 +1957,26 @@ pub fn default_cadis_home() -> PathBuf {
 }
 
 /// Returns the default local daemon socket path.
-pub fn default_socket_path(cadis_home: &Path) -> PathBuf {
-    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
-        if !runtime_dir.trim().is_empty() {
-            return PathBuf::from(runtime_dir).join("cadis").join("cadisd.sock");
-        }
+///
+/// On Windows this returns `None` because the daemon uses TCP instead of Unix sockets.
+/// On Linux/macOS: `$XDG_RUNTIME_DIR/cadis/cadisd.sock` or `<cadis_home>/run/cadisd.sock`.
+pub fn default_socket_path(cadis_home: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = cadis_home;
+        None
     }
 
-    cadis_home.join("run").join("cadisd.sock")
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
+            if !runtime_dir.trim().is_empty() {
+                return Some(PathBuf::from(runtime_dir).join("cadis").join("cadisd.sock"));
+            }
+        }
+
+        Some(cadis_home.join("run").join("cadisd.sock"))
+    }
 }
 
 /// Replaces secret-looking values with `[REDACTED]`.
@@ -2523,19 +2550,30 @@ fn expand_home(path: &Path) -> PathBuf {
     };
 
     if value == "~" {
-        return env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(value));
+        return home_dir().unwrap_or_else(|| PathBuf::from(value));
     }
 
     if let Some(rest) = value.strip_prefix("~/") {
-        return env::var_os("HOME")
-            .map(PathBuf::from)
+        return home_dir()
             .map(|home| home.join(rest))
             .unwrap_or_else(|| PathBuf::from(value));
     }
 
     path.to_path_buf()
+}
+
+/// Returns the user home directory using platform-appropriate env vars.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        env::var_os("USERPROFILE")
+            .or_else(|| env::var_os("HOME"))
+            .map(PathBuf::from)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        env::var_os("HOME").map(PathBuf::from)
+    }
 }
 
 fn create_private_dir(path: &Path) -> Result<(), StoreError> {
@@ -3162,6 +3200,14 @@ mod tests {
             config.ui_preferences()["orchestrator"]["default_worker_role"],
             serde_json::json!("Reviewer")
         );
+    }
+
+    #[test]
+    fn effective_tcp_address_uses_configured_port_or_default() {
+        let mut config = CadisConfig::default();
+        assert_eq!(config.effective_tcp_address(), "127.0.0.1:7433");
+        config.tcp_port = Some(9000);
+        assert_eq!(config.effective_tcp_address(), "127.0.0.1:9000");
     }
 
     #[test]

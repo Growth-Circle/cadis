@@ -1,6 +1,8 @@
 use std::env;
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Write};
+use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{self, Command as ProcessCommand};
@@ -197,7 +199,12 @@ fn run_doctor(cli: &Cli) -> Result<(), Box<dyn Error>> {
     println!("cadis doctor");
     println!("cadis_home: {}", config.cadis_home.display());
     println!("config: {}", config.config_path().display());
-    println!("socket: {}", cli.socket_path()?.display());
+    if cli.use_tcp() {
+        println!("transport: tcp://{}", cli.tcp_address()?);
+    } else {
+        #[cfg(unix)]
+        println!("socket: {}", cli.socket_path()?.display());
+    }
 
     print!("daemon: ");
     match daemon_status(&status_frames) {
@@ -349,23 +356,45 @@ fn run_worker(cli: &Cli, command: &WorkerCommand) -> Result<(), Box<dyn Error>> 
 }
 
 fn send_request(cli: &Cli, request: ClientRequest) -> Result<Vec<ServerFrame>, Box<dyn Error>> {
-    let socket_path = cli.socket_path()?;
-    let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "could not connect to cadisd at {}: {error}. Start it with `cadisd`.",
-                socket_path.display()
-            ),
-        )
-    })?;
-
     let envelope = RequestEnvelope::new(next_request_id(), client_id(), request);
-    serde_json::to_writer(&mut stream, &envelope)?;
-    stream.write_all(b"\n")?;
-    stream.shutdown(std::net::Shutdown::Write)?;
 
-    let reader = BufReader::new(stream);
+    if cli.use_tcp() {
+        let addr = cli.tcp_address()?;
+        let mut stream = TcpStream::connect(&addr).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("could not connect to cadisd at tcp://{addr}: {error}. Start it with `cadisd --tcp-port <PORT>`."),
+            )
+        })?;
+        serde_json::to_writer(&mut stream, &envelope)?;
+        stream.write_all(b"\n")?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        return read_frames(BufReader::new(stream));
+    }
+
+    #[cfg(unix)]
+    {
+        let socket_path = cli.socket_path()?;
+        let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not connect to cadisd at {}: {error}. Start it with `cadisd`.",
+                    socket_path.display()
+                ),
+            )
+        })?;
+        serde_json::to_writer(&mut stream, &envelope)?;
+        stream.write_all(b"\n")?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        read_frames(BufReader::new(stream))
+    }
+
+    #[cfg(not(unix))]
+    Err(invalid_input("no transport available; use --tcp").into())
+}
+
+fn read_frames<R: BufRead>(reader: R) -> Result<Vec<ServerFrame>, Box<dyn Error>> {
     let mut frames = Vec::new();
     for line in reader.lines() {
         let line = line?;
@@ -374,7 +403,6 @@ fn send_request(cli: &Cli, request: ClientRequest) -> Result<Vec<ServerFrame>, B
         }
         frames.push(serde_json::from_str::<ServerFrame>(&line)?);
     }
-
     Ok(frames)
 }
 
@@ -383,36 +411,57 @@ fn stream_events(cli: &Cli, request: EventSubscriptionRequest) -> Result<(), Box
 }
 
 fn stream_subscription(cli: &Cli, request: ClientRequest) -> Result<(), Box<dyn Error>> {
-    let socket_path = cli.socket_path()?;
-    let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "could not connect to cadisd at {}: {error}. Start it with `cadisd`.",
-                socket_path.display()
-            ),
-        )
-    })?;
-
     let envelope = RequestEnvelope::new(next_request_id(), client_id(), request);
-    serde_json::to_writer(&mut stream, &envelope)?;
-    stream.write_all(b"\n")?;
-    stream.shutdown(std::net::Shutdown::Write)?;
 
-    let reader = BufReader::new(stream);
+    if cli.use_tcp() {
+        let addr = cli.tcp_address()?;
+        let mut stream = TcpStream::connect(&addr).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("could not connect to cadisd at tcp://{addr}: {error}. Start it with `cadisd --tcp-port <PORT>`."),
+            )
+        })?;
+        serde_json::to_writer(&mut stream, &envelope)?;
+        stream.write_all(b"\n")?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        return stream_frames(BufReader::new(stream), cli.json);
+    }
+
+    #[cfg(unix)]
+    {
+        let socket_path = cli.socket_path()?;
+        let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not connect to cadisd at {}: {error}. Start it with `cadisd`.",
+                    socket_path.display()
+                ),
+            )
+        })?;
+        serde_json::to_writer(&mut stream, &envelope)?;
+        stream.write_all(b"\n")?;
+        stream.shutdown(std::net::Shutdown::Write)?;
+        stream_frames(BufReader::new(stream), cli.json)
+    }
+
+    #[cfg(not(unix))]
+    Err(invalid_input("no transport available; use --tcp").into())
+}
+
+fn stream_frames<R: BufRead>(reader: R, json: bool) -> Result<(), Box<dyn Error>> {
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         let frame = serde_json::from_str::<ServerFrame>(&line)?;
-        if cli.json {
+        if json {
             println!("{}", serde_json::to_string(&frame)?);
         } else {
             render_event_frame(&frame)?;
         }
     }
-
     Ok(())
 }
 
@@ -1044,6 +1093,7 @@ fn client_id() -> ClientId {
 struct Cli {
     json: bool,
     version: bool,
+    tcp: bool,
     socket_path: Option<PathBuf>,
     command: Command,
 }
@@ -1055,6 +1105,7 @@ impl Cli {
     {
         let mut json = false;
         let mut version = false;
+        let mut tcp = false;
         let mut socket_path = None;
         let mut args = args.into_iter().peekable();
 
@@ -1066,6 +1117,10 @@ impl Cli {
                 }
                 "--version" | "-V" => {
                     version = true;
+                    args.next();
+                }
+                "--tcp" => {
+                    tcp = true;
                     args.next();
                 }
                 "--socket" => {
@@ -1080,6 +1135,7 @@ impl Cli {
                     return Ok(Self {
                         json,
                         version,
+                        tcp,
                         socket_path,
                         command: Command::Help,
                     });
@@ -1121,17 +1177,35 @@ impl Cli {
         Ok(Self {
             json,
             version,
+            tcp,
             socket_path,
             command,
         })
     }
 
+    fn use_tcp(&self) -> bool {
+        self.tcp || cfg!(windows) || env::var("CADIS_TCP_PORT").is_ok()
+    }
+
+    fn tcp_address(&self) -> Result<String, Box<dyn Error>> {
+        if let Ok(port) = env::var("CADIS_TCP_PORT") {
+            let port: u16 = port
+                .parse()
+                .map_err(|e| invalid_input(format!("CADIS_TCP_PORT is not a valid port: {e}")))?;
+            return Ok(format!("127.0.0.1:{port}"));
+        }
+        Ok(load_config()?.effective_tcp_address())
+    }
+
+    #[cfg(unix)]
     fn socket_path(&self) -> Result<PathBuf, Box<dyn Error>> {
         if let Some(path) = &self.socket_path {
             return Ok(path.clone());
         }
 
-        Ok(load_config()?.effective_socket_path())
+        load_config()?
+            .effective_socket_path()
+            .ok_or_else(|| "socket path required (use --tcp on Windows)".into())
     }
 }
 
@@ -1824,7 +1898,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn print_help() {
     println!(
-        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  worker <COMMAND>       Inspect daemon-owned workers\n  workspace <COMMAND>    Manage registered workspaces and grants\n  session <COMMAND>      Manage session event streams\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKER COMMANDS:\n  worker tail <ID> [--lines COUNT]\n  worker result <ID>\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
+        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--tcp] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  worker <COMMAND>       Inspect daemon-owned workers\n  workspace <COMMAND>    Manage registered workspaces and grants\n  session <COMMAND>      Manage session event streams\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKER COMMANDS:\n  worker tail <ID> [--lines COUNT]\n  worker result <ID>\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --tcp                  Connect via TCP (default on Windows, reads CADIS_TCP_PORT)\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -1903,6 +1977,13 @@ mod tests {
     fn parse_json_flag() {
         let cli = Cli::parse(args(&["--json", "status"])).unwrap();
         assert!(cli.json);
+        assert_eq!(cli.command, Command::Status);
+    }
+
+    #[test]
+    fn parse_tcp_flag() {
+        let cli = Cli::parse(args(&["--tcp", "status"])).unwrap();
+        assert!(cli.tcp);
         assert_eq!(cli.command, Command::Status);
     }
 

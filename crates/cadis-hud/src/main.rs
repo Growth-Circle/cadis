@@ -1,6 +1,9 @@
 use std::env;
 use std::error::Error;
-use std::io::{self, BufRead, BufReader, Write};
+use std::fmt;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process;
@@ -21,6 +24,23 @@ use eframe::egui::{
     TextEdit, TopBottomPanel, Ui, Vec2, ViewportCommand, Window,
 };
 
+#[derive(Clone, Debug)]
+enum Transport {
+    #[cfg(unix)]
+    Socket(PathBuf),
+    Tcp(String),
+}
+
+impl fmt::Display for Transport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(unix)]
+            Self::Socket(p) => write!(f, "{}", p.display()),
+            Self::Tcp(addr) => write!(f, "tcp://{addr}"),
+        }
+    }
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("cadis-hud: {error}");
@@ -35,10 +55,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let socket_path = args
-        .socket_path
-        .or_else(|| env::var_os("CADIS_HUD_SOCKET").map(PathBuf::from))
-        .unwrap_or(load_config()?.effective_socket_path());
+    let transport = resolve_transport(&args);
     let viewport = egui::ViewportBuilder::default()
         .with_title("CADIS HUD")
         .with_inner_size([1600.0, 1000.0])
@@ -54,10 +71,33 @@ fn run() -> Result<(), Box<dyn Error>> {
     eframe::run_native(
         "CADIS HUD",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(HudApp::new(socket_path)))),
+        Box::new(move |_cc| Ok(Box::new(HudApp::new(transport)))),
     )?;
 
     Ok(())
+}
+
+fn resolve_transport(_args: &Args) -> Transport {
+    // Explicit TCP via env var
+    if let Ok(port) = env::var("CADIS_TCP_PORT") {
+        return Transport::Tcp(format!("127.0.0.1:{port}"));
+    }
+
+    #[cfg(unix)]
+    {
+        let socket = _args
+            .socket_path
+            .clone()
+            .or_else(|| env::var_os("CADIS_HUD_SOCKET").map(PathBuf::from))
+            .or_else(|| load_config().ok().and_then(|c| c.effective_socket_path()));
+        if let Some(path) = socket {
+            return Transport::Socket(path);
+        }
+    }
+
+    // Fallback to TCP
+    let config = load_config().unwrap_or_default();
+    Transport::Tcp(config.effective_tcp_address())
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -101,7 +141,7 @@ fn print_help() {
 }
 
 struct HudApp {
-    socket_path: PathBuf,
+    transport: Transport,
     tx: Sender<HudResult>,
     rx: Receiver<HudResult>,
     connected: bool,
@@ -126,10 +166,10 @@ struct HudApp {
 }
 
 impl HudApp {
-    fn new(socket_path: PathBuf) -> Self {
+    fn new(transport: Transport) -> Self {
         let (tx, rx) = mpsc::channel();
         let app = Self {
-            socket_path,
+            transport,
             tx,
             rx,
             connected: false,
@@ -163,9 +203,9 @@ impl HudApp {
 
     fn request(&self, request: ClientRequest) {
         let tx = self.tx.clone();
-        let socket_path = self.socket_path.clone();
+        let transport = self.transport.clone();
         thread::spawn(move || {
-            let result = send_request(socket_path, request).map_err(|error| error.to_string());
+            let result = send_request(&transport, request).map_err(|error| error.to_string());
             let _ = tx.send(HudResult { result });
         });
     }
@@ -499,7 +539,7 @@ impl HudApp {
             .filter(|agent| agent.status == AgentStatus::WaitingApproval)
             .count();
         let idle = self.agents.len().saturating_sub(active + waiting);
-        let socket = self.socket_path.display().to_string();
+        let socket = self.transport.to_string();
 
         Frame::none()
             .fill(theme.panel)
@@ -1012,32 +1052,50 @@ impl HudApp {
 }
 
 fn send_request(
-    socket_path: PathBuf,
+    transport: &Transport,
     request: ClientRequest,
 ) -> Result<Vec<ServerFrame>, Box<dyn Error>> {
-    let mut stream = UnixStream::connect(&socket_path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "could not connect to cadisd at {}: {error}",
-                socket_path.display()
-            ),
-        )
-    })?;
     let envelope = RequestEnvelope::new(next_request_id(), ClientId::from("hud_main"), request);
-    serde_json::to_writer(&mut stream, &envelope)?;
-    stream.write_all(b"\n")?;
-    stream.shutdown(std::net::Shutdown::Write)?;
 
-    let reader = BufReader::new(stream);
-    let mut frames = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if !line.trim().is_empty() {
-            frames.push(serde_json::from_str::<ServerFrame>(&line)?);
+    fn write_and_read(
+        mut stream: impl Read + Write,
+        envelope: &RequestEnvelope,
+    ) -> Result<Vec<ServerFrame>, Box<dyn Error>> {
+        serde_json::to_writer(&mut stream, envelope)?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+        let reader = BufReader::new(stream);
+        let mut frames = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if !line.trim().is_empty() {
+                frames.push(serde_json::from_str::<ServerFrame>(&line)?);
+            }
+        }
+        Ok(frames)
+    }
+
+    match transport {
+        #[cfg(unix)]
+        Transport::Socket(path) => {
+            let stream = UnixStream::connect(path).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("could not connect to cadisd at {}: {e}", path.display()),
+                )
+            })?;
+            write_and_read(stream, &envelope)
+        }
+        Transport::Tcp(addr) => {
+            let stream = TcpStream::connect(addr).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("could not connect to cadisd at tcp://{addr}: {e}"),
+                )
+            })?;
+            write_and_read(stream, &envelope)
         }
     }
-    Ok(frames)
 }
 
 fn next_request_id() -> RequestId {

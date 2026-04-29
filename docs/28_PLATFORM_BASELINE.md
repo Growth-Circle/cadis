@@ -11,47 +11,31 @@ CI do not overstate current support.
 | Platform | Current status | CI baseline | Runtime claim |
 | --- | --- | --- | --- |
 | Linux desktop | Primary runtime and HUD target | Full Ubuntu CI, Rust workspace checks, HUD frontend checks, and Tauri native shell check | Supported source-built MVP target |
-| macOS | Source validation and baseline only | Rust workspace format and clippy, plus selected portable/core crate tests on `macos-latest` | No packaged runtime or HUD support claim yet |
-| Windows | Portable crate validation only | Selected portable crates check and clippy, plus pure portable crate tests on `windows-latest` | No daemon, CLI transport, HUD, shell, storage permission, or audio runtime claim yet |
+| macOS | Full test suite, no packaged runtime yet | Full Rust workspace format, clippy, and `cargo test --workspace` on `macos-latest` | No packaged runtime or HUD support claim yet |
+| Windows | Full test suite (TCP transport), no packaged runtime yet | Full Rust workspace clippy and `cargo test --workspace` on `windows-latest`; Unix socket tests are `#[cfg(unix)]` only | No packaged daemon, HUD, or audio runtime claim yet |
 | Android | Future remote controller target | None | Not a local runtime target |
 
 Linux remains the first platform for `cadisd`, the CLI, local Unix socket
 transport, the Tauri HUD, HUD voice capture/playback bridges, and desktop
 runtime behavior.
 
-macOS validation proves that the Rust workspace remains source-portable enough
-to format, compile, lint, and run selected portable/core tests under Unix-like
-desktop conditions. It intentionally avoids the Linux-first daemon socket
-integration tests until local transport paths are platform-adapted. It does not
-mean the daemon, CLI, HUD packaging, voice bridge, sandboxing, or shell behavior
-is supported for users on macOS.
+macOS validation proves that the full Rust workspace compiles, lints, and passes
+the complete test suite on `macos-latest`. Unix socket integration tests are
+gated behind `#[cfg(unix)]` and run natively on macOS. It does not mean the
+daemon, CLI, HUD packaging, voice bridge, sandboxing, or shell behavior is
+supported for users on macOS.
 
-Windows validation is deliberately narrower. Until CADIS has Windows transport,
-shell, path, sandbox, storage permission, and audio adapters, Windows CI must
-not build or test the daemon, CLI, core runtime, HUD crates, Tauri app, or
-state-store permission behavior as a supported runtime path.
+Windows validation now runs the full Rust workspace test suite on
+`windows-latest`. Unix socket integration tests are gated behind `#[cfg(unix)]`
+and are automatically skipped. TCP transport is used where applicable. Packaged
+daemon, HUD, voice bridge, and shell behavior are not yet supported for users on
+Windows.
 
-## 3. Portable Windows Crate Set
+## 3. Platform Test Notes
 
-The Windows baseline checks only crates that should remain independent of local
-daemon transport and desktop shell assumptions:
-
-- `cadis-protocol`
-- `cadis-policy`
-- `cadis-store`
-- `cadis-models`
-- `cadis-avatar`
-
-The Windows baseline intentionally excludes:
-
-- `cadis-core`, while runtime shell/git/workspace behavior is still
-  Linux-first.
-- `cadis-daemon`, until non-Unix local transport exists.
-- `cadis-cli`, until the client can use a Windows transport adapter.
-- `crates/cadis-hud`, because the legacy native HUD uses Unix socket client
-  code.
-- `apps/cadis-hud`, until the Tauri shell has Windows transport, audio, and
-  packaging adapters.
+Both macOS and Windows now run the full workspace test suite. Unix socket
+integration tests are gated behind `#[cfg(unix)]` and are automatically skipped
+on Windows. macOS runs them natively since it supports Unix sockets.
 
 ## 4. Workflow Commands
 
@@ -60,20 +44,19 @@ The platform workflow lives at
 provider credentials, microphone access, camera access, signing keys, or release
 tokens.
 
-macOS source baseline:
+macOS full test:
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar -p cadis-core --all-targets --all-features
+cargo test --workspace --all-targets --all-features
 ```
 
-Windows portable crate baseline:
+Windows full test:
 
 ```bash
-cargo check -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features
-cargo clippy -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features -- -D warnings
-cargo test -p cadis-protocol -p cadis-policy -p cadis-models -p cadis-avatar --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features
 ```
 
 ## 4.1 Release Workflow

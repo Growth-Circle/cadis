@@ -19,7 +19,7 @@
   <img alt="TypeScript" src="https://img.shields.io/badge/typescript-5.x-blue?logo=typescript&logoColor=white">
   <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8D8?logo=tauri&logoColor=white">
   <img alt="Local first" src="https://img.shields.io/badge/local--first-yes-brightgreen.svg">
-  <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-Linux%20desktop-6f42c1?logo=linux&logoColor=white">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-6f42c1?logo=desktop&logoColor=white">
   <a href="https://github.com/Growth-Circle/cadis/discussions"><img alt="Discussions" src="https://img.shields.io/github/discussions/Growth-Circle/cadis?logo=github&label=discussions"></a>
   <a href="https://github.com/Growth-Circle/cadis/issues"><img alt="Issues" src="https://img.shields.io/github/issues/Growth-Circle/cadis?logo=github"></a>
   <a href="https://github.com/Growth-Circle/cadis/pulls"><img alt="PRs" src="https://img.shields.io/github/issues-pr/Growth-Circle/cadis?logo=github&label=PRs"></a>
@@ -85,7 +85,7 @@ It is meant to feel like an operating layer, not a chatbot wrapper.
 
 C.A.D.I.S. is currently in **beta** (v0.9).
 
-The repository already includes a meaningful desktop MVP foundation:
+The repository already includes a meaningful cross-platform MVP foundation:
 
 - `cadisd`: local daemon and protocol authority
 - `cadis`: CLI client for status, models, agents, spawn, chat, tools, and doctor checks
@@ -122,10 +122,9 @@ avatar engine, and production hardening for concurrent-edit protection.
 
 ## Platform support
 
-Linux desktop is the primary runtime and HUD target for the current MVP.
-macOS is covered as a Rust source-validation baseline. Windows is limited to
-portable-crate validation until daemon/CLI transport, shell, path, sandbox, HUD,
-and audio adapters exist.
+- **Linux desktop**: primary runtime and HUD target (AppImage, .deb).
+- **macOS**: full test suite, daemon and CLI work, HUD via `pnpm tauri:dev` (.dmg planned).
+- **Windows**: full test suite with TCP transport, daemon and CLI work, HUD via `pnpm tauri:dev` (.msi planned).
 
 See the [Platform Baseline](docs/28_PLATFORM_BASELINE.md) for the support
 matrix and the exact macOS/Windows CI commands.
@@ -184,6 +183,9 @@ target/release/cadisd --check
 target/release/cadisd
 ```
 
+> **Windows**: use `target/release/cadisd --tcp-port 7433` (no Unix socket).
+> **macOS**: Unix socket works natively, same as Linux.
+
 ### Use the CLI
 
 ```bash
@@ -193,6 +195,8 @@ target/release/cadis models
 target/release/cadis agents
 target/release/cadis chat "hello"
 ```
+
+> **Windows**: add `--tcp` to CLI commands, e.g. `cadis --tcp status`.
 
 ### Run the HUD
 

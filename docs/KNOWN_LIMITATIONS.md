@@ -4,10 +4,10 @@ This document lists known limitations of the current C.A.D.I.S. v0.9.2 beta.
 
 ## Platform
 
-- **No Windows runtime.** The daemon, CLI transport, shell adapter, HUD, and
-  audio paths are Linux-only. Windows CI validates portable crates only.
-- **macOS and Windows are source-validation only.** No runtime, HUD, or audio
-  adapters exist for either platform.
+- **Windows and macOS support is new and less tested than Linux.** The daemon,
+  CLI, and HUD build and pass CI on all three platforms, but Linux remains the
+  primary development and runtime target. Edge cases on Windows and macOS may
+  exist.
 - **aarch64 Linux not natively tested.** aarch64 Linux binaries are
   cross-compiled but not natively tested in CI.
 
@@ -26,9 +26,9 @@ This document lists known limitations of the current C.A.D.I.S. v0.9.2 beta.
 
 ## Clients
 
-- **Telegram adapter connects to Bot API but not yet to cadisd.** The adapter
-  can poll Telegram and parse commands, but the bridge to daemon protocol is
-  not wired yet.
+- **Telegram adapter has DaemonBridge but is not production-tested.** The
+  adapter can poll Telegram, parse commands, and bridge to `cadisd` via
+  `DaemonBridge`, but the integration is early and not yet production-hardened.
 - **No mobile client.** Android and iOS surfaces are future work.
 
 ## Runtime
@@ -39,8 +39,9 @@ This document lists known limitations of the current C.A.D.I.S. v0.9.2 beta.
   running subprocesses.
 - **No Windows or macOS installer.** Linux users can use the AppImage or .deb
   from GitHub Releases.
-- **cadis-core lib.rs is monolithic (~15K lines).** Module extraction is
-  planned.
+- **cadis-core lib.rs partial extraction done.** Major modules have been
+  extracted into separate files, but some subsystems still carry significant
+  inline logic. Further decomposition is ongoing.
 - **Worker artifact view in HUD is read-only.** Apply/discard actions route
   through daemon approval but the full patch-apply flow needs more work.
 

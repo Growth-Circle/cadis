@@ -6,6 +6,25 @@ The format follows Keep a Changelog style, and the project will use Semantic Ver
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-04-29
+
+### Added
+- Cross-platform TCP transport for daemon and CLI (Windows/macOS/Linux)
+- macOS path conventions (~/Library/Application Support/cadis)
+- Windows path conventions (%APPDATA%\cadis)
+- Cross-platform shell adapter (cmd.exe on Windows, /bin/sh on Unix)
+- macOS and Windows HUD bundle targets (dmg, nsis)
+- macOS and Windows CI upgraded to full test suite
+- 9 UI Feature Parity items verified and checked off
+- Config dialog render test
+- Known limitations updated for cross-platform status
+
+### Changed
+- Daemon supports --tcp-port flag for TCP transport
+- CLI supports --tcp flag for TCP connection
+- Platform baseline upgraded: macOS full tests, Windows full tests
+- cadis-core module extraction noted in known limitations
+
 ## [1.0.0] - 2026-04-29
 
 ### Added

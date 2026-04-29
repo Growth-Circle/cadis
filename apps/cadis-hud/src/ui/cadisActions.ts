@@ -1192,8 +1192,9 @@ function readWorkerArtifacts(value: unknown): WorkerArtifactInfo | undefined {
     stringFrom(artifacts.test_report_status) ??
     stringFrom(artifacts.test_status) ??
     stringFrom(artifacts.tests_status);
-  if (!summary && !patch && !testReport && !testReportStatus) return undefined;
-  return { summary, patch, testReport, testReportStatus };
+  const changedFiles = stringFrom(artifacts.changed_files);
+  if (!summary && !patch && !testReport && !testReportStatus && !changedFiles) return undefined;
+  return { summary, patch, testReport, testReportStatus, changedFiles };
 }
 
 function readAgentSpecialist(

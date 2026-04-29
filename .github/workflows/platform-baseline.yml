@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  macos-rust-source:
-    name: macOS Rust source baseline
+  macos-rust:
+    name: macOS Rust full test
     runs-on: macos-latest
     timeout-minutes: 45
     env:
@@ -23,11 +23,11 @@ jobs:
         run: cargo fmt --all --check
       - name: Rust clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - name: Rust portable and core tests
-        run: cargo test -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar -p cadis-core --all-targets --all-features
+      - name: Rust workspace tests
+        run: cargo test --workspace --all-targets --all-features
 
-  windows-portable-crates:
-    name: Windows portable crate baseline
+  windows-rust:
+    name: Windows Rust full test
     runs-on: windows-latest
     timeout-minutes: 30
     env:
@@ -36,9 +36,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Portable crate check
-        run: cargo check -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features
-      - name: Portable crate clippy
-        run: cargo clippy -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features -- -D warnings
-      - name: Portable pure crate tests
-        run: cargo test -p cadis-protocol -p cadis-policy -p cadis-models -p cadis-avatar --all-targets --all-features
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Rust workspace tests
+        run: cargo test --workspace --all-targets --all-features

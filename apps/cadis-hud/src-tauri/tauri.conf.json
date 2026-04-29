@@ -31,7 +31,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb"],
+    "targets": "all",
     "icon": ["icons/icon.png"]
   }
 }

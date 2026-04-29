@@ -6740,15 +6740,28 @@ fn git_stdout<const N: usize>(cwd: &Path, args: [&str; N]) -> Result<String, Str
     }
 }
 
+fn shell_command(command: &str) -> Command {
+    #[cfg(unix)]
+    {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(command);
+        cmd
+    }
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("cmd.exe");
+        cmd.arg("/C").arg(command);
+        cmd
+    }
+}
+
 fn run_shell_command(
     cwd: &Path,
     command: &str,
     timeout: StdDuration,
 ) -> Result<ShellRunResult, ErrorPayload> {
-    let mut child_command = Command::new("sh");
+    let mut child_command = shell_command(command);
     child_command
-        .arg("-c")
-        .arg(command)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

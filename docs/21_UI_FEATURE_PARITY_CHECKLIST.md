@@ -25,7 +25,7 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [x] Decide voice ownership: daemon owns status, doctor, preview protocol,
   stop protocol, and speech policy; HUD remains the local capture/playback
   bridge where desktop APIs require it.
-- [ ] Decide how first-run wizard writes config.
+- [x] Decide how first-run wizard writes config.
 
 ## 4. Shell and Desktop Window
 
@@ -89,8 +89,8 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [x] Max length 32 characters.
 - [x] Empty input falls back to default.
 - [x] Send `agent.rename` to daemon.
-- [ ] Persist display name in daemon config/state.
-- [ ] Emit `agent.renamed`.
+- [x] Persist display name in daemon config/state.
+- [x] Emit `agent.renamed`.
 - [x] Update status bar and chat labels immediately after confirmed event.
 - [x] If daemon is disconnected, queue or save pending preference with visible warning.
 
@@ -130,18 +130,18 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [x] Last engine success hint.
 - [x] Voice preview uses main agent display name.
 - [x] Auto-speak only final assistant message.
-- [ ] Code/diff/log content is not spoken.
+- [x] Code/diff/log content is not spoken.
 
 ## 11. Model UI
 
-- [ ] List available models from daemon.
-- [ ] Show default model.
-- [ ] Per-agent model selector.
-- [ ] Preserve current value if missing from catalog.
-- [ ] Push model update to daemon.
-- [ ] Persist per-agent model.
-- [ ] Thinking mode toggle.
-- [ ] Fast response toggle.
+- [x] List available models from daemon.
+- [x] Show default model.
+- [x] Per-agent model selector.
+- [x] Preserve current value if missing from catalog.
+- [x] Push model update to daemon.
+- [x] Persist per-agent model.
+- [x] Thinking mode toggle.
+- [x] Fast response toggle.
 - [x] Main orb meta ring updates after model change.
 
 ## 12. Appearance UI
@@ -171,7 +171,7 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [x] Approve button.
 - [x] Button click sends daemon response.
 - [x] Card removed only after `approval.resolved`.
-- [ ] First-response-wins state is reflected if another surface resolves.
+- [x] First-response-wins state is reflected if another surface resolves.
 
 ## 14. Config Dialog
 
@@ -238,7 +238,7 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [x] Open read-only code work panel for selected worker output.
 - [x] Render worker summary from daemon worker state.
 - [x] Render patch artifact reference from daemon worker artifact metadata.
-- [ ] Render changed files from `changed-files.json`.
+- [x] Render changed files from `changed-files.json`.
 - [x] Render test report artifact reference/status from daemon worker metadata.
 - [x] Render bounded terminal log summaries from `worker.log.delta`.
 - [ ] Keep apply action as a daemon request that requires patch approval.
@@ -249,11 +249,11 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 
 ## 19. Testing
 
-- [ ] Theme helper tests.
+- [x] Theme helper tests.
 - [x] Agent name normalization tests.
 - [ ] Agent rename protocol test.
 - [ ] Voice prefs serialization tests.
-- [ ] Config dialog render test.
+- [x] Config dialog render test.
 - [x] Approval card waits for resolved event.
 - [x] Gateway reconnect/backoff test.
 - [x] Protocol event mapping tests.
@@ -268,5 +268,5 @@ This checklist tracks RamaClaw-to-CADIS UI parity. A checked item means the CADI
 - [x] Replace OpenClaw wording with CADIS daemon wording.
 - [x] Replace private source paths with public references or remove them.
 - [ ] Recreate icons for CADIS.
-- [ ] Confirm asset licensing.
+- [x] Confirm asset licensing.
 - [x] Ensure no provider keys or local config values are committed.
