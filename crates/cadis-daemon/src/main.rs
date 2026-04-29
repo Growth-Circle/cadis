@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::env;
 use std::error::Error;
+#[cfg(unix)]
 use std::fs;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::net::{TcpListener, TcpStream};
