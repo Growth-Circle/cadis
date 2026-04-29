@@ -1,0 +1,27 @@
+{
+  "name": "cadis",
+  "version": "1.1.0",
+  "description": "C.A.D.I.S. — Coordinated Agentic Distributed Intelligence System. Local-first multi-agent runtime for desktop work.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Growth-Circle/cadis"
+  },
+  "homepage": "https://github.com/Growth-Circle/cadis",
+  "keywords": ["ai", "agent", "multi-agent", "local-first", "daemon", "cli", "rust"],
+  "bin": {
+    "cadis": "bin/cadis",
+    "cadisd": "bin/cadisd"
+  },
+  "files": ["bin", "README.md", "LICENSE"],
+  "optionalDependencies": {
+    "@growthcircle/cadis-linux-x64": "1.1.0",
+    "@growthcircle/cadis-linux-arm64": "1.1.0",
+    "@growthcircle/cadis-darwin-x64": "1.1.0",
+    "@growthcircle/cadis-darwin-arm64": "1.1.0",
+    "@growthcircle/cadis-win32-x64": "1.1.0"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}

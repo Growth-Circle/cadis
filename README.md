@@ -170,6 +170,24 @@ presence without moving core orchestration out of `cadisd`.
 
 ## Quick start
 
+### Install via npm (recommended)
+
+```bash
+npm install -g cadis
+```
+
+Then run:
+
+```bash
+cadisd          # start the daemon
+cadis status    # check daemon status
+cadis doctor    # run diagnostics
+cadis chat "hello"
+```
+
+Pre-built binaries are available for Linux (x64, arm64), macOS (x64, arm64),
+and Windows (x64).
+
 ### Build from source
 
 ```bash

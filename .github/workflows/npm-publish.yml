@@ -1,0 +1,98 @@
+name: Publish npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 1.1.0)"
+        required: true
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            TAG="${GITHUB_REF#refs/tags/v}"
+            echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p artifacts
+          gh release download "v${VERSION}" --dir artifacts --pattern 'cadis*' --pattern 'cadisd*'
+          ls -la artifacts/
+
+      - name: Stage platform binaries
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+
+          stage() {
+            local npm_pkg="$1" target="$2" ext="$3"
+            local dir="npm/$npm_pkg"
+
+            cp "artifacts/cadis-${target}${ext}"  "$dir/cadis${ext}"  || { echo "ERROR: cadis binary not found for $target"; exit 1; }
+            cp "artifacts/cadisd-${target}${ext}" "$dir/cadisd${ext}" || { echo "ERROR: cadisd binary not found for $target"; exit 1; }
+            [ -z "$ext" ] && chmod +x "$dir/cadis" "$dir/cadisd"
+
+            cd "$dir"
+            npm version "$VERSION" --no-git-tag-version --allow-same-version
+            cd "$GITHUB_WORKSPACE"
+          }
+
+          stage cadis-linux-x64    x86_64-unknown-linux-gnu   ""
+          stage cadis-linux-arm64   aarch64-unknown-linux-gnu  ""
+          stage cadis-darwin-x64    x86_64-apple-darwin        ""
+          stage cadis-darwin-arm64  aarch64-apple-darwin       ""
+          stage cadis-win32-x64    x86_64-pc-windows-msvc     ".exe"
+
+          # Sync main package version + optionalDependencies versions
+          cd npm/cadis
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          node -e "
+            const pkg = require('./package.json');
+            for (const k of Object.keys(pkg.optionalDependencies)) {
+              pkg.optionalDependencies[k] = '$VERSION';
+            }
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          cd "$GITHUB_WORKSPACE"
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for pkg in cadis-linux-x64 cadis-linux-arm64 cadis-darwin-x64 cadis-darwin-arm64 cadis-win32-x64; do
+            echo "::group::Publishing @growthcircle/$pkg"
+            cd "npm/$pkg"
+            npm publish --access public 2>&1 || echo "::warning::$pkg publish failed (may already exist)"
+            cd "$GITHUB_WORKSPACE"
+            echo "::endgroup::"
+          done
+
+      - name: Publish main cadis package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd npm/cadis
+          npm publish --access public
