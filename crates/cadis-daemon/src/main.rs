@@ -613,9 +613,10 @@ mod tests {
     #[cfg(unix)]
     use cadis_models::{ModelInvocation, ModelProvider, ModelResponse};
     use cadis_protocol::{
-        CadisEvent, DaemonResponse, EmptyPayload, EventId, RequestId, SessionEventPayload,
-        SessionId, Timestamp,
+        CadisEvent, EmptyPayload, EventId, SessionEventPayload, SessionId, Timestamp,
     };
+    #[cfg(unix)]
+    use cadis_protocol::{DaemonResponse, RequestId};
     #[cfg(unix)]
     use cadis_protocol::{
         ClientId, ContentKind, MessageSendRequest, RequestEnvelope, ServerFrame,
@@ -623,6 +624,7 @@ mod tests {
     };
     #[cfg(unix)]
     use std::sync::Condvar;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     #[test]
