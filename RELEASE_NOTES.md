@@ -1,132 +1,117 @@
-# C.A.D.I.S. v0.9.0 — Desktop Beta
+# C.A.D.I.S. v1.2.0 — Async runtime, memory system, and zero-config launch
 
-**Release date:** 2026-04-28
-**Maturity:** Beta
-**Platform:** Linux desktop (x86\_64, aarch64 cross-compiled)
-**License:** Apache-2.0
-
-## What is C.A.D.I.S.?
-
-C.A.D.I.S. (Coordinated Agentic Distributed Intelligence System) is a local-first, Rust-first, model-agnostic runtime for coordinating AI agents across a desktop HUD, CLI, voice, approvals, native tools, and isolated coding workflows. The daemon (`cadisd`) is the single runtime authority — every interface is a protocol client, not a separate backend.
+**Release date:** 2026-04-30
+**Maturity:** beta
 
 ## Highlights
 
-- **Local daemon runtime** — `cadisd` exposes a Unix socket NDJSON protocol that owns all agent orchestration, tool policy, and approval state.
-- **Multi-agent orchestration** — orchestrator routing, agent spawn, and worker isolation via git worktrees with queue-based concurrency scheduling.
-- **Desktop HUD** — Tauri + React shell with orbital agent view, chat, agent tree, approval cards, voice controls, code work panel, and six themes.
-- **Native tool runtime** — `file.read`, `file.search`, `file.patch`, `shell.run`, `git.status`, `git.diff` with daemon-side approval gates, denied-path enforcement, and secret-file gating.
-- **Model provider layer** — Ollama (native NDJSON streaming), OpenAI API (SSE streaming), Codex CLI adapter for ChatGPT Plus/Pro, and local echo fallback.
-- **Policy and approval engine** — risk classification, approval expiry, first-response-wins resolution, credential redaction, and shell environment allowlisting.
-- **Voice I/O** — daemon-owned Edge TTS with speech policy (blocks code/diff/log), HUD-local playback, and `whisper-cli` transcription bridge.
-- **Crash recovery** — sessions, agents, workers, approvals, and AgentSession state survive daemon restarts via JSONL event persistence.
+v1.2.0 is the largest feature release since the initial beta. The daemon now runs
+on a fully async Tokio runtime with streaming tool output, a persistent memory
+system, and intelligent output filtering that reduces token usage by 60–90%. The
+CLI launches the daemon and HUD automatically — no manual setup required. This
+release also introduces 88 stable error codes, three new tool backends, and
+community-contributed CI and npm hardening.
 
-## Install
+## What's New
 
-### From GitHub Releases (Linux binary)
+- daemon: Migrate to Tokio async runtime for all daemon operations ([`3410104`](https://github.com/Growth-Circle/cadis/commit/3410104) by [@RamaAditya49](https://github.com/RamaAditya49))
+- daemon: Add streaming delta delivery via Tokio mpsc channels — agents receive incremental model output instead of waiting for full responses ([`df8b664`](https://github.com/Growth-Circle/cadis/commit/df8b664) by [@RamaAditya49](https://github.com/RamaAditya49))
+- daemon: Add config reload handler — daemon reloads configuration without restart ([`c7c9792`](https://github.com/Growth-Circle/cadis/commit/c7c9792) by [@RamaAditya49](https://github.com/RamaAditya49))
+- daemon: Wire checkpoint system for agent state persistence ([`c7c9792`](https://github.com/Growth-Circle/cadis/commit/c7c9792) by [@RamaAditya49](https://github.com/RamaAditya49))
+- daemon: Register 88 stable error codes for consistent, machine-readable error reporting ([`3410104`](https://github.com/Growth-Circle/cadis/commit/3410104) by [@RamaAditya49](https://github.com/RamaAditya49))
+- tools: Add `file.list` tool backend — list directory contents with glob filtering ([`3410104`](https://github.com/Growth-Circle/cadis/commit/3410104) by [@RamaAditya49](https://github.com/RamaAditya49))
+- tools: Add `git.log` tool backend — retrieve commit history with range and format options ([`3410104`](https://github.com/Growth-Circle/cadis/commit/3410104) by [@RamaAditya49](https://github.com/RamaAditya49))
+- tools: Add `git.commit` tool backend — stage and commit changes with message and scope ([`3410104`](https://github.com/Growth-Circle/cadis/commit/3410104) by [@RamaAditya49](https://github.com/RamaAditya49))
+- tools: Add tool loop — agents chain multiple tool calls iteratively within a single turn, enabling multi-step reasoning ([`df8b664`](https://github.com/Growth-Circle/cadis/commit/df8b664) by [@RamaAditya49](https://github.com/RamaAditya49))
+- store: Add `cadis-memory` crate — persistent memory system for agents to store and retrieve context across sessions ([`df8b664`](https://github.com/Growth-Circle/cadis/commit/df8b664) by [@RamaAditya49](https://github.com/RamaAditya49))
+- store: Add trigram search index for fast fuzzy matching over memory entries, inspired by QMD ([`fe71a26`](https://github.com/Growth-Circle/cadis/commit/fe71a26) by [@RamaAditya49](https://github.com/RamaAditya49))
+- models: Add output filter pipeline for 60–90% token reduction — strips boilerplate, deduplicates, and compresses model output before storage, inspired by RTK ([`506fbc8`](https://github.com/Growth-Circle/cadis/commit/506fbc8) by [@RamaAditya49](https://github.com/RamaAditya49))
+- models: Add semantic truncation — intelligently truncates long outputs preserving meaning boundaries instead of cutting at byte offsets, inspired by QMD ([`fe71a26`](https://github.com/Growth-Circle/cadis/commit/fe71a26) by [@RamaAditya49](https://github.com/RamaAditya49))
+- cli: Add zero-config launch — `cadis` starts the daemon and HUD automatically if not already running ([`a9ae836`](https://github.com/Growth-Circle/cadis/commit/a9ae836) by [@RamaAditya49](https://github.com/RamaAditya49))
+- cli: Add interactive chat fallback — `cadis chat` drops into a REPL when no message argument is provided ([`c7c9792`](https://github.com/Growth-Circle/cadis/commit/c7c9792) by [@RamaAditya49](https://github.com/RamaAditya49))
+- cli: Add `cadis profile` commands for managing user and agent profiles ([`c7c9792`](https://github.com/Growth-Circle/cadis/commit/c7c9792) by [@RamaAditya49](https://github.com/RamaAditya49))
+
+## Improvements
+
+- daemon: Enhance agent orchestration with model-driven spawn — the orchestrator selects which specialist agent to spawn based on model routing hints ([`3410104`](https://github.com/Growth-Circle/cadis/commit/3410104) by [@RamaAditya49](https://github.com/RamaAditya49))
+- daemon: Add per-agent token tracking for usage monitoring and budget enforcement ([`3410104`](https://github.com/Growth-Circle/cadis/commit/3410104) by [@RamaAditya49](https://github.com/RamaAditya49))
+- tools: Expand tool backend count from 9 to 12 with `file.list`, `git.log`, and `git.commit` ([`3410104`](https://github.com/Growth-Circle/cadis/commit/3410104) by [@RamaAditya49](https://github.com/RamaAditya49))
+
+## Bug Fixes
+
+- daemon: Guard `std::fs` import with `cfg(unix)` to fix Windows clippy failure ([`a823942`](https://github.com/Growth-Circle/cadis/commit/a823942) by [@RamaAditya49](https://github.com/RamaAditya49))
+- daemon: Gate unix-only test imports behind `cfg(unix)` to fix Windows CI ([`4ef43d9`](https://github.com/Growth-Circle/cadis/commit/4ef43d9) by [@RamaAditya49](https://github.com/RamaAditya49))
+- hud: Generate macOS and Windows icons for Tauri builds ([`0675606`](https://github.com/Growth-Circle/cadis/commit/0675606) by [@RamaAditya49](https://github.com/RamaAditya49))
+
+## Infrastructure & CI
+
+- Add security audit workflow with `cargo audit` and `gitleaks` secret scanning ([`3410104`](https://github.com/Growth-Circle/cadis/commit/3410104) by [@RamaAditya49](https://github.com/RamaAditya49))
+- Fix gitleaks version pinning in security workflow ([`4ef43d9`](https://github.com/Growth-Circle/cadis/commit/4ef43d9) by [@RamaAditya49](https://github.com/RamaAditya49))
+- Apply CI fixes from community PRs: stabilize cross-platform builds ([#41](https://github.com/Growth-Circle/cadis/pull/41), [#43](https://github.com/Growth-Circle/cadis/pull/43) by [@DeryFerd](https://github.com/DeryFerd))
+- Add SHA-256 checksum verification to npm install script ([#44](https://github.com/Growth-Circle/cadis/pull/44) by [@DeryFerd](https://github.com/DeryFerd))
+- Add `cadis-hud` binary download to npm postinstall ([#45](https://github.com/Growth-Circle/cadis/pull/45) by [@DeryFerd](https://github.com/DeryFerd))
+- Add auto npm publish step to release workflow ([`0675606`](https://github.com/Growth-Circle/cadis/commit/0675606) by [@RamaAditya49](https://github.com/RamaAditya49))
+
+## Documentation
+
+- Update known limitations and implementation plan for v1.1.3 ([`ea9e3d7`](https://github.com/Growth-Circle/cadis/commit/ea9e3d7) by [@RamaAditya49](https://github.com/RamaAditya49))
+- Add release notes standard ([`docs/standards/21_RELEASE_NOTES_STANDARD.md`](docs/standards/21_RELEASE_NOTES_STANDARD.md) by [@RamaAditya49](https://github.com/RamaAditya49))
+
+## Contributors
+
+Thanks to everyone who contributed to this release!
+
+- [@RamaAditya49](https://github.com/RamaAditya49) — Tokio migration, tool loop, streaming, memory system, output filters, semantic truncation, trigram search, zero-config launch, interactive CLI, profile commands, agent orchestration, error codes, checkpoint wiring, config reload
+- [@DeryFerd](https://github.com/DeryFerd) — CI stabilization ([#41](https://github.com/Growth-Circle/cadis/pull/41), [#43](https://github.com/Growth-Circle/cadis/pull/43)), npm SHA-256 verification ([#44](https://github.com/Growth-Circle/cadis/pull/44)), HUD download in npm ([#45](https://github.com/Growth-Circle/cadis/pull/45))
+
+## Installation
+
+### npm (all platforms)
 
 ```bash
-# Download from https://github.com/Growth-Circle/cadis/releases/tag/v0.9.0
+npm install -g @growthcircle/cadis@1.2.0
+```
+
+### Shell (Linux / macOS)
+
+```bash
+curl -fsSL https://github.com/Growth-Circle/cadis/releases/download/v1.2.0/cadis-$(uname -m | sed 's/arm64/aarch64/')-$([ "$(uname)" = "Darwin" ] && echo apple-darwin || echo unknown-linux-gnu) -o cadis
+curl -fsSL https://github.com/Growth-Circle/cadis/releases/download/v1.2.0/cadisd-$(uname -m | sed 's/arm64/aarch64/')-$([ "$(uname)" = "Darwin" ] && echo apple-darwin || echo unknown-linux-gnu) -o cadisd
 chmod +x cadis cadisd
-./cadisd --check
-./cadisd &
-./cadis status
-./cadis chat "hello"
+sudo mv cadis cadisd /usr/local/bin/
 ```
 
-### From Source
+### PowerShell (Windows)
+
+```powershell
+$v = "1.2.0"
+$cadisDir = "$env:LOCALAPPDATA\cadis"; New-Item -ItemType Directory -Force -Path $cadisDir | Out-Null
+Invoke-WebRequest "https://github.com/Growth-Circle/cadis/releases/download/v$v/cadis-x86_64-pc-windows-msvc.exe" -OutFile "$cadisDir\cadis.exe"
+Invoke-WebRequest "https://github.com/Growth-Circle/cadis/releases/download/v$v/cadisd-x86_64-pc-windows-msvc.exe" -OutFile "$cadisDir\cadisd.exe"
+```
+
+### Build from source
 
 ```bash
-git clone https://github.com/Growth-Circle/cadis.git
-cd cadis
-cargo build --release
-target/release/cadisd --check
+cargo install cadis --version 1.2.0
 ```
 
-### Run the HUD
+### Verify
 
 ```bash
-cd apps/cadis-hud
-corepack enable
-pnpm install
-pnpm tauri:dev
+cadis --version
+cadisd --check
 ```
 
-## Known Limitations
+<details>
+<summary>SHA-256 checksums</summary>
 
-- **Linux-only runtime.** Windows has no daemon/CLI/HUD support; macOS is source-validation only.
-- **aarch64 cross-compiled, not natively tested.** aarch64 Linux binaries are cross-compiled but lack native CI testing.
-- **Local-only networking.** All communication is Unix socket — no remote relay, multi-machine, or cloud orchestration.
-- **No production voice.** Edge TTS runs as a subprocess bridge; Whisper transcription requires a local `whisper-cli` binary.
-- **No Telegram or mobile clients.** The Telegram adapter crate exists but is not connected to a live bot. No Android/iOS surfaces.
-- **Sequential tool calls per session.** Workers run concurrently, but individual tool calls within a session are sequential. Async cancellation is not yet implemented.
-- **No packaged installer or HUD binary.** All artifacts are bare binaries; the Tauri HUD must be built from source.
-- **Default `max_steps_per_session=8`.** Increase to 10–20 in config for complex multi-step agent workflows.
+```text
+(checksums will be added after release binaries are built)
+```
 
-## Artifacts
+</details>
 
-| File | Platform |
-|------|----------|
-| `cadis-x86_64-unknown-linux-gnu` | Linux x86\_64 |
-| `cadisd-x86_64-unknown-linux-gnu` | Linux x86\_64 |
-| `cadis-aarch64-unknown-linux-gnu` | Linux aarch64 |
-| `cadisd-aarch64-unknown-linux-gnu` | Linux aarch64 |
-| `*.sha256` | Checksums |
+## Full Changelog
 
-## Checks Performed
-
-- `cargo fmt --all -- --check` — formatting
-- `cargo clippy --workspace --all-targets -- -D warnings` — lint
-- `cargo test --workspace` — 250+ tests passing
-- HUD lint, typecheck, test, and build (`pnpm lint && pnpm tsc && pnpm test && pnpm build`)
-- `cargo-deny` license audit — no disallowed licenses
-- Daemon smoke test — socket connect, status, chat round-trip
-- Documentation review — 28 docs, 20 standards verified
-
-## Security
-
-Report vulnerabilities privately per [SECURITY.md](SECURITY.md). C.A.D.I.S. keeps credentials out of git and logs — local auth artifacts, tokens, `.env` files, JSONL traces, sockets, and crash diagnostics are ignored by default.
-
-## What's Next
-
-**v1.0 stable:** protocol freeze, stable storage format, packaged installers, Telegram client, async tool cancellation, and production voice pipeline.
-
----
-
-# C.A.D.I.S. v0.9.2 — Release Candidate
-
-**Date:** 2026-04-29
-**Maturity:** RC (Release Candidate)
-**Target:** v1.0 stable
-
-## What's new
-
-- **Version bump** — all crates and HUD bumped to 0.9.2 (was 0.1.0).
-- **Open-source cleanup** — RamaClaw brand references replaced with CADIS throughout HUD and docs.
-- **HUD improvements** — quick action chips in chat, approval card risk summary and expiry display, orb meta ring model update.
-- **`max_steps_per_session` default → 8** — multi-step agent workflows now work out of the box.
-- **`cargo-deny` in CI** — dependency license audit runs on every PR.
-- **Telegram adapter** — real HTTP Bot API connection (get_updates, send_message, poll_loop).
-- **Test coverage** — 296+ tests across all workspace crates.
-
-## Remaining for v1.0
-
-- Protocol freeze documentation
-- Stable CLI command documentation
-- Storage migration path documentation
-- HUD packaging (AppImage/deb in release workflow)
-- Security response process verification
-
----
-
-# C.A.D.I.S. v0.9.1 — RC Prep
-
-**Date:** 2026-04-29
-**Maturity:** Beta (RC prep)
-
-## Changes
-
-- **SessionUnsubscribe** — implemented in daemon protocol.
-- **Telegram adapter** — HTTP connection to Bot API added (adapter was previously command-parser only).
-- **UI Feature Parity** — checklist audit completed; master checklist now 404/404.
-- **Test coverage** — daemon and CLI test suites expanded.
-- **Known limitations** — documented in `docs/KNOWN_LIMITATIONS.md`.
+[v1.1.3...v1.2.0](https://github.com/Growth-Circle/cadis/compare/v1.1.3...v1.2.0)

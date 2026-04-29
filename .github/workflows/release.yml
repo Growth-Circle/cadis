@@ -148,10 +148,14 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Check for release notes
+        id: notes
+        run: test -f RELEASE_NOTES.md && echo "exists=true" >> "$GITHUB_OUTPUT" || echo "exists=false" >> "$GITHUB_OUTPUT"
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: ${{ steps.notes.outputs.exists == 'true' && 'RELEASE_NOTES.md' || '' }}
+          generate_release_notes: ${{ steps.notes.outputs.exists != 'true' }}
           files: artifacts/*
 
   # npm publishing is handled by .github/workflows/npm-publish.yml

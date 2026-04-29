@@ -30,6 +30,7 @@ These standards are mandatory for contributors and AI agents unless a maintainer
 | 18 | `18_OBSERVABILITY_STANDARD.md` | Logs, event IDs, trace IDs, redacted diagnostics, debug mode |
 | 19 | `19_LICENSE_DEPENDENCY_STANDARD.md` | License policy, dependency approval, NOTICE, source imports |
 | 20 | `20_CI_CD_STANDARD.md` | CI checks, required status, security scans, release automation |
+| 21 | `21_RELEASE_NOTES_STANDARD.md` | Release notes format, sections, template, attribution, checksums |
 
 ## Priority Tiers
 
