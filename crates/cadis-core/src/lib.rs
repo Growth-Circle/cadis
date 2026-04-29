@@ -20,7 +20,8 @@ use cadis_policy::{PolicyDecision, PolicyEngine};
 use cadis_protocol::{
     AgentEventPayload, AgentId, AgentListPayload, AgentModelChangedPayload, AgentRenamedPayload,
     AgentRole, AgentSessionEventPayload, AgentSessionId, AgentSessionStatus, AgentSpawnRequest,
-    AgentStatus, AgentStatusChangedPayload, AgentTailRequest, ApprovalDecision, ApprovalId,
+    AgentSpecialistChangedPayload, AgentSpecialistSetRequest, AgentStatus,
+    AgentStatusChangedPayload, AgentTailRequest, ApprovalDecision, ApprovalId,
     ApprovalRequestPayload, ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent,
     ClientRequest, ContentKind, DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope,
     EventId, MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
@@ -65,6 +66,8 @@ const WORKER_DEFAULT_COMMAND: &str = "git status --short";
 const WORKER_COMMAND_TIMEOUT_MS: u64 = 5_000;
 const WORKER_COMMAND_LOG_LIMIT_BYTES: usize = 4 * 1024;
 const WORKER_COMMAND_SUMMARY_LIMIT_BYTES: usize = 512;
+const AGENT_PERSONA_MAX_CHARS: usize = 1_200;
+const AGENT_CONTEXT_TASK_MAX_CHARS: usize = 140;
 
 /// Runtime options supplied by the daemon process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -534,6 +537,9 @@ impl Runtime {
                 );
                 self.accept(request_id, vec![event])
             }
+            ClientRequest::AgentSpecialistSet(request) => {
+                self.set_agent_specialist(request_id, request)
+            }
             ClientRequest::AgentList(_) => {
                 let agents = self
                     .agent_records_sorted()
@@ -613,12 +619,7 @@ impl Runtime {
             ClientRequest::WorkerTail(request) => self.worker_tail(request_id, request),
             ClientRequest::WorkerResult(request) => self.worker_result(request_id, request),
             ClientRequest::WorkerCleanup(request) => self.worker_cleanup(request_id, request),
-            ClientRequest::SessionUnsubscribe(_) => self.reject(
-                request_id,
-                "not_implemented",
-                "this request is defined in the protocol but is not implemented in the desktop MVP",
-                false,
-            ),
+            ClientRequest::SessionUnsubscribe(_) => self.accept(request_id, Vec::new()),
         }
     }
 
@@ -1743,6 +1744,42 @@ impl Runtime {
         }
     }
 
+    fn set_agent_specialist(
+        &mut self,
+        request_id: RequestId,
+        request: AgentSpecialistSetRequest,
+    ) -> RequestOutcome {
+        let profile = normalize_agent_specialist(
+            &request.specialist_id,
+            &request.specialist_label,
+            &request.persona,
+        );
+        let Some(agent) = self.agents.get_mut(&request.agent_id) else {
+            return self.reject(
+                request_id,
+                "agent_not_found",
+                format!("agent '{}' was not found", request.agent_id),
+                false,
+            );
+        };
+
+        agent.specialist_id = profile.specialist_id.clone();
+        agent.specialist_label = profile.specialist_label.clone();
+        agent.persona = profile.persona.clone();
+        let _ = self.persist_agent_record(&request.agent_id);
+
+        let event = self.event(
+            None,
+            CadisEvent::AgentSpecialistChanged(AgentSpecialistChangedPayload {
+                agent_id: request.agent_id,
+                specialist_id: profile.specialist_id,
+                specialist_label: profile.specialist_label,
+                persona: profile.persona,
+            }),
+        );
+        self.accept(request_id, vec![event])
+    }
+
     fn spawn_agent(&mut self, request_id: RequestId, request: AgentSpawnRequest) -> RequestOutcome {
         let record = match self.spawn_agent_record(request) {
             Ok(record) => record,
@@ -1843,6 +1880,7 @@ impl Runtime {
             .model
             .filter(|model| !model.trim().is_empty())
             .unwrap_or_else(|| self.options.model_provider.clone());
+        let specialist = default_agent_specialist_profile(&agent_id, &display_name);
         let record = AgentRecord {
             id: agent_id.clone(),
             role,
@@ -1850,6 +1888,9 @@ impl Runtime {
             parent_agent_id: Some(parent_agent_id),
             model,
             status: AgentStatus::Idle,
+            specialist_id: specialist.specialist_id,
+            specialist_label: specialist.specialist_label,
+            persona: specialist.persona,
         };
         self.agents.insert(agent_id.clone(), record.clone());
         let _ = self.persist_agent_record(&agent_id);
@@ -2451,16 +2492,121 @@ impl Runtime {
         let Some(agent) = self.agents.get(agent_id) else {
             return content.to_owned();
         };
+        let specialist = if agent.persona.trim().is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nSpecialist persona ({}):\n{}",
+                agent.specialist_label, agent.persona
+            )
+        };
+        let runtime_context = if agent.id.as_str() == "main" {
+            format!(
+                "\n\nCurrent CADIS runtime state:\n{}",
+                self.orchestrator_awareness_context()
+            )
+        } else {
+            String::new()
+        };
         if agent.id.as_str() == "main" {
             return format!(
-                "You are CADIS, a local-first AI assistant. You have access to file, shell, and git tools. Always ask for approval before risky operations.\n\nUser request:\n{}",
-                content
+                "You are CADIS, a local-first AI assistant and the orchestrator for the local CADIS agent cluster. You have access to file, shell, and git tools. Always ask for approval before risky operations. Use the runtime state to route work, avoid duplicate work, and summarize what other agents are doing when useful.{}{}\n\nUser request:\n{}",
+                specialist, runtime_context, content
             );
         }
         format!(
-            "You are {} ({}) in the CADIS multi-agent runtime. Answer only for your role and keep the response concise unless the user asks for detail.\n\nUser request:\n{}",
-            agent.display_name, agent.role.as_str(), content
+            "You are {} ({}) in the CADIS multi-agent runtime. Answer only for your role and keep the response concise unless the user asks for detail. Always respect CADIS approval and tool safety policy.{}\n\nUser request:\n{}",
+            agent.display_name, agent.role.as_str(), specialist, content
         )
+    }
+
+    fn orchestrator_awareness_context(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push("Agents:".to_owned());
+        for agent in self.agent_records_sorted().into_iter().take(16) {
+            let task = self
+                .latest_agent_session(&agent.id)
+                .map(|session| {
+                    format!(
+                        "{} ({}, step {}/{})",
+                        compact_prompt_value(&session.task, AGENT_CONTEXT_TASK_MAX_CHARS),
+                        agent_session_status_label(session.status),
+                        session.steps_used.min(session.budget_steps),
+                        session.budget_steps
+                    )
+                })
+                .unwrap_or_else(|| "no active or recent task".to_owned());
+            lines.push(format!(
+                "- {} / {} [{}]: status {}, specialist {}, task: {}",
+                agent.id,
+                agent.display_name,
+                agent.role.as_str(),
+                agent_status_label(agent.status),
+                agent.specialist_label,
+                task
+            ));
+        }
+
+        let mut recent_sessions = self.agent_session_records_sorted();
+        recent_sessions.sort_by(|left, right| right.id.cmp(&left.id));
+        let recent_sessions = recent_sessions.into_iter().take(6).collect::<Vec<_>>();
+        if !recent_sessions.is_empty() {
+            lines.push("Recent agent sessions:".to_owned());
+            for session in recent_sessions {
+                lines.push(format!(
+                    "- {} -> {}: {} ({}, step {}/{})",
+                    session.agent_id,
+                    session
+                        .parent_agent_id
+                        .as_ref()
+                        .map(AgentId::as_str)
+                        .unwrap_or("root"),
+                    compact_prompt_value(&session.task, AGENT_CONTEXT_TASK_MAX_CHARS),
+                    agent_session_status_label(session.status),
+                    session.steps_used.min(session.budget_steps),
+                    session.budget_steps
+                ));
+            }
+        }
+
+        let mut workers = self.worker_records_sorted();
+        workers.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        let workers = workers.into_iter().take(6).collect::<Vec<_>>();
+        if !workers.is_empty() {
+            lines.push("Recent workers:".to_owned());
+            for worker in workers {
+                let owner = worker
+                    .agent_id
+                    .as_ref()
+                    .or(worker.parent_agent_id.as_ref())
+                    .map(AgentId::as_str)
+                    .unwrap_or("unknown");
+                let summary = worker
+                    .summary
+                    .as_deref()
+                    .or(worker.log_lines.last().map(String::as_str))
+                    .or(worker.error.as_deref())
+                    .unwrap_or("no summary");
+                lines.push(format!(
+                    "- {} owned by {}: {} ({})",
+                    worker.worker_id,
+                    owner,
+                    compact_prompt_value(summary, AGENT_CONTEXT_TASK_MAX_CHARS),
+                    worker.status.as_str()
+                ));
+            }
+        }
+
+        lines.join("\n")
+    }
+
+    fn latest_agent_session(&self, agent_id: &AgentId) -> Option<&AgentSessionRecord> {
+        self.agent_sessions
+            .values()
+            .filter(|session| {
+                &session.agent_id == agent_id || session.parent_agent_id.as_ref() == Some(agent_id)
+            })
+            .max_by(|left, right| left.id.cmp(&right.id))
     }
 
     fn agent_records_sorted(&self) -> Vec<AgentRecord> {
@@ -4848,6 +4994,44 @@ struct AgentRecord {
     parent_agent_id: Option<AgentId>,
     model: String,
     status: AgentStatus,
+    specialist_id: String,
+    specialist_label: String,
+    persona: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentSpecialistProfile {
+    specialist_id: String,
+    specialist_label: String,
+    persona: String,
+}
+
+impl AgentSpecialistProfile {
+    fn with_default(self, default: Self) -> Self {
+        if self.specialist_id.is_empty()
+            && self.specialist_label.is_empty()
+            && self.persona.is_empty()
+        {
+            return default;
+        }
+        Self {
+            specialist_id: if self.specialist_id.is_empty() {
+                default.specialist_id
+            } else {
+                self.specialist_id
+            },
+            specialist_label: if self.specialist_label.is_empty() {
+                default.specialist_label
+            } else {
+                self.specialist_label
+            },
+            persona: if self.persona.is_empty() {
+                default.persona
+            } else {
+                self.persona
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -4858,6 +5042,12 @@ struct AgentMetadata {
     parent_agent_id: Option<AgentId>,
     model: String,
     status: AgentStatus,
+    #[serde(default)]
+    specialist_id: String,
+    #[serde(default)]
+    specialist_label: String,
+    #[serde(default)]
+    persona: String,
 }
 
 impl AgentMetadata {
@@ -4869,11 +5059,17 @@ impl AgentMetadata {
             parent_agent_id: record.parent_agent_id.clone(),
             model: record.model.clone(),
             status: record.status,
+            specialist_id: record.specialist_id.clone(),
+            specialist_label: record.specialist_label.clone(),
+            persona: record.persona.clone(),
         }
     }
 
     fn into_record(self) -> (AgentId, AgentRecord) {
         let id = self.agent_id;
+        let specialist =
+            normalize_agent_specialist(&self.specialist_id, &self.specialist_label, &self.persona)
+                .with_default(default_agent_specialist_profile(&id, &self.display_name));
         (
             id.clone(),
             AgentRecord {
@@ -4883,6 +5079,9 @@ impl AgentMetadata {
                 parent_agent_id: self.parent_agent_id,
                 model: self.model,
                 status: self.status,
+                specialist_id: specialist.specialist_id,
+                specialist_label: specialist.specialist_label,
+                persona: specialist.persona,
             },
         )
     }
@@ -4907,6 +5106,9 @@ impl AgentRecord {
             parent_agent_id: self.parent_agent_id,
             model: Some(self.model),
             status: Some(self.status),
+            specialist_id: Some(self.specialist_id),
+            specialist_label: Some(self.specialist_label),
+            persona: Some(self.persona),
         }
     }
 }
@@ -6815,6 +7017,7 @@ fn default_agents(model_provider: &str) -> HashMap<AgentId, AgentRecord> {
     .into_iter()
     .map(|(id, role, display_name)| {
         let id = AgentId::from(id);
+        let specialist = default_agent_specialist_profile(&id, display_name);
         (
             id.clone(),
             AgentRecord {
@@ -6824,6 +7027,9 @@ fn default_agents(model_provider: &str) -> HashMap<AgentId, AgentRecord> {
                 parent_agent_id: None,
                 model: model_provider.to_owned(),
                 status: AgentStatus::Idle,
+                specialist_id: specialist.specialist_id,
+                specialist_label: specialist.specialist_label,
+                persona: specialist.persona,
             },
         )
     })
@@ -8090,6 +8296,117 @@ fn normalize_agent_name(value: &str, agent_id: &AgentId) -> String {
     name.chars().take(32).collect()
 }
 
+fn normalize_agent_specialist(
+    specialist_id: &str,
+    specialist_label: &str,
+    persona: &str,
+) -> AgentSpecialistProfile {
+    let id = slugify(specialist_id).chars().take(40).collect::<String>();
+    let label = specialist_label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(48)
+        .collect::<String>();
+    let persona = persona
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(AGENT_PERSONA_MAX_CHARS)
+        .collect::<String>();
+
+    AgentSpecialistProfile {
+        specialist_id: if id == "agent" { String::new() } else { id },
+        specialist_label: label,
+        persona,
+    }
+}
+
+fn default_agent_specialist_profile(
+    agent_id: &AgentId,
+    _display_name: &str,
+) -> AgentSpecialistProfile {
+    let (specialist_id, specialist_label, persona) = match agent_id.as_str() {
+        "main" => (
+            "orchestrator",
+            "Orchestrator",
+            "Coordinate the CADIS agent cluster. Track what each agent is doing, route tasks to the best specialist, avoid duplicate work, and summarize cross-agent progress clearly.",
+        ),
+        "codex" => (
+            "engineering",
+            "Engineering",
+            "Act as a senior software engineer. Focus on implementation quality, tests, maintainability, and concrete code-level tradeoffs.",
+        ),
+        "atlas" => (
+            "research",
+            "Research",
+            "Act as a research analyst. Gather context, compare sources, separate facts from assumptions, and return concise evidence-backed findings.",
+        ),
+        "forge" => (
+            "automation",
+            "Automation",
+            "Act as an automation specialist. Design reliable repeatable workflows, scripts, and operational checks with clear failure modes.",
+        ),
+        "sentry" => (
+            "operations",
+            "Operations",
+            "Act as an operations specialist. Monitor system health, diagnose runtime issues, and recommend low-risk operational actions.",
+        ),
+        "bash" => (
+            "devops",
+            "DevOps",
+            "Act as a shell and DevOps specialist. Prefer safe, inspectable commands and explain command impact before risky execution.",
+        ),
+        "mneme" => (
+            "knowledge",
+            "Knowledge",
+            "Act as a memory and knowledge-management specialist. Preserve useful context, retrieve relevant prior decisions, and keep notes structured.",
+        ),
+        "chronos" => (
+            "planning",
+            "Planning",
+            "Act as a planning specialist. Turn goals into timelines, milestones, constraints, and next actions.",
+        ),
+        "muse" => (
+            "creative",
+            "Creative",
+            "Act as a creative specialist. Generate polished copy, naming, narrative, and visual direction while matching the requested tone.",
+        ),
+        "relay" => (
+            "network",
+            "Network",
+            "Act as a networking specialist. Reason about connectivity, ports, DNS, tunnels, and service boundaries.",
+        ),
+        "prism" => (
+            "data",
+            "Data",
+            "Act as a data specialist. Analyze datasets, metrics, schemas, and queries with attention to correctness and decision usefulness.",
+        ),
+        "aegis" => (
+            "security",
+            "Security",
+            "Act as a security specialist. Identify threats, risky assumptions, policy gaps, and mitigations without bypassing CADIS approvals.",
+        ),
+        "echo" => (
+            "voice",
+            "Voice",
+            "Act as a voice I/O specialist. Focus on speech, transcription, pronunciation, latency, and accessibility constraints.",
+        ),
+        _ => (
+            "general",
+            "Generalist",
+            "Act as a pragmatic specialist. Clarify the task, choose the right approach, and produce actionable results.",
+        ),
+    };
+    AgentSpecialistProfile {
+        specialist_id: specialist_id.to_owned(),
+        specialist_label: specialist_label.to_owned(),
+        persona: persona.to_owned(),
+    }
+}
+
 fn normalize_role(value: &str) -> String {
     let collapsed: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
@@ -8119,6 +8436,43 @@ fn default_agent_name(role: &str, agent_id: &AgentId) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     normalize_agent_name(&name, agent_id)
+}
+
+fn compact_prompt_value(value: &str, max_chars: usize) -> String {
+    let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.chars().count() <= max_chars {
+        return clean;
+    }
+    let mut out = clean
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    out.push('…');
+    out
+}
+
+fn agent_status_label(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Spawning => "spawning",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Running => "running",
+        AgentStatus::WaitingApproval => "waiting_approval",
+        AgentStatus::Completed => "completed",
+        AgentStatus::Failed => "failed",
+        AgentStatus::Cancelled => "cancelled",
+    }
+}
+
+fn agent_session_status_label(status: AgentSessionStatus) -> &'static str {
+    match status {
+        AgentSessionStatus::Started => "started",
+        AgentSessionStatus::Running => "running",
+        AgentSessionStatus::Completed => "completed",
+        AgentSessionStatus::Failed => "failed",
+        AgentSessionStatus::Cancelled => "cancelled",
+        AgentSessionStatus::TimedOut => "timed_out",
+        AgentSessionStatus::BudgetExceeded => "budget_exceeded",
+    }
 }
 
 fn leading_mention(content: &str) -> Option<(String, String)> {
@@ -9107,9 +9461,9 @@ mod tests {
     use super::*;
     use cadis_models::{provider_from_config, EchoProvider};
     use cadis_protocol::{
-        AgentModelSetRequest, AgentRenameRequest, AgentSpawnRequest, ApprovalResponseRequest,
-        ClientId, ContentKind, EmptyPayload, EventSubscriptionRequest, EventsSnapshotRequest,
-        MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest,
+        AgentModelSetRequest, AgentRenameRequest, AgentSpawnRequest, AgentSpecialistSetRequest,
+        ApprovalResponseRequest, ClientId, ContentKind, EmptyPayload, EventSubscriptionRequest,
+        EventsSnapshotRequest, MessageSendRequest, RequestId, ServerFrame, SessionCreateRequest,
         SessionSubscriptionRequest, SessionTargetRequest, ToolCallRequest, VoiceDoctorCheck,
         VoiceDoctorRequest, VoicePreflightRequest, WorkerResultRequest, WorkerTailRequest,
         WorkspaceAccess, WorkspaceDoctorRequest, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind,
@@ -9117,7 +9471,7 @@ mod tests {
     };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     fn runtime() -> Runtime {
@@ -9262,6 +9616,25 @@ mod tests {
         fn chat(&self, _prompt: &str) -> Result<Vec<String>, cadis_models::ModelError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec!["counted".to_owned()])
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct PromptCaptureProvider {
+        prompt: Arc<Mutex<String>>,
+    }
+
+    impl ModelProvider for PromptCaptureProvider {
+        fn name(&self) -> &str {
+            "prompt-capture"
+        }
+
+        fn chat(&self, prompt: &str) -> Result<Vec<String>, cadis_models::ModelError> {
+            *self
+                .prompt
+                .lock()
+                .expect("prompt lock should not be poisoned") = prompt.to_owned();
+            Ok(vec!["captured".to_owned()])
         }
     }
 
@@ -13062,6 +13435,104 @@ mod tests {
                         && payload.model == "ollama/llama3.2"
             )
         }));
+    }
+
+    #[test]
+    fn agent_specialist_set_is_confirmed_by_event() {
+        let mut runtime = runtime();
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("hud_1"),
+            ClientRequest::AgentSpecialistSet(AgentSpecialistSetRequest {
+                agent_id: AgentId::from("atlas"),
+                specialist_id: "marketing".to_owned(),
+                specialist_label: "Marketing".to_owned(),
+                persona: "Act as a senior growth marketer.".to_owned(),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::AgentSpecialistChanged(payload)
+                    if payload.agent_id.as_str() == "atlas"
+                        && payload.specialist_id == "marketing"
+                        && payload.specialist_label == "Marketing"
+                        && payload.persona == "Act as a senior growth marketer."
+            )
+        }));
+    }
+
+    #[test]
+    fn message_send_includes_agent_specialist_persona_in_provider_prompt() {
+        let captured = Arc::new(Mutex::new(String::new()));
+        let provider = PromptCaptureProvider {
+            prompt: Arc::clone(&captured),
+        };
+        let mut runtime = runtime_with_provider(Box::new(provider), "prompt-capture");
+
+        let _ = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_specialist"),
+            ClientId::from("hud_1"),
+            ClientRequest::AgentSpecialistSet(AgentSpecialistSetRequest {
+                agent_id: AgentId::from("codex"),
+                specialist_id: "marketing".to_owned(),
+                specialist_label: "Marketing".to_owned(),
+                persona: "Act as a senior growth marketer before answering.".to_owned(),
+            }),
+        ));
+
+        let _ = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_chat"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("codex")),
+                content: "draft launch positioning".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        let prompt = captured.lock().expect("prompt lock should not be poisoned");
+        assert!(prompt.contains("Specialist persona (Marketing):"));
+        assert!(prompt.contains("Act as a senior growth marketer before answering."));
+        assert!(prompt.contains("draft launch positioning"));
+    }
+
+    #[test]
+    fn main_agent_prompt_includes_runtime_awareness_context() {
+        let captured = Arc::new(Mutex::new(String::new()));
+        let provider = PromptCaptureProvider {
+            prompt: Arc::clone(&captured),
+        };
+        let mut runtime = runtime_with_provider(Box::new(provider), "prompt-capture");
+
+        let _ = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_route"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("codex")),
+                content: "build the specialist selector".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+        let _ = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_main"),
+            ClientId::from("hud_1"),
+            ClientRequest::MessageSend(MessageSendRequest {
+                session_id: None,
+                target_agent_id: Some(AgentId::from("main")),
+                content: "what are the agents doing?".to_owned(),
+                content_kind: ContentKind::Chat,
+            }),
+        ));
+
+        let prompt = captured.lock().expect("prompt lock should not be poisoned");
+        assert!(prompt.contains("Current CADIS runtime state:"));
+        assert!(prompt.contains("codex / Codex"));
+        assert!(prompt.contains("build the specialist selector"));
+        assert!(prompt.contains("Recent agent sessions:"));
     }
 
     #[test]

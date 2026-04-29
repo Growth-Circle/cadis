@@ -14,7 +14,7 @@
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="https://github.com/Growth-Circle/cadis/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Growth-Circle/cadis/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/Growth-Circle/cadis/actions/workflows/platform-baseline.yml"><img alt="Platform" src="https://github.com/Growth-Circle/cadis/actions/workflows/platform-baseline.yml/badge.svg?branch=main"></a>
-  <img alt="Status: Pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-orange.svg">
+  <img alt="Status: Beta" src="https://img.shields.io/badge/status-beta-blue.svg">
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust&logoColor=white">
   <img alt="TypeScript" src="https://img.shields.io/badge/typescript-5.x-blue?logo=typescript&logoColor=white">
   <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8D8?logo=tauri&logoColor=white">
@@ -26,7 +26,7 @@
 </p>
 
 <p align="center">
-  <a href="docs/07_MASTER_CHECKLIST.md"><img alt="Alpha progress" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FGrowth-Circle%2Fcadis%2Fmain%2Fdocs%2Fprogress.json&query=%24.checklist.percent&suffix=%25&label=alpha%20progress&style=flat&color=58a6ff&logo=target&logoColor=white"></a>
+  <a href="docs/07_MASTER_CHECKLIST.md"><img alt="Alpha progress" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FGrowth-Circle%2Fcadis%2Fmain%2Fdocs%2Fprogress.json&query=%24.checklist.percent&suffix=%25&label=progress&style=flat&color=58a6ff&logo=target&logoColor=white"></a>
   <a href="docs/07_MASTER_CHECKLIST.md"><img alt="Checklist" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FGrowth-Circle%2Fcadis%2Fmain%2Fdocs%2Fprogress.json&query=%24.checklist.done&suffix=%20done&label=checklist&style=flat&color=30a14e"></a>
 </p>
 
@@ -83,7 +83,7 @@ It is meant to feel like an operating layer, not a chatbot wrapper.
 
 ## Current status
 
-C.A.D.I.S. is currently **pre-alpha**.
+C.A.D.I.S. is currently in **beta** (v0.9).
 
 The repository already includes a meaningful desktop MVP foundation:
 

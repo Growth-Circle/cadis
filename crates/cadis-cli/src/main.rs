@@ -1828,3 +1828,304 @@ fn print_help() {
         env!("CARGO_PKG_VERSION")
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(input: &[&str]) -> Vec<String> {
+        input.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- Cli::parse subcommand routing ---
+
+    #[test]
+    fn parse_status() {
+        let cli = Cli::parse(args(&["status"])).unwrap();
+        assert_eq!(cli.command, Command::Status);
+        assert!(!cli.json);
+    }
+
+    #[test]
+    fn parse_doctor() {
+        let cli = Cli::parse(args(&["doctor"])).unwrap();
+        assert_eq!(cli.command, Command::Doctor);
+    }
+
+    #[test]
+    fn parse_models() {
+        let cli = Cli::parse(args(&["models"])).unwrap();
+        assert_eq!(cli.command, Command::Models);
+    }
+
+    #[test]
+    fn parse_agents() {
+        let cli = Cli::parse(args(&["agents"])).unwrap();
+        assert_eq!(cli.command, Command::Agents);
+    }
+
+    #[test]
+    fn parse_chat() {
+        let cli = Cli::parse(args(&["chat", "hello", "world"])).unwrap();
+        assert_eq!(cli.command, Command::Chat("hello world".to_owned()));
+    }
+
+    #[test]
+    fn parse_chat_missing_message() {
+        assert!(Cli::parse(args(&["chat"])).is_err());
+    }
+
+    #[test]
+    fn parse_approve() {
+        let cli = Cli::parse(args(&["approve", "abc123"])).unwrap();
+        assert_eq!(cli.command, Command::Approve("abc123".to_owned()));
+    }
+
+    #[test]
+    fn parse_deny() {
+        let cli = Cli::parse(args(&["deny", "abc123"])).unwrap();
+        assert_eq!(cli.command, Command::Deny("abc123".to_owned()));
+    }
+
+    #[test]
+    fn parse_help_flag() {
+        let cli = Cli::parse(args(&["--help"])).unwrap();
+        assert_eq!(cli.command, Command::Help);
+    }
+
+    #[test]
+    fn parse_version_flag() {
+        let cli = Cli::parse(args(&["-V"])).unwrap();
+        assert!(cli.version);
+    }
+
+    #[test]
+    fn parse_json_flag() {
+        let cli = Cli::parse(args(&["--json", "status"])).unwrap();
+        assert!(cli.json);
+        assert_eq!(cli.command, Command::Status);
+    }
+
+    #[test]
+    fn parse_socket_flag() {
+        let cli = Cli::parse(args(&["--socket", "/tmp/test.sock", "status"])).unwrap();
+        assert_eq!(cli.socket_path, Some(PathBuf::from("/tmp/test.sock")));
+    }
+
+    #[test]
+    fn parse_unknown_command() {
+        assert!(Cli::parse(args(&["bogus"])).is_err());
+    }
+
+    #[test]
+    fn parse_no_args_is_help() {
+        let cli = Cli::parse(args(&[])).unwrap();
+        assert_eq!(cli.command, Command::Help);
+    }
+
+    // --- spawn ---
+
+    #[test]
+    fn parse_spawn_with_options() {
+        let cli = Cli::parse(args(&[
+            "spawn", "worker", "--name", "w1", "--model", "gpt-4",
+        ]))
+        .unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Spawn {
+                role: "worker".to_owned(),
+                name: Some("w1".to_owned()),
+                parent: None,
+                model: Some("gpt-4".to_owned()),
+            }
+        );
+    }
+
+    // --- events ---
+
+    #[test]
+    fn parse_events_snapshot() {
+        let cli = Cli::parse(args(&["events", "--snapshot"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Events {
+                replay_limit: Some(128),
+                since_event_id: None,
+                include_snapshot: true,
+                snapshot_only: true,
+            }
+        );
+    }
+
+    // --- run ---
+
+    #[test]
+    fn parse_run_with_cwd() {
+        let cli = Cli::parse(args(&["run", "--cwd", "/tmp", "build", "all"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Run {
+                cwd: Some(PathBuf::from("/tmp")),
+                task: "build all".to_owned(),
+            }
+        );
+    }
+
+    // --- worker subcommands ---
+
+    #[test]
+    fn parse_worker_tail() {
+        let cli = Cli::parse(args(&["worker", "tail", "w1", "--lines", "50"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Worker(WorkerCommand::Tail {
+                worker_id: "w1".to_owned(),
+                lines: Some(50),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_worker_result() {
+        let cli = Cli::parse(args(&["worker", "result", "w1"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Worker(WorkerCommand::Result {
+                worker_id: "w1".to_owned(),
+            })
+        );
+    }
+
+    // --- voice subcommands ---
+
+    #[test]
+    fn parse_voice_status() {
+        let cli = Cli::parse(args(&["voice"])).unwrap();
+        assert_eq!(cli.command, Command::Voice(VoiceCommand::Status));
+    }
+
+    #[test]
+    fn parse_voice_doctor() {
+        let cli = Cli::parse(args(&["voice", "doctor"])).unwrap();
+        assert_eq!(cli.command, Command::Voice(VoiceCommand::Doctor));
+    }
+
+    // --- workspace subcommands ---
+
+    #[test]
+    fn parse_workspace_list_with_grants() {
+        let cli = Cli::parse(args(&["workspace", "list", "--grants"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Workspace(WorkspaceCommand::List {
+                include_grants: true
+            })
+        );
+    }
+
+    #[test]
+    fn parse_workspace_doctor_cmd() {
+        let cli = Cli::parse(args(&["workspace", "doctor", "--workspace", "ws1"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Workspace(WorkspaceCommand::Doctor {
+                workspace_id: Some("ws1".to_owned()),
+                root: None,
+            })
+        );
+    }
+
+    // --- pure utility functions ---
+
+    #[test]
+    fn test_required_text_ok() {
+        let result = required_text(vec!["hello".into(), "world".into()], "fail").unwrap();
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_required_text_empty() {
+        assert!(required_text(vec![], "fail").is_err());
+        assert!(required_text(vec!["  ".into()], "fail").is_err());
+    }
+
+    #[test]
+    fn test_effective_model_label() {
+        assert_eq!(
+            effective_model_label(Some("ollama"), Some("llama3")),
+            "ollama/llama3"
+        );
+        assert_eq!(effective_model_label(Some("ollama"), None), "ollama");
+        assert_eq!(effective_model_label(None, Some("llama3")), "llama3");
+        assert_eq!(effective_model_label(None, None), "-");
+    }
+
+    #[test]
+    fn test_model_readiness_label() {
+        assert_eq!(
+            model_readiness_label(Some(cadis_protocol::ModelReadiness::Ready)),
+            "ready"
+        );
+        assert_eq!(
+            model_readiness_label(Some(cadis_protocol::ModelReadiness::Fallback)),
+            "fallback"
+        );
+        assert_eq!(model_readiness_label(None), "unknown");
+    }
+
+    #[test]
+    fn test_voice_state_name() {
+        assert_eq!(voice_state_name(VoiceRuntimeState::Ready), "ready");
+        assert_eq!(voice_state_name(VoiceRuntimeState::Disabled), "disabled");
+        assert_eq!(voice_state_name(VoiceRuntimeState::Unknown), "unknown");
+    }
+
+    #[test]
+    fn test_format_error() {
+        let error = ErrorPayload {
+            code: "test.error".to_owned(),
+            message: "something broke".to_owned(),
+            retryable: false,
+        };
+        assert_eq!(format_error(&error), "test.error: something broke");
+    }
+
+    #[test]
+    fn test_tool_input_from_args_file_read() {
+        let input = tool_input_from_args("file.read", &["src/main.rs".into()]);
+        assert_eq!(input["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn test_tool_input_from_args_shell_run() {
+        let input = tool_input_from_args("shell.run", &["ls".into(), "-la".into()]);
+        assert_eq!(input["command"], "ls -la");
+    }
+
+    #[test]
+    fn test_tool_input_from_args_unknown() {
+        let input = tool_input_from_args("custom.tool", &[]);
+        assert_eq!(input, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_parse_workspace_kind() {
+        assert_eq!(
+            parse_workspace_kind("project").unwrap(),
+            WorkspaceKind::Project
+        );
+        assert_eq!(
+            parse_workspace_kind("sandbox").unwrap(),
+            WorkspaceKind::Sandbox
+        );
+        assert!(parse_workspace_kind("invalid").is_err());
+    }
+
+    #[test]
+    fn test_parse_workspace_access_list() {
+        let access = parse_workspace_access_list("read,write").unwrap();
+        assert_eq!(access, vec![WorkspaceAccess::Read, WorkspaceAccess::Write]);
+        assert!(parse_workspace_access_list("bogus").is_err());
+    }
+}

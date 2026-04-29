@@ -411,6 +411,9 @@ pub enum ClientRequest {
     /// Set an agent model.
     #[serde(rename = "agent.model.set")]
     AgentModelSet(AgentModelSetRequest),
+    /// Set an agent specialist persona.
+    #[serde(rename = "agent.specialist.set")]
+    AgentSpecialistSet(AgentSpecialistSetRequest),
     /// Spawn an agent.
     #[serde(rename = "agent.spawn")]
     AgentSpawn(AgentSpawnRequest),
@@ -601,6 +604,19 @@ pub struct AgentModelSetRequest {
     pub agent_id: AgentId,
     /// Provider/model identifier.
     pub model: String,
+}
+
+/// Payload for selecting an agent specialist persona.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct AgentSpecialistSetRequest {
+    /// Target agent ID.
+    pub agent_id: AgentId,
+    /// Stable specialist identifier, for example `marketing` or `custom`.
+    pub specialist_id: String,
+    /// User-facing specialist label.
+    pub specialist_label: String,
+    /// Persona instructions applied to future tasks routed to this agent.
+    pub persona: String,
 }
 
 /// Payload for agent spawn.
@@ -845,6 +861,9 @@ pub enum CadisEvent {
     /// Agent model changed.
     #[serde(rename = "agent.model.changed")]
     AgentModelChanged(AgentModelChangedPayload),
+    /// Agent specialist persona changed.
+    #[serde(rename = "agent.specialist.changed")]
+    AgentSpecialistChanged(AgentSpecialistChangedPayload),
     /// Agent status changed.
     #[serde(rename = "agent.status.changed")]
     AgentStatusChanged(AgentStatusChangedPayload),
@@ -1046,6 +1065,15 @@ pub struct AgentEventPayload {
     /// Current lifecycle status.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<AgentStatus>,
+    /// Stable specialist identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialist_id: Option<String>,
+    /// User-facing specialist label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specialist_label: Option<String>,
+    /// Persona instructions applied to future tasks routed to this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
 }
 
 /// Agent roster snapshot payload.
@@ -1071,6 +1099,19 @@ pub struct AgentModelChangedPayload {
     pub agent_id: AgentId,
     /// Provider/model identifier.
     pub model: String,
+}
+
+/// Agent specialist change event payload.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct AgentSpecialistChangedPayload {
+    /// Agent ID.
+    pub agent_id: AgentId,
+    /// Stable specialist identifier.
+    pub specialist_id: String,
+    /// User-facing specialist label.
+    pub specialist_label: String,
+    /// Persona instructions applied to future tasks routed to this agent.
+    pub persona: String,
 }
 
 /// Agent status change event payload.
@@ -2671,6 +2712,38 @@ mod tests {
                     "effective_provider": "echo",
                     "effective_model": "cadis-local-fallback",
                     "fallback": false
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn agent_specialist_set_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("hud_1"),
+            ClientRequest::AgentSpecialistSet(AgentSpecialistSetRequest {
+                agent_id: AgentId::from("atlas"),
+                specialist_id: "marketing".to_owned(),
+                specialist_label: "Marketing".to_owned(),
+                persona: "Act as a senior growth marketer.".to_owned(),
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_1",
+                "client_id": "hud_1",
+                "type": "agent.specialist.set",
+                "payload": {
+                    "agent_id": "atlas",
+                    "specialist_id": "marketing",
+                    "specialist_label": "Marketing",
+                    "persona": "Act as a senior growth marketer."
                 }
             })
         );

@@ -88,6 +88,7 @@ approval.respond
 agent.list
 agent.rename
 agent.model.set
+agent.specialist.set
 agent.spawn
 agent.kill
 workspace.list
@@ -451,6 +452,7 @@ agent.spawned
 agent.list.response
 agent.renamed
 agent.model.changed
+agent.specialist.changed
 agent.status.changed
 agent.completed
 agent.session.started
@@ -829,6 +831,24 @@ actions.
   "model": "ollama/qwen2.5-coder"
 }
 ```
+
+### `agent.specialist.set`
+
+```json
+{
+  "type": "agent.specialist.set",
+  "agent_id": "atlas",
+  "specialist_id": "marketing",
+  "specialist_label": "Marketing",
+  "persona": "Act as a senior growth marketer. Translate goals into positioning, audience insights, campaigns, funnels, messaging, and measurable experiments."
+}
+```
+
+`cadisd` stores the specialist profile on the target agent and confirms with
+`agent.specialist.changed`. Future `message.send` requests routed to that agent
+include the specialist persona in the daemon-built model prompt. The main CADIS
+agent also receives a daemon-owned runtime summary of agent/session/worker state
+so it can orchestrate with awareness of what other agents are doing.
 
 ### `agent.spawn`
 

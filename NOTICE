@@ -1,6 +1,30 @@
 CADIS
 Copyright 2026 CADIS contributors.
 
-This baseline repository contains original planning and documentation only.
-No third-party source code has been imported.
+This product includes software developed by third-party projects.
+Major dependency categories and their licenses are listed below.
 
+Rust ecosystem (tokio, serde, reqwest, chrono, etc.):
+  MIT and/or Apache-2.0
+
+GUI (egui/eframe, winit, glutin):
+  MIT and/or Apache-2.0
+
+Fonts (epaint_default_fonts):
+  Ubuntu Font — Ubuntu Font Licence 1.0 (UFL-1.0)
+  Additional fonts — SIL Open Font License 1.1 (OFL-1.1)
+
+TLS (ring, rustls, webpki-roots):
+  ISC, MIT/Apache-2.0, CDLA-Permissive-2.0
+
+Accessibility (accesskit, atspi, zbus):
+  MIT and/or Apache-2.0
+
+HUD frontend (React, TypeScript, Vite, Tauri):
+  MIT
+
+The complete dependency lists are recorded in:
+  Cargo.lock              — Rust crates
+  apps/cadis-hud/pnpm-lock.yaml — Node/frontend packages
+
+License compliance is enforced via cargo-deny in CI.

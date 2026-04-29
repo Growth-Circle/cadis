@@ -29,7 +29,7 @@ default_profile = "default"
 provider = "auto"
 ollama_model = "llama3.2"
 ollama_endpoint = "http://127.0.0.1:11434"
-openai_model = "gpt-5.2"
+openai_model = "gpt-4o"
 openai_base_url = "https://api.openai.com/v1"
 
 [hud]
@@ -63,7 +63,9 @@ max_total_agents = 32
 [agent_runtime]
 # Applies to daemon-owned per-route AgentSession records.
 default_timeout_sec = 900
-max_steps_per_session = 1
+# Tool-call loop steps per route. Default 1 limits multi-step agent workflows.
+# Increase to 10-20 for real coding or research tasks.
+max_steps_per_session = 8
 
 [orchestrator]
 # Enables explicit /worker, /spawn, /route, and /delegate message actions.

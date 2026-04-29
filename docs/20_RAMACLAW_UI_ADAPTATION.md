@@ -207,6 +207,7 @@ Add these requests:
 ```text
 agent.rename
 agent.model.set
+agent.specialist.set
 models.list
 ui.preferences.get
 ui.preferences.set
@@ -220,6 +221,7 @@ Add or confirm these events:
 ```text
 agent.renamed
 agent.model.changed
+agent.specialist.changed
 models.list.response
 ui.preferences.updated
 voice.preview.started
@@ -342,4 +344,3 @@ CADIS UI adaptation is complete when:
 - auto-speak follows CADIS content routing policy
 - no UI client executes tools directly
 - no OpenClaw file path remains in CADIS runtime docs or code
-

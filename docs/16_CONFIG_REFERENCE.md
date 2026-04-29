@@ -146,7 +146,7 @@ max_total_agents = 32
 [agent_runtime]
 # Applies to daemon-owned per-route AgentSession records.
 default_timeout_sec = 900
-max_steps_per_session = 1
+max_steps_per_session = 8
 
 [orchestrator]
 # Enables explicit /worker, /spawn, /route, and /delegate message actions.
@@ -234,6 +234,9 @@ id = "main"
 display_name = "CADIS"
 role = "Orchestrator"
 model = "auto"
+specialist_id = "orchestrator"
+specialist_label = "Orchestrator"
+persona = "Coordinate the CADIS agent cluster, track agent work, route tasks, and summarize cross-agent progress."
 
 [files]
 persona = "PERSONA.md"
@@ -481,6 +484,14 @@ Plain provider names such as `echo` or `ollama` select that provider with the
 configured model. Plain model names select the configured default provider with
 that model where the provider supports model overrides. Message events include
 the effective provider and model used for the response.
+
+Per-agent specialist selections set through `agent.specialist.set` are stored by
+`cadisd` and included in future daemon-built prompts for that agent. The HUD
+offers curated specialist choices such as Engineering, Research, Marketing,
+Product, Design, Data, Automation, Security, Operations, Finance, and Writing,
+plus a Custom persona. The main CADIS prompt also includes a compact runtime
+summary of known agents, recent agent sessions, and workers so orchestration can
+account for what the rest of the cluster is doing.
 
 The `models.list` protocol response exposes conservative readiness metadata for
 clients and uses the configured `ollama_model` and `openai_model` as

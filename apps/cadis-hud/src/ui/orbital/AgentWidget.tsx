@@ -42,7 +42,7 @@ export function AgentWidget({
           {agent.status}
         </span>
       </div>
-      <div className="agent-widget__role">{agent.spec.role}</div>
+      <div className="agent-widget__role">{agent.spec.role} · {agent.specialist.label}</div>
       <div className="agent-widget__task">
         <span className="agent-widget__verb">{agent.currentTask.verb}</span>
         <span className="agent-widget__target">{agent.currentTask.target}</span>

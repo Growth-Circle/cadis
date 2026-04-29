@@ -1,5 +1,10 @@
 import { create } from "zustand";
 import { AGENT_ROSTER, type AgentSpec, type AgentStatus } from "../lib/agents-roster.js";
+import {
+  defaultSpecialistForRole,
+  normalizeSpecialistProfile,
+  type AgentSpecialistProfile,
+} from "../lib/agent-specialists.js";
 import { DEFAULT_VOICE_PREFS, type VoicePrefs } from "../lib/voice/voices.js";
 import { THEMES as THEME_DEFS, type ThemeKey } from "../styles/themes.js";
 
@@ -12,6 +17,7 @@ export type AgentLive = {
   spec: AgentSpec;
   status: AgentStatus;
   currentTask: { verb: string; target: string; detail: string };
+  specialist: AgentSpecialistProfile;
   uptimeSeconds: number;
   parentAgentId?: string;
 };
@@ -40,6 +46,8 @@ export type ApprovalRecord = {
   agentId: string;
   ts: number;
   timeoutMs?: number;
+  summary?: string;
+  expiresAt?: string;
 };
 
 export type AgentSessionStatus =
@@ -163,6 +171,7 @@ export type HudStore = {
   setAvatarStyle: (style: AvatarStyle) => void;
   pushChat: (m: ChatMessage) => void;
   upsertChat: (m: ChatMessage) => void;
+  clearChat: () => void;
   setAgentStatus: (id: string, s: AgentStatus) => void;
   setAgentTask: (id: string, task: Partial<AgentLive["currentTask"]>) => void;
   setVoiceState: (s: HudStore["voiceState"]) => void;
@@ -178,6 +187,7 @@ export type HudStore = {
   setBackgroundOpacity: (value: number) => void;
   setAvailableModels: (m: string[], defaultModel: string | null) => void;
   setAgentModel: (agentId: string, model: string) => void;
+  setAgentSpecialist: (agentId: string, specialist: AgentSpecialistProfile) => void;
   setChatPreferences: (patch: Partial<ChatPreferences>) => void;
   pushApproval: (a: ApprovalRecord) => void;
   removeApproval: (id: string) => void;
@@ -216,6 +226,7 @@ function seedAgentModels(): AgentModelMap {
 }
 
 function buildSeedAgent(spec: AgentSpec, agentModels: AgentModelMap): AgentLive {
+  const specialist = defaultSpecialistForRole(spec.role);
   return {
     spec,
     status: spec.id === "main" ? "idle" : "waiting",
@@ -224,6 +235,7 @@ function buildSeedAgent(spec: AgentSpec, agentModels: AgentModelMap): AgentLive 
       target: spec.id === "main" ? "CADIS agent" : `${spec.name} agent`,
       detail: agentModels[spec.id] ?? FALLBACK_MAIN_MODEL,
     },
+    specialist,
     uptimeSeconds: 0,
   };
 }
@@ -284,6 +296,7 @@ export const useHud = create<HudStore>((set) => ({
       next[idx] = message;
       return { chat: next };
     }),
+  clearChat: () => set({ chat: [] }),
   setAgentStatus: (id, status) =>
     set((s) => ({
       agents: s.agents.map((agent) => (agent.spec.id === id ? { ...agent, status } : agent)),
@@ -336,6 +349,20 @@ export const useHud = create<HudStore>((set) => ({
       agents: s.agents.map((agent) =>
         agent.spec.id === agentId
           ? { ...agent, currentTask: { ...agent.currentTask, detail: model } }
+          : agent,
+      ),
+    })),
+  setAgentSpecialist: (agentId, specialist) =>
+    set((s) => ({
+      agents: s.agents.map((agent) =>
+        agent.spec.id === agentId
+          ? {
+              ...agent,
+              specialist: normalizeSpecialistProfile(
+                specialist,
+                defaultSpecialistForRole(agent.spec.role),
+              ),
+            }
           : agent,
       ),
     })),

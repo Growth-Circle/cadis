@@ -150,7 +150,7 @@ impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
             default_timeout_sec: 900,
-            max_steps_per_session: 1,
+            max_steps_per_session: 8,
         }
     }
 }

@@ -1,26 +1,50 @@
 import { useEffect, useState } from "react";
 import { normalizeAgentName, useHud } from "../hudState.js";
-import { sendAgentRename } from "../cadisActions.js";
+import { sendAgentRename, sendAgentSpecialistUpdate } from "../cadisActions.js";
+import {
+  buildCustomSpecialist,
+  CUSTOM_SPECIALIST_ID,
+  CUSTOM_SPECIALIST_OPTION,
+  SPECIALIST_OPTIONS,
+  defaultSpecialistForRole,
+  specialistOption,
+} from "../../lib/agent-specialists.js";
 
 export function AgentRenameDialog() {
   const target = useHud((s) => s.agentRenameTarget);
   const agent = useHud((s) => s.agents.find((a) => a.spec.id === s.agentRenameTarget));
   const close = useHud((s) => s.setAgentRenameTarget);
   const [name, setName] = useState("");
+  const [specialistId, setSpecialistId] = useState("");
+  const [customLabel, setCustomLabel] = useState("");
+  const [customPersona, setCustomPersona] = useState("");
   const [warning, setWarning] = useState<string | null>(null);
 
   useEffect(() => {
+    const fallback = defaultSpecialistForRole(agent?.spec.role ?? "");
+    const current = agent?.specialist ?? fallback;
+    const known = specialistOption(current.id);
     setName(agent?.spec.name ?? "");
+    setSpecialistId(known ? current.id : CUSTOM_SPECIALIST_ID);
+    setCustomLabel(known ? "" : current.label);
+    setCustomPersona(current.persona);
     setWarning(null);
-  }, [target, agent?.spec.name]);
+  }, [target, agent?.spec.name, agent?.spec.role, agent?.specialist]);
 
   if (!target || !agent) return null;
 
+  const selectedSpecialist =
+    specialistId === CUSTOM_SPECIALIST_ID
+      ? buildCustomSpecialist(customLabel, customPersona)
+      : specialistOption(specialistId) ?? defaultSpecialistForRole(agent.spec.role);
+
   const submit = () => {
     const next = normalizeAgentName(name);
-    const delivered = sendAgentRename(target, next);
+    const renameDelivered = sendAgentRename(target, next);
+    const specialistDelivered = sendAgentSpecialistUpdate(target, selectedSpecialist);
+    const delivered = renameDelivered && specialistDelivered;
     if (delivered) close(null);
-    else setWarning("CADIS daemon is not connected. The display name will update after daemon confirmation.");
+    else setWarning("CADIS daemon is not connected. Agent settings will update after daemon confirmation.");
   };
 
   return (
@@ -34,7 +58,7 @@ export function AgentRenameDialog() {
         }}
       >
         <header className="voice-config__head">
-          <span className="voice-config__brand">RENAME · AGENT</span>
+          <span className="voice-config__brand">AGENT · SETTINGS</span>
           <button
             type="button"
             className="voice-config__close"
@@ -57,6 +81,59 @@ export function AgentRenameDialog() {
             maxLength={32}
             autoFocus
             onChange={(e) => setName(e.target.value)}
+          />
+        </section>
+
+        <section className="voice-config__row">
+          <label className="voice-config__label" htmlFor="agent-specialist-input">
+            Specialist
+            <span className="voice-config__value">{selectedSpecialist.label}</span>
+          </label>
+          <select
+            id="agent-specialist-input"
+            className="voice-config__select"
+            value={specialistId}
+            onChange={(e) => setSpecialistId(e.target.value)}
+          >
+            {SPECIALIST_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>{option.label}</option>
+            ))}
+            <option value={CUSTOM_SPECIALIST_OPTION.id}>{CUSTOM_SPECIALIST_OPTION.label}</option>
+          </select>
+        </section>
+
+        {specialistId === CUSTOM_SPECIALIST_ID && (
+          <section className="voice-config__row">
+            <label className="voice-config__label" htmlFor="agent-specialist-label-input">
+              Custom label
+              <span className="voice-config__value">{selectedSpecialist.label}</span>
+            </label>
+            <input
+              id="agent-specialist-label-input"
+              className="voice-config__input"
+              value={customLabel}
+              maxLength={48}
+              onChange={(e) => setCustomLabel(e.target.value)}
+            />
+          </section>
+        )}
+
+        <section className="voice-config__row">
+          <label className="voice-config__label" htmlFor="agent-persona-input">
+            Persona
+            <span className="voice-config__value">{selectedSpecialist.id}</span>
+          </label>
+          <textarea
+            id="agent-persona-input"
+            className="voice-config__input voice-config__textarea"
+            value={selectedSpecialist.persona}
+            rows={5}
+            maxLength={1200}
+            onChange={(e) => {
+              if (specialistId !== CUSTOM_SPECIALIST_ID) return;
+              setCustomPersona(e.target.value);
+            }}
+            readOnly={specialistId !== CUSTOM_SPECIALIST_ID}
           />
         </section>
 

@@ -1188,6 +1188,74 @@ mod tests {
             CadisEvent::DaemonStarted(EmptyPayload::default()),
         )
     }
+
+    #[test]
+    fn bounded_replay_returns_empty_for_zero_limit() {
+        let replay = VecDeque::from(vec![event("evt_000001"), event("evt_000002")]);
+        let result = bounded_replay(&replay, None, Some(0), 8, &EventFilter::All);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn bounded_replay_returns_all_when_no_since_id() {
+        let replay = VecDeque::from(vec![
+            event("evt_000001"),
+            event("evt_000002"),
+            event("evt_000003"),
+        ]);
+        let result = bounded_replay(&replay, None, Some(2), 8, &EventFilter::All);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].event_id.as_str(), "evt_000002");
+        assert_eq!(result[1].event_id.as_str(), "evt_000003");
+    }
+
+    #[test]
+    fn event_bus_removes_disconnected_subscribers() {
+        let bus = EventBus::new(8);
+        let (_replay, receiver) =
+            bus.subscribe(EventBusSubscription::all(&EventSubscriptionRequest {
+                include_snapshot: false,
+                replay_limit: Some(8),
+                since_event_id: None,
+            }));
+        drop(receiver);
+
+        bus.publish(event("evt_000001"));
+
+        let inner = bus.inner.lock().expect("bus mutex should lock");
+        assert!(inner.subscribers.is_empty());
+    }
+
+    #[test]
+    fn args_parse_check_flag() {
+        let args = Args::parse(["--check"].map(String::from)).expect("should parse");
+        assert!(args.check);
+    }
+
+    #[test]
+    fn args_parse_version_flag() {
+        let args = Args::parse(["--version"].map(String::from)).expect("should parse");
+        assert!(args.version);
+    }
+
+    #[test]
+    fn args_parse_dev_echo_flag() {
+        let args = Args::parse(["--dev-echo"].map(String::from)).expect("should parse");
+        assert!(args.dev_echo);
+    }
+
+    #[test]
+    fn args_parse_socket_path() {
+        let args =
+            Args::parse(["--socket", "/tmp/test.sock"].map(String::from)).expect("should parse");
+        assert_eq!(args.socket_path, Some(PathBuf::from("/tmp/test.sock")));
+    }
+
+    #[test]
+    fn args_parse_unknown_flag_errors() {
+        let result = Args::parse(["--unknown"].map(String::from));
+        assert!(result.is_err());
+    }
 }
 
 fn write_frame(writer: &mut impl Write, frame: &ServerFrame) -> Result<(), Box<dyn Error>> {

@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-This document defines CADIS platform support during the pre-alpha runtime
+This document defines CADIS platform support during the beta runtime
 slice. It separates primary runtime targets from source validation so docs and
 CI do not overstate current support.
 
@@ -75,6 +75,16 @@ cargo check -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p 
 cargo clippy -p cadis-protocol -p cadis-policy -p cadis-store -p cadis-models -p cadis-avatar --all-targets --all-features -- -D warnings
 cargo test -p cadis-protocol -p cadis-policy -p cadis-models -p cadis-avatar --all-targets --all-features
 ```
+
+## 4.1 Release Workflow
+
+The release workflow at `.github/workflows/release.yml` builds binaries for:
+
+- `x86_64-unknown-linux-gnu` (native)
+- `aarch64-unknown-linux-gnu` (cross-compiled)
+
+Release artifacts include `cadis` and `cadisd` binaries with SHA-256 checksums.
+The Tauri HUD is not included in release artifacts and must be built from source.
 
 ## 5. Promotion Requirements
 

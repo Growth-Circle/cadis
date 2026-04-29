@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AGENT_ROSTER } from "../lib/agents-roster.js";
+import { defaultSpecialistForRole } from "../lib/agent-specialists.js";
 import { DEFAULT_VOICE_PREFS } from "../lib/voice/voices.js";
 import { ChatPanel } from "./chat/ChatPanel.js";
 import { handleCadisFrameForTest, _resetCadisActionsForTest } from "./cadisActions.js";
@@ -38,6 +39,7 @@ const INITIAL_AGENTS: AgentLive[] = AGENT_ROSTER.map((agent) => ({
     target: agent.id === "main" ? "CADIS agent" : `${agent.name} agent`,
     detail: "openai/gpt-5.5",
   },
+  specialist: defaultSpecialistForRole(agent.role),
   uptimeSeconds: 0,
 }));
 
