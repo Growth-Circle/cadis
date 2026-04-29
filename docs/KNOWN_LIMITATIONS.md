@@ -1,6 +1,6 @@
 # Known Limitations
 
-This document lists known limitations of the current C.A.D.I.S. v0.9.2 beta.
+This document lists known limitations of C.A.D.I.S. v1.1.x.
 
 ## Platform
 
@@ -10,11 +10,15 @@ This document lists known limitations of the current C.A.D.I.S. v0.9.2 beta.
   exist.
 - **aarch64 Linux not natively tested.** aarch64 Linux binaries are
   cross-compiled but not natively tested in CI.
+- **HUD macOS bundle fails on icon format.** The Tauri macOS `.dmg` bundle
+  requires icon assets that are not yet generated. HUD works via
+  `pnpm tauri:dev` on macOS.
 
 ## Networking
 
-- **No remote relay.** All communication is local Unix socket. There is no
-  remote daemon access, multi-machine relay, or cloud orchestration.
+- **No remote relay.** The daemon communicates via local Unix socket (Linux /
+  macOS) or local TCP (`127.0.0.1:7433` on Windows or via `--tcp-port`). There
+  is no remote daemon access, multi-machine relay, or cloud orchestration.
 
 ## Voice
 
@@ -37,13 +41,13 @@ This document lists known limitations of the current C.A.D.I.S. v0.9.2 beta.
   scheduling, but individual tool calls within a session execute sequentially.
   Async cancellation is not implemented yet; no cancellation propagation to
   running subprocesses.
-- **No Windows or macOS installer.** Linux users can use the AppImage or .deb
-  from GitHub Releases.
 - **cadis-core lib.rs partial extraction done.** Major modules have been
   extracted into separate files, but some subsystems still carry significant
   inline logic. Further decomposition is ongoing.
 - **Worker artifact view in HUD is read-only.** Apply/discard actions route
   through daemon approval but the full patch-apply flow needs more work.
+- **`file.patch` lacks atomic writes.** Structured file patching works but does
+  not yet use atomic temp-file writes or concurrent-edit protection.
 
 ## Configuration
 

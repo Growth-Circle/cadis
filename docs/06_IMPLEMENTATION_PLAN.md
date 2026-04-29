@@ -94,31 +94,29 @@ Implemented in the first runnable baseline:
 
 Still pending:
 
-- Production hardening for native mutating file/shell tools. Approved
-  `shell.run` and structured `file.patch` execution now exist after daemon-side
-  approval plus workspace/input revalidation, but `shell.run` still needs a
-  minimal environment allowlist and typed async cancellation, while `file.patch`
-  still needs atomic temp-file writes and broader concurrent-edit hardening.
-- Agent runtime beyond the current route-and-answer path: model-driven spawn,
-  multi-step budgets, full tool cancellation, and a provider/tool-call loop
-  remain future work; existing `agent.spawn` is client-requested, not
-  agent-driven.
-- Configurable worker command/test orchestration, worker worktree file removal,
-  Telegram/mobile adapters, daemon-owned production voice output, and code work
-  panel apply/cleanup actions. The current worker execution slice creates git
-  worktrees for session-bound project workspaces, runs a bounded daemon-owned
-  validation command in the worker worktree, writes profile-scoped worker
-  artifacts, exposes read-only `worker.result`, and records fail-closed cleanup
-  planning metadata without deleting worktree files or applying patches to the
-  parent checkout.
-- Denied-path enforcement for all mutating tools, checkpoint/rollback manager,
-  dedicated profile/agent doctor commands, and media asset manifests.
-- Future daemon-owned memory architecture from `25_MEMORY_CONCEPT.md`, including
-  memory records, scoped retrieval, provenance ledger, candidate promotion, and
-  memory capsules.
-- Codex CLI native token streaming; the current adapter streams normalized
-  callback events from `codex exec` output, but its granularity is limited by
-  the official CLI's stdout behavior.
+- **Tool hardening.** `shell.run` has environment allowlist and approval gates
+  but still needs typed async cancellation with propagation to running
+  subprocesses. `file.patch` needs atomic temp-file writes and concurrent-edit
+  protection.
+- **Agent runtime.** Model-driven spawn, multi-step tool-call loops, and worker
+  concurrency scheduling exist. Still pending: full async tool cancellation and
+  cancellation propagation into active provider streams.
+- **Worker lifecycle.** Worker worktrees, daemon-owned validation, and
+  profile-scoped artifacts are implemented. Still pending: configurable
+  test orchestration, worktree file cleanup/removal, and code work panel
+  apply/discard actions beyond read-only view.
+- **Clients.** Telegram adapter has DaemonBridge but is not production-tested.
+  No mobile client yet.
+- **Voice.** Edge TTS works as subprocess bridge through HUD. Daemon-owned
+  production TTS provider and native Whisper integration are future work.
+- **Memory.** Future daemon-owned memory architecture from
+  `25_MEMORY_CONCEPT.md` (memory records, scoped retrieval, provenance ledger,
+  candidate promotion, memory capsules).
+- **Codex CLI streaming.** Current adapter streams normalized callback events
+  from `codex exec` output; granularity is limited by the official CLI's stdout
+  behavior.
+- **HUD macOS bundle.** Icon assets need to be generated for Tauri macOS `.dmg`
+  bundling. HUD works via `pnpm tauri:dev`.
 
 ## 2.2 Next Execution Plan
 
