@@ -6,10 +6,19 @@ set -euo pipefail
 CHECKLIST="docs/07_MASTER_CHECKLIST.md"
 OUTPUT="docs/progress.json"
 
-done=$(grep -c '^\- \[x\]' "$CHECKLIST" || true)
+if [ ! -f "$CHECKLIST" ]; then
+  echo "ERROR: checklist file not found: $CHECKLIST" >&2
+  exit 1
+fi
+
+done=$(grep -c '^\- \[[xX]\]' "$CHECKLIST" || true)
 todo=$(grep -c '^\- \[ \]' "$CHECKLIST" || true)
 total=$((done + todo))
-pct=$((done * 100 / total))
+if [ "$total" -eq 0 ]; then
+  pct=0
+else
+  pct=$((done * 100 / total))
+fi
 
 # Determine current milestone and next target
 if [ "$pct" -lt 80 ]; then
@@ -45,4 +54,4 @@ cat > "$OUTPUT" <<EOF
 }
 EOF
 
-echo "Progress: $done/$total ($pct%) — $milestone → $next at ${target}%"
+echo "Progress: $done/$total ($pct%) -- $milestone -> $next at ${target}%"
