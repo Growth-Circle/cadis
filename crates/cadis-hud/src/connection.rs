@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::process;
 use std::sync::mpsc::Sender;
