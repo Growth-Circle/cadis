@@ -39,22 +39,9 @@
   <sub>C.A.D.I.S. HUD: local daemon status, orbital agents, voice I/O, model routing, and approval-aware desktop control.</sub>
 </p>
 
-<p align="center">
-  <img src="docs/assets/readme/wulan-avatar-concept.jpg" alt="Wulan avatar concept for C.A.D.I.S. with luminous network lines and local-first identity presence" width="360" />
-</p>
-
-<p align="center">
-  <sub>Wulan avatar direction: renderer-neutral identity, presence, and expression layer for future C.A.D.I.S. clients.</sub>
-</p>
-
-C.A.D.I.S. is a Rust-first, local-first, model-agnostic runtime for coordinating
-AI agents across a desktop HUD, CLI, voice, approvals, native tools, and
-isolated coding work. The repository and binaries stay lowercase as `cadis` and
-`cadisd`, while the public product name is written as **C.A.D.I.S.**
-
-The daemon, `cadisd`, is the runtime authority. Every interface, whether CLI,
-HUD, voice, or future Telegram/mobile surfaces, is a protocol client rather
-than a separate backend.
+C.A.D.I.S. is a **Rust-first, local-first, model-agnostic** runtime where one
+daemon (`cadisd`) owns all agent orchestration, tool policy, and approval state.
+CLI, HUD, voice, and future surfaces are protocol clients — not separate backends.
 
 ```text
 HUD / CLI / Voice / Telegram / Android
@@ -64,197 +51,40 @@ HUD / CLI / Voice / Telegram / Android
      agents, models, tools, policy, store
 ```
 
-## Why C.A.D.I.S. exists
-
-Modern AI tooling is often fragmented across browser tabs, terminal sessions,
-background scripts, and app-specific state. C.A.D.I.S. brings that control
-plane into one local daemon with typed events, explicit approvals, and runtime
-boundaries that stay inspectable.
-
-It is meant to feel like an operating layer, not a chatbot wrapper.
-
-## Design principles
-
-- **Local-first**: state, logs, approvals, and orchestration live on your machine.
-- **Rust-first core**: critical runtime paths stay in Rust for predictability and performance.
-- **Model-agnostic**: support local and remote providers behind one daemon contract.
-- **Policy-gated**: risky actions must pass centralized approval and audit paths.
-- **Interface-agnostic**: the daemon owns runtime behavior; clients render and control it.
-- **Workload-aware**: code-heavy tasks should flow differently from normal chat.
-
-## Current status
-
-C.A.D.I.S. is currently in **beta** (v0.9).
-
-The repository already includes a meaningful cross-platform MVP foundation:
-
-- `cadisd`: local daemon and protocol authority
-- `cadis`: CLI client for status, models, agents, spawn, chat, tools, and doctor checks
-- `apps/cadis-hud`: Tauri + React HUD prototype
-- `crates/cadis-avatar`: renderer-neutral Wulan avatar state engine contract,
-  with a feature-gated adapter-ready wgpu render-plan spike
-- typed protocol events for messages, models, agents, approvals, workspaces,
-  orchestrator routing, and workers, with typed `AgentRole` and `WorkerState`
-  enums
-- JSONL event persistence with redaction boundaries
-- profile-local agent homes, workspace registry, and grants for safe-read tools
-- optional Ollama, OpenAI API, and Codex CLI model adapters, with native
-  streaming for Ollama and OpenAI
-- official Codex CLI adapter for ChatGPT Plus/Pro login flows
-- daemon-owned Edge TTS provider via `edge-tts` subprocess, with voice ID
-  validation, text truncation, and speech policy routing
-- daemon-visible voice status/doctor/preflight with HUD-local Edge TTS
-  playback and `whisper-cli` voice input bridges
-
-Approved `shell.run` and structured `file.patch` execution have daemon-side
-approval plus workspace/input revalidation, shell environment filtering via
-allowlist, secret-file gating, denied-path enforcement, and approval expiry
-recheck before execution. Worker execution creates isolated worktrees, runs
-configurable daemon-owned validation commands, writes profile-scoped artifacts,
-exposes read-only `worker.result`, and supports approved worktree cleanup
-removal. The agent runtime supports model-driven spawn (capped and sanitized),
-multi-step tool-call loops, agent kill/tail, and worker concurrency scheduling
-with queue promotion. The HUD code work panel routes apply/discard actions
-through daemon protocol and validates editor paths against CADIS-owned
-worktrees. Profile CRUD, checkpoint/rollback, and media manifests with
-provenance tracking are available through the store layer. Planned work still
-includes full async tool cancellation, Telegram/mobile clients, native Wulan
-avatar engine, and production hardening for concurrent-edit protection.
-
-## Platform support
-
-- **Linux desktop**: primary runtime and HUD target (AppImage, .deb).
-- **macOS**: full test suite, daemon and CLI work, HUD via `pnpm tauri:dev` (.dmg planned).
-- **Windows**: full test suite with TCP transport, daemon and CLI work, HUD via `pnpm tauri:dev` (.msi planned).
-
-See the [Platform Baseline](docs/28_PLATFORM_BASELINE.md) for the support
-matrix and the exact macOS/Windows CI commands.
-
-## Core capabilities
-
-### 1. Daemon-owned runtime
-
-C.A.D.I.S. keeps execution authority inside `cadisd`. UI clients do not own
-agent orchestration, tool policy, or approval state.
-
-### 2. Multi-agent control surface
-
-The system is built to manage a main orchestrator plus specialist agents,
-workers, and background tasks through one event protocol.
-
-### 3. Native tool runtime
-
-Core capabilities are intended to be native tools first, not just external
-bridges. Early runtime coverage includes read-only file and git flows, approval
-gates for risky actions, and a workspace-aware execution model.
-
-### 4. Approval and policy boundaries
-
-Risk classification, approval state, and audit visibility are first-class parts
-of the architecture, not an afterthought.
-
-### 5. Multiple interfaces
-
-The same daemon is meant to serve:
-
-- CLI workflows
-- desktop HUD workflows
-- voice-enabled control
-- future Telegram and remote surfaces
-
-### 6. Avatar and presence engine
-
-C.A.D.I.S. also treats identity, expression, and presence as first-class runtime
-concerns. The `cadis-avatar` crate is the renderer-neutral contract for Wulan
-avatar state so HUD, voice, and future remote clients can render a consistent
-presence without moving core orchestration out of `cadisd`.
-
 ## Installation
 
 ### npm (all platforms)
 
-The fastest way to install C.A.D.I.S. Pre-built binaries are resolved
-automatically for your platform.
-
 ```bash
 npm install -g @growthcircle/cadis
 ```
 
-Supported: Linux x64/arm64, macOS x64/arm64 (Apple Silicon), Windows x64.
-
-### Linux
-
-<details>
-<summary>Terminal (bash / zsh)</summary>
+### Shell (Linux / macOS)
 
 ```bash
-# Via npm
-npm install -g @growthcircle/cadis
-
-# Or download the binary directly
-curl -fsSL https://github.com/Growth-Circle/cadis/releases/latest/download/cadis-x86_64-unknown-linux-gnu -o cadis
-curl -fsSL https://github.com/Growth-Circle/cadis/releases/latest/download/cadisd-x86_64-unknown-linux-gnu -o cadisd
+curl -fsSL https://github.com/Growth-Circle/cadis/releases/latest/download/cadis-$(uname -m | sed 's/arm64/aarch64/')-$([ "$(uname)" = "Darwin" ] && echo apple-darwin || echo unknown-linux-gnu) -o cadis
+curl -fsSL https://github.com/Growth-Circle/cadis/releases/latest/download/cadisd-$(uname -m | sed 's/arm64/aarch64/')-$([ "$(uname)" = "Darwin" ] && echo apple-darwin || echo unknown-linux-gnu) -o cadisd
 chmod +x cadis cadisd
 sudo mv cadis cadisd /usr/local/bin/
-
-# arm64 users: replace x86_64-unknown-linux-gnu with aarch64-unknown-linux-gnu
 ```
 
-</details>
-
-### macOS
-
-<details>
-<summary>Terminal (zsh)</summary>
-
-```bash
-# Via npm
-npm install -g @growthcircle/cadis
-
-# Or download the binary directly (Apple Silicon)
-curl -fsSL https://github.com/Growth-Circle/cadis/releases/latest/download/cadis-aarch64-apple-darwin -o cadis
-curl -fsSL https://github.com/Growth-Circle/cadis/releases/latest/download/cadisd-aarch64-apple-darwin -o cadisd
-chmod +x cadis cadisd
-sudo mv cadis cadisd /usr/local/bin/
-
-# Intel Mac users: replace aarch64-apple-darwin with x86_64-apple-darwin
-```
-
-</details>
-
-### Windows
-
-<details>
-<summary>PowerShell</summary>
+### PowerShell (Windows)
 
 ```powershell
-# Via npm
-npm install -g @growthcircle/cadis
-
-# Or download the binary directly
-Invoke-WebRequest -Uri "https://github.com/Growth-Circle/cadis/releases/latest/download/cadis-x86_64-pc-windows-msvc.exe" -OutFile "$env:LOCALAPPDATA\cadis\cadis.exe"
-Invoke-WebRequest -Uri "https://github.com/Growth-Circle/cadis/releases/latest/download/cadisd-x86_64-pc-windows-msvc.exe" -OutFile "$env:LOCALAPPDATA\cadis\cadisd.exe"
-
-# Add to PATH (run once)
-$cadisDir = "$env:LOCALAPPDATA\cadis"
-New-Item -ItemType Directory -Force -Path $cadisDir | Out-Null
+$cadisDir = "$env:LOCALAPPDATA\cadis"; New-Item -ItemType Directory -Force -Path $cadisDir | Out-Null
+Invoke-WebRequest "https://github.com/Growth-Circle/cadis/releases/latest/download/cadis-x86_64-pc-windows-msvc.exe" -OutFile "$cadisDir\cadis.exe"
+Invoke-WebRequest "https://github.com/Growth-Circle/cadis/releases/latest/download/cadisd-x86_64-pc-windows-msvc.exe" -OutFile "$cadisDir\cadisd.exe"
 [Environment]::SetEnvironmentVariable("Path", "$cadisDir;$([Environment]::GetEnvironmentVariable('Path', 'User'))", "User")
 ```
 
-</details>
-
 ### Build from source
 
-Requires [Rust 1.75+](https://rustup.rs/).
-
 ```bash
-git clone https://github.com/Growth-Circle/cadis.git
-cd cadis
-cargo build --release
-# Binaries: target/release/cadis, target/release/cadisd
+git clone https://github.com/Growth-Circle/cadis.git && cd cadis
+cargo build --release    # requires Rust 1.75+
 ```
 
-### Verify installation
+### Verify
 
 ```bash
 cadis --version
@@ -268,96 +98,51 @@ cadisd --check
 cadisd
 
 # In another terminal
-cadis status          # check daemon status
-cadis doctor          # run diagnostics
-cadis models          # list available models
-cadis agents          # list agents
-cadis chat "hello"    # send a message
+cadis status          # daemon health
+cadis doctor          # diagnostics
+cadis models          # available models
+cadis agents          # running agents
+cadis chat "hello"    # talk to an agent
 ```
 
 > **Windows**: the daemon uses TCP by default (`127.0.0.1:7433`). You can also
 > start it explicitly with `cadisd --tcp-port 7433` and use `cadis --tcp status`.
 
-### Run the HUD
+## Features
 
-```bash
-cd apps/cadis-hud
-corepack enable
-pnpm install
-pnpm tauri:dev
-```
-
-The HUD resolves the daemon socket from `CADIS_HUD_SOCKET`, `CADIS_SOCKET`,
-`~/.cadis/config.toml`, `$XDG_RUNTIME_DIR/cadis/cadisd.sock`, or
-`~/.cadis/run/cadisd.sock`.
+- **Daemon-owned runtime** — `cadisd` is the single authority for agents, tools, policy, and state
+- **Multi-agent orchestration** — main orchestrator + specialist agents + isolated code workers
+- **Native tool runtime** — file, git, shell, and workspace tools with approval gates
+- **Policy and approvals** — risk classification, audit trails, and expiry-checked approval state
+- **Model-agnostic** — Ollama, OpenAI API, and Codex CLI adapters with native streaming
+- **Voice I/O** — Edge TTS output + Whisper transcription input via the HUD
+- **Desktop HUD** — Tauri + React orbital interface with model routing and agent control
+- **Avatar engine** — renderer-neutral Wulan identity/presence/expression contract
+- **Cross-platform** — Linux, macOS, and Windows with TCP transport fallback
 
 ## Model provider setup
 
-Default mode is `auto`: C.A.D.I.S. tries Ollama at
-`http://127.0.0.1:11434`, then falls back to a local credential-free response
-if Ollama is unavailable. Ollama and OpenAI responses stream through `cadisd`
-as live `message.delta` events before final completion.
-
-For OpenAI API billing, set `[model].provider = "openai"` and provide either
-`CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` in the daemon environment.
-
-For ChatGPT Plus/Pro through the official Codex CLI:
+Default mode is `auto`: tries Ollama at `http://127.0.0.1:11434`, then falls
+back to a local credential-free response. For OpenAI, set `CADIS_OPENAI_API_KEY`
+or `OPENAI_API_KEY`. For ChatGPT Plus/Pro via Codex CLI:
 
 ```bash
 codex login
 ```
-
-Then configure:
 
 ```toml
 [model]
 provider = "codex-cli"
 ```
 
-C.A.D.I.S. does not store ChatGPT credentials directly; the official Codex CLI
-owns that authentication flow.
-
-## Voice
-
-The HUD can speak final C.A.D.I.S. replies through Edge TTS. For microphone
-input, the HUD records locally and asks Tauri to transcribe via `whisper-cli`.
-On WebKitGTK, C.A.D.I.S. also records WebAudio PCM in parallel so voice can
-still transcribe when `MediaRecorder` sees the mic but produces zero chunks.
-
-```bash
-export CADIS_WHISPER_CLI="$HOME/.local/bin/whisper-cli"
-export CADIS_WHISPER_MODEL="$HOME/.local/share/cadis/whisper-models/ggml-base.bin"
-```
-
-On Linux, if desktop portal permissions block the microphone, allow mic access
-for C.A.D.I.S. in system settings and retry from the HUD.
-
-The HUD Settings -> Voice tab includes a local voice doctor that checks renderer
-mic status, WebAudio analyser/PCM fallback telemetry, `whisper-cli`, the
-configured Whisper model, Node helper execution, and available audio players.
-The daemon protocol also exposes voice status, doctor, and preflight results;
-HUD/Tauri remains the local capture and playback bridge for now.
-
-## Repository layout
-
-```text
-cadis/
-|-- apps/                  # Tauri HUD and future apps
-|-- config/                # Example configuration
-|-- crates/                # Rust daemon, CLI, protocol, policy, store, models
-|-- docs/                  # Product, architecture, protocol, and standards docs
-|   `-- assets/            # Documentation images and README media
-|-- examples/              # Example configs and usage flows
-|-- skills/                # Project-local contributor skills
-|-- AGENT.md               # Coding-agent guidance
-|-- Cargo.toml             # Rust workspace manifest
-|-- SECURITY.md
-`-- LICENSE
-```
+See the [Configuration Reference](docs/16_CONFIG_REFERENCE.md) for all options.
 
 ## Documentation
 
-📖 [Wiki](https://github.com/Growth-Circle/cadis/wiki) for guides and FAQ.
+📖 [Wiki](https://github.com/Growth-Circle/cadis/wiki) · [Architecture](docs/05_ARCHITECTURE.md) · [Protocol](docs/15_PROTOCOL_DRAFT.md) · [CLI Reference](docs/30_STABLE_CLI.md) · [Config Reference](docs/16_CONFIG_REFERENCE.md) · [Developer Setup](docs/17_DEVELOPER_SETUP.md) · [Platform Baseline](docs/28_PLATFORM_BASELINE.md)
+
+<details>
+<summary>All documentation</summary>
 
 - [Project Charter](docs/00_PROJECT_CHARTER.md)
 - [Architecture](docs/05_ARCHITECTURE.md)
@@ -376,8 +161,27 @@ cadis/
 - [Workspace Architecture](docs/27_WORKSPACE_ARCHITECTURE.md)
 - [Platform Baseline](docs/28_PLATFORM_BASELINE.md)
 - [Protocol Freeze](docs/29_PROTOCOL_FREEZE.md)
-- [Storage Format and Migration](docs/31_STORAGE_FORMAT.md)
 - [Stable CLI Reference](docs/30_STABLE_CLI.md)
+- [Storage Format and Migration](docs/31_STORAGE_FORMAT.md)
+
+</details>
+
+## Repository layout
+
+```text
+cadis/
+├── apps/                  # Tauri HUD and future apps
+├── config/                # Example configuration
+├── crates/                # Rust daemon, CLI, protocol, policy, store, models
+├── docs/                  # Product, architecture, protocol, and standards docs
+│   └── assets/            # Documentation images and README media
+├── examples/              # Example configs and usage flows
+├── skills/                # Project-local contributor skills
+├── AGENT.md               # Coding-agent guidance
+├── Cargo.toml             # Rust workspace manifest
+├── SECURITY.md
+└── LICENSE
+```
 
 ## Contributors
 
