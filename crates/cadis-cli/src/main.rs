@@ -42,6 +42,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             print_help();
             Ok(())
         }
+        Command::Launch => launch_cadis(),
         Command::Daemon(args) => launch_daemon(args.clone()),
         Command::Status => {
             let frames = send_request(&cli, ClientRequest::DaemonStatus(EmptyPayload::default()))?;
@@ -1101,6 +1102,154 @@ fn format_error(error: &ErrorPayload) -> String {
     format!("{}: {}", error.code, error.message)
 }
 
+/// Default command: ensure daemon is running, launch HUD, handle first-run.
+fn launch_cadis() -> Result<(), Box<dyn Error>> {
+    let config = load_config().unwrap_or_default();
+    let cadis_home = config.cadis_home.clone();
+
+    // First-run experience.
+    let first_run_marker = cadis_home.join(".first_run_done");
+    let is_first_run = !first_run_marker.exists();
+    if is_first_run {
+        eprintln!(
+            "\n  \x1b[1;36mC.A.D.I.S.\x1b[0m — Coordinated Agentic Distributed Intelligence System\n"
+        );
+        eprintln!("  Welcome! Setting up your local runtime...\n");
+        // Ensure directory layout exists.
+        let _ = cadis_store::ensure_layout(&config);
+        // Create desktop entry on Linux.
+        #[cfg(target_os = "linux")]
+        create_desktop_entry();
+    }
+
+    // Ensure daemon is running.
+    let daemon_running = check_daemon_alive(&config);
+    if !daemon_running {
+        if is_first_run {
+            eprintln!("  Starting daemon (cadisd)...");
+        }
+        start_daemon_background()?;
+        // Brief wait for daemon to bind its socket.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    // Mark first-run complete.
+    if is_first_run {
+        if let Some(parent) = first_run_marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&first_run_marker, "1");
+        eprintln!("  Ready. Launching HUD...\n");
+        eprintln!("  \x1b[2mTip: use `cadis chat \"hello\"` for CLI mode\x1b[0m");
+        eprintln!("  \x1b[2m     use `cadis help` for all commands\x1b[0m\n");
+    }
+
+    // Launch HUD (blocks until HUD window closes).
+    launch_hud()
+}
+
+/// Check if daemon is reachable.
+fn check_daemon_alive(config: &cadis_store::CadisConfig) -> bool {
+    #[cfg(unix)]
+    {
+        if let Some(socket_path) = config.effective_socket_path() {
+            return std::os::unix::net::UnixStream::connect(&socket_path).is_ok();
+        }
+    }
+    let addr = config.effective_tcp_address();
+    std::net::TcpStream::connect_timeout(
+        &addr.parse().unwrap_or_else(|_| "127.0.0.1:7433".parse().unwrap()),
+        std::time::Duration::from_millis(200),
+    )
+    .is_ok()
+}
+
+/// Start cadisd in the background.
+fn start_daemon_background() -> Result<(), Box<dyn Error>> {
+    let exe = env::current_exe()?;
+    let sibling = exe.with_file_name("cadisd");
+    let program = if sibling.exists() {
+        sibling
+    } else {
+        PathBuf::from("cadisd")
+    };
+    ProcessCommand::new(&program)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
+/// Launch the native HUD (cadis-hud binary).
+fn launch_hud() -> Result<(), Box<dyn Error>> {
+    let exe = env::current_exe()?;
+    let sibling = exe.with_file_name("cadis-hud");
+    let program = if sibling.exists() {
+        sibling
+    } else {
+        PathBuf::from("cadis-hud")
+    };
+    let status = ProcessCommand::new(&program).status();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => {
+            // HUD exited with error — fall back to CLI status.
+            eprintln!("cadis: HUD exited ({}), showing status instead", s);
+            eprintln!();
+            let cli = Cli::parse(["status"].map(String::from))?;
+            let frames =
+                send_request(&cli, ClientRequest::DaemonStatus(EmptyPayload::default()))?;
+            render_status(&frames, false)
+        }
+        Err(_) => {
+            // HUD binary not found — fall back to CLI status.
+            eprintln!("cadis: HUD not found, showing daemon status\n");
+            let cli = Cli::parse(["status"].map(String::from))?;
+            let frames =
+                send_request(&cli, ClientRequest::DaemonStatus(EmptyPayload::default()))?;
+            render_status(&frames, false)
+        }
+    }
+}
+
+/// Create a .desktop entry on Linux so CADIS appears in app launchers.
+#[cfg(target_os = "linux")]
+fn create_desktop_entry() {
+    let Some(data_home) = env::var("XDG_DATA_HOME")
+        .ok()
+        .or_else(|| env::var("HOME").ok().map(|h| format!("{h}/.local/share")))
+    else {
+        return;
+    };
+    let apps_dir = PathBuf::from(&data_home).join("applications");
+    let _ = std::fs::create_dir_all(&apps_dir);
+    let desktop_path = apps_dir.join("cadis.desktop");
+    if desktop_path.exists() {
+        return;
+    }
+    let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("cadis"));
+    let icon = exe.with_file_name("icon.png");
+    let icon_str = if icon.exists() {
+        icon.display().to_string()
+    } else {
+        "cadis".to_owned()
+    };
+    let content = format!(
+        "[Desktop Entry]\n\
+         Name=C.A.D.I.S.\n\
+         Comment=Coordinated Agentic Distributed Intelligence System\n\
+         Exec={exe}\n\
+         Icon={icon_str}\n\
+         Terminal=false\n\
+         Type=Application\n\
+         Categories=Development;Utility;\n\
+         StartupWMClass=cadis-hud\n",
+        exe = exe.display(),
+    );
+    let _ = std::fs::write(&desktop_path, content);
+}
+
 fn launch_daemon(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     let exe = env::current_exe()?;
     let sibling = exe.with_file_name("cadisd");
@@ -1183,7 +1332,8 @@ impl Cli {
 
         let command = match args.next().as_deref() {
             None if version => Command::Help,
-            None => Command::Help,
+            None => Command::Launch,
+            Some("help") => Command::Help,
             Some("daemon") => Command::Daemon(args.collect()),
             Some("status") => Command::Status,
             Some("doctor") => Command::Doctor,
@@ -1250,6 +1400,7 @@ impl Cli {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
     Help,
+    Launch,
     Daemon(Vec<String>),
     Status,
     Doctor,
@@ -1981,7 +2132,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 
 fn print_help() {
     println!(
-        "cadis {}\n\nUSAGE:\n  cadis [--socket PATH] [--tcp] [--json] <COMMAND>\n\nCOMMANDS:\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  worker <COMMAND>       Inspect daemon-owned workers\n  workspace <COMMAND>    Manage registered workspaces and grants\n  profile [COMMAND]      Manage daemon profiles\n  session <COMMAND>      Manage session event streams\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKER COMMANDS:\n  worker tail <ID> [--lines COUNT]\n  worker result <ID>\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nPROFILE COMMANDS:\n  profile list           List profiles (default)\n  profile create <ID>    Create a new profile\n  profile export <ID>    Export profile as TOML\n  profile import <ID> <FILE>  Import profile from TOML file\n  profile remove <ID>    Remove a profile\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --tcp                  Connect via TCP (default on Windows, reads CADIS_TCP_PORT)\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
+        "cadis {}\n\nUSAGE:\n  cadis                  Launch daemon + HUD (default)\n  cadis [--socket PATH] [--tcp] [--json] <COMMAND>\n\nCOMMANDS:\n  help                   Print this help\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  worker <COMMAND>       Inspect daemon-owned workers\n  workspace <COMMAND>    Manage registered workspaces and grants\n  profile [COMMAND]      Manage daemon profiles\n  session <COMMAND>      Manage session event streams\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nWORKER COMMANDS:\n  worker tail <ID> [--lines COUNT]\n  worker result <ID>\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nPROFILE COMMANDS:\n  profile list           List profiles (default)\n  profile create <ID>    Create a new profile\n  profile export <ID>    Export profile as TOML\n  profile import <ID> <FILE>  Import profile from TOML file\n  profile remove <ID>    Remove a profile\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --tcp                  Connect via TCP (default on Windows, reads CADIS_TCP_PORT)\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -2082,9 +2233,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_no_args_is_help() {
+    fn parse_no_args_is_launch() {
         let cli = Cli::parse(args(&[])).unwrap();
-        assert_eq!(cli.command, Command::Help);
+        assert_eq!(cli.command, Command::Launch);
     }
 
     // --- spawn ---
