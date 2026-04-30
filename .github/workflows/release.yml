@@ -43,7 +43,6 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/cadis dist/cadis-${{ matrix.target }} || true
           cp target/${{ matrix.target }}/release/cadisd dist/cadisd-${{ matrix.target }} || true
-          cp target/${{ matrix.target }}/release/cadis-hud dist/cadis-hud-${{ matrix.target }} || true
       - name: Package artifacts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -51,7 +50,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist
           Copy-Item target/${{ matrix.target }}/release/cadis.exe dist/cadis-${{ matrix.target }}.exe -ErrorAction SilentlyContinue
           Copy-Item target/${{ matrix.target }}/release/cadisd.exe dist/cadisd-${{ matrix.target }}.exe -ErrorAction SilentlyContinue
-          Copy-Item target/${{ matrix.target }}/release/cadis-hud.exe dist/cadis-hud-${{ matrix.target }}.exe -ErrorAction SilentlyContinue
       - name: Generate checksums (Unix)
         if: runner.os != 'Windows'
         working-directory: dist
