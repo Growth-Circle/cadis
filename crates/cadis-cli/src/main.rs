@@ -49,9 +49,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             render_status(&frames, cli.json)
         }
         Command::Doctor => run_doctor(&cli),
-        Command::Models => {
+        Command::Models { verbose, provider } => {
             let frames = send_request(&cli, ClientRequest::ModelsList(EmptyPayload::default()))?;
-            render_models(&frames, cli.json)
+            render_models(&frames, cli.json, *verbose, provider.as_deref())
         }
         Command::Agents => {
             let frames = send_request(&cli, ClientRequest::AgentList(EmptyPayload::default()))?;
@@ -525,7 +525,12 @@ fn render_status(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-fn render_models(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {
+fn render_models(
+    frames: &[ServerFrame],
+    json: bool,
+    verbose: bool,
+    provider_filter: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
     if json {
         return print_json_frames(frames);
     }
@@ -536,19 +541,55 @@ fn render_models(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error
             if let cadis_protocol::CadisEvent::ModelsListResponse(ModelsListPayload { models }) =
                 &event.event
             {
-                for model in models {
+                let filtered: Vec<_> = models
+                    .iter()
+                    .filter(|m| {
+                        provider_filter
+                            .map_or(true, |f| m.provider == f)
+                    })
+                    .collect();
+
+                if verbose {
                     println!(
-                        "{}\t{}\t{}\t{}\t{}\t{}",
-                        model.provider,
-                        model.model,
-                        model_readiness_label(model.readiness),
-                        effective_model_label(
-                            model.effective_provider.as_deref(),
-                            model.effective_model.as_deref()
-                        ),
-                        if model.fallback { "fallback" } else { "real" },
-                        model.display_name
+                        "{:<20}\t{:<30}\t{:<22}\t{:<25}\t{:<10}\t{}",
+                        "PROVIDER", "MODEL", "READINESS", "EFFECTIVE", "TYPE", "DISPLAY_NAME"
                     );
+                }
+
+                for model in &filtered {
+                    if verbose {
+                        let caps = model.capabilities.join(",");
+                        println!(
+                            "{:<20}\t{:<30}\t{:<22}\t{:<25}\t{:<10}\t{}\tcaps={}",
+                            model.provider,
+                            model.model,
+                            model_readiness_label(model.readiness),
+                            effective_model_label(
+                                model.effective_provider.as_deref(),
+                                model.effective_model.as_deref()
+                            ),
+                            if model.fallback { "fallback" } else { "real" },
+                            model.display_name,
+                            caps
+                        );
+                    } else {
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}\t{}",
+                            model.provider,
+                            model.model,
+                            model_readiness_label(model.readiness),
+                            effective_model_label(
+                                model.effective_provider.as_deref(),
+                                model.effective_model.as_deref()
+                            ),
+                            if model.fallback { "fallback" } else { "real" },
+                            model.display_name
+                        );
+                    }
+                }
+
+                if !filtered.is_empty() && provider_filter.is_some() {
+                    println!("{} model(s) matching provider '{}'", filtered.len(), provider_filter.unwrap_or(""));
                 }
             }
         }
@@ -1387,7 +1428,7 @@ impl Cli {
             Some("daemon") => Command::Daemon(args.collect()),
             Some("status") => Command::Status,
             Some("doctor") => Command::Doctor,
-            Some("models") => Command::Models,
+            Some("models") => parse_models(args.collect())?,
             Some("agents") => Command::Agents,
             Some("worker") => Command::Worker(parse_worker(args.collect())?),
             Some("workspace") => Command::Workspace(parse_workspace(args.collect())?),
@@ -1454,7 +1495,10 @@ enum Command {
     Daemon(Vec<String>),
     Status,
     Doctor,
-    Models,
+    Models {
+        verbose: bool,
+        provider: Option<String>,
+    },
     Agents,
     Worker(WorkerCommand),
     Workspace(WorkspaceCommand),
@@ -1972,6 +2016,27 @@ fn parse_session_subscribe(args: Vec<String>) -> Result<SessionCommand, Box<dyn 
     })
 }
 
+fn parse_models(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    let mut verbose = false;
+    let mut provider = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--verbose" | "-v" => verbose = true,
+            "--provider" | "-p" => {
+                provider = Some(
+                    args.next()
+                        .ok_or_else(|| invalid_input("--provider requires a provider name"))?,
+                );
+            }
+            value => return Err(invalid_input(format!("unknown models option: {value}")).into()),
+        }
+    }
+
+    Ok(Command::Models { verbose, provider })
+}
+
 fn parse_events(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
     let mut replay_limit = Some(128);
     let mut since_event_id = None;
@@ -2213,7 +2278,19 @@ mod tests {
     #[test]
     fn parse_models() {
         let cli = Cli::parse(args(&["models"])).unwrap();
-        assert_eq!(cli.command, Command::Models);
+        assert_eq!(cli.command, Command::Models { verbose: false, provider: None });
+    }
+
+    #[test]
+    fn parse_models_verbose() {
+        let cli = Cli::parse(args(&["models", "--verbose"])).unwrap();
+        assert_eq!(cli.command, Command::Models { verbose: true, provider: None });
+    }
+
+    #[test]
+    fn parse_models_provider_filter() {
+        let cli = Cli::parse(args(&["models", "--provider", "openai"])).unwrap();
+        assert_eq!(cli.command, Command::Models { verbose: false, provider: Some("openai".to_owned()) });
     }
 
     #[test]
