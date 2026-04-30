@@ -292,20 +292,22 @@ impl TtsProvider for SystemTtsProvider {
     }
 
     fn supported_voices(&self) -> Vec<TtsVoice> {
-        vec![
-            TtsVoice {
-                id: "default",
-                label: "System default voice",
-                locale: "en-US",
-                gender: "Neutral",
-            },
-        ]
+        vec![TtsVoice {
+            id: "default",
+            label: "System default voice",
+            locale: "en-US",
+            gender: "Neutral",
+        }]
     }
 
     fn speak(&mut self, request: TtsRequest<'_>) -> Result<TtsOutput, TtsError> {
         let text = request.text.trim();
         if text.is_empty() {
-            return Err(TtsError::new("empty_text", "cannot speak empty text", false));
+            return Err(TtsError::new(
+                "empty_text",
+                "cannot speak empty text",
+                false,
+            ));
         }
 
         pub(crate) const MAX_SYSTEM_TTS_CHARS: usize = 2000;
