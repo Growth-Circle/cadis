@@ -275,9 +275,162 @@ impl TtsProvider for EdgeTtsProvider {
     }
 }
 
+/// Daemon-owned System TTS provider that uses platform-native speech synthesis.
+///
+/// On Linux, uses `espeak` or `espeak-ng` via subprocess.
+/// On macOS, uses `say` via subprocess.
+/// On Windows, uses PowerShell `Add-Type -AssemblyName System.Speech` via subprocess.
+pub(crate) struct SystemTtsProvider;
+
+impl TtsProvider for SystemTtsProvider {
+    fn id(&self) -> &'static str {
+        "system"
+    }
+
+    fn label(&self) -> &'static str {
+        "System TTS (native speech daemon)"
+    }
+
+    fn supported_voices(&self) -> Vec<TtsVoice> {
+        vec![
+            TtsVoice {
+                id: "default",
+                label: "System default voice",
+                locale: "en-US",
+                gender: "Neutral",
+            },
+        ]
+    }
+
+    fn speak(&mut self, request: TtsRequest<'_>) -> Result<TtsOutput, TtsError> {
+        let text = request.text.trim();
+        if text.is_empty() {
+            return Err(TtsError::new("empty_text", "cannot speak empty text", false));
+        }
+
+        pub(crate) const MAX_SYSTEM_TTS_CHARS: usize = 2000;
+        let text = if text.chars().count() > MAX_SYSTEM_TTS_CHARS {
+            truncate_to_utf8_boundary(text, MAX_SYSTEM_TTS_CHARS).0
+        } else {
+            text
+        };
+
+        let result = if cfg!(target_os = "macos") {
+            Command::new("say")
+                .arg("-v")
+                .arg(request.voice_id)
+                .arg("--rate")
+                .arg(format!("{}", words_per_minute(request.rate)))
+                .arg(text)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+        } else if cfg!(target_os = "windows") {
+            let ps_script = format!(
+                "Add-Type -AssemblyName System.Speech; \
+                 $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
+                 $synth.Rate = {}; \
+                 $synth.Speak(\"{}\")",
+                ps_rate(request.rate),
+                text.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+            Command::new("powershell")
+                .args(["-NoProfile", "-Command", &ps_script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+        } else {
+            let speed_arg = format!("{}", words_per_minute(request.rate));
+            Command::new("espeak")
+                .args(["-v", request.voice_id, "-s", &speed_arg])
+                .arg(text)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+        };
+
+        match result {
+            Ok(output) if output.status.success() => Ok(TtsOutput {
+                provider: "system".to_owned(),
+                voice_id: request.voice_id.to_owned(),
+                spoken_chars: request.text.chars().count(),
+                audio_path: None,
+            }),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(TtsError::new(
+                    "system_tts_failed",
+                    format!("system TTS failed: {}", stderr.trim()),
+                    true,
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let binary = if cfg!(target_os = "macos") {
+                    "say"
+                } else if cfg!(target_os = "windows") {
+                    "powershell"
+                } else {
+                    "espeak"
+                };
+                Err(TtsError::new(
+                    "system_tts_not_found",
+                    format!("{binary} is not installed; system TTS requires {binary}"),
+                    false,
+                ))
+            }
+            Err(error) => Err(TtsError::new(
+                "system_tts_spawn_failed",
+                error.to_string(),
+                true,
+            )),
+        }
+    }
+
+    fn stop(&mut self) -> Result<(), TtsError> {
+        Ok(())
+    }
+}
+
+fn words_per_minute(rate: i16) -> u32 {
+    let base: f64 = 175.0;
+    let adjusted = base * (1.0 + f64::from(rate) / 100.0);
+    adjusted.clamp(80.0, 450.0) as u32
+}
+
+fn ps_rate(rate: i16) -> i32 {
+    (f64::from(rate) / 10.0).round() as i32
+}
+
+fn system_tts_available() -> bool {
+    let binary = if cfg!(target_os = "macos") {
+        "say"
+    } else if cfg!(target_os = "windows") {
+        "powershell"
+    } else {
+        "espeak"
+    };
+    Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
 pub(crate) fn tts_provider_from_config(provider: &str) -> Box<dyn TtsProvider> {
     match provider {
         "edge" => Box::new(EdgeTtsProvider),
+        "system" => {
+            if system_tts_available() {
+                Box::new(SystemTtsProvider)
+            } else {
+                Box::new(StubbedTtsProvider::new(provider))
+            }
+        }
         _ => Box::new(StubbedTtsProvider::new(provider)),
     }
 }
