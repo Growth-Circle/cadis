@@ -1,14 +1,15 @@
 [package]
-name = "cadis-hud"
+name = "cadis-hud-legacy"
 version = "1.2.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
+description = "DEPRECATED: native eframe HUD prototype. Use apps/cadis-hud (Tauri) instead."
 
 [[bin]]
-name = "cadis-hud"
+name = "cadis-hud-legacy"
 path = "src/main.rs"
 
 [dependencies]

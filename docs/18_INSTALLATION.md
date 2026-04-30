@@ -38,10 +38,10 @@ target/release/cadis
 target/release/cadisd
 ```
 
-The primary desktop HUD lives in `apps/cadis-hud` and is built with pnpm and
-Tauri. The Rust workspace may also build older native HUD prototype artifacts,
-but packaged HUD work should use the Tauri app unless a decision record changes
-that.
+The canonical desktop HUD lives in `apps/cadis-hud` and is built with pnpm and
+Tauri. The Rust workspace also contains `crates/cadis-hud` (now
+`cadis-hud-legacy`), a deprecated native eframe prototype kept for reference.
+All new HUD work should use the Tauri app.
 
 The renderer-neutral Wulan avatar state engine is a library crate,
 `crates/cadis-avatar`; it is not an installed binary.
@@ -64,7 +64,7 @@ target/release/cadis models
 target/release/cadis chat "hello"
 ```
 
-Launch the native desktop HUD from source:
+Launch the canonical desktop HUD from source:
 
 ```bash
 cd apps/cadis-hud
@@ -81,6 +81,14 @@ cd apps/cadis-hud
 CADIS_HUD_SOCKET=/tmp/cadis-hud.sock pnpm tauri:dev
 ```
 
+For TCP transport (required on Windows, optional elsewhere):
+
+```bash
+target/release/cadisd --tcp-port 7433
+cd apps/cadis-hud
+CADIS_TCP_PORT=7433 pnpm tauri:dev
+```
+
 To build the HUD frontend and native Tauri app locally:
 
 ```bash
@@ -89,14 +97,31 @@ pnpm build
 pnpm tauri:build
 ```
 
-The HUD is a client of `cadisd`; it does not store credentials or execute tools
-directly.
+The HUD is a protocol client of `cadisd`; it does not store credentials, execute
+tools, own approval state, or hold durable runtime state. All authority lives in
+the daemon.
+
+## Transport
+
+The daemon supports two transports:
+
+- **Unix socket** (default on Linux/macOS): `$XDG_RUNTIME_DIR/cadis/cadisd.sock`
+  or `~/.cadis/run/cadisd.sock`.
+- **TCP** (default on Windows, optional elsewhere): `127.0.0.1:7433`. Set
+  `CADIS_TCP_PORT` or use `cadisd --tcp-port 7433`.
+
+The Tauri HUD, CLI, and legacy eframe HUD all support both transports. On
+Windows, TCP is used automatically since Unix sockets are not available.
+
+## Voice
 
 Voice dependencies are optional unless you use HUD speech or mic input. The HUD
 Voice settings include a local doctor that checks mic status, `whisper-cli`, the
 Whisper model path, the Node helper used for Edge TTS, and local audio players.
 The daemon exposes voice status, doctor, and preflight state, but the HUD/Tauri
 bridge still owns local capture and playback mechanics.
+
+## Model Providers
 
 The default provider mode is `auto`: CADIS tries Ollama at
 `http://127.0.0.1:11434` and falls back to a local credential-free response if
@@ -186,7 +211,8 @@ target/release/cadis chat "hello"
   Linux-only.
 - macOS has CI source validation but no packaged runtime or HUD support claim.
 - Windows CI checks portable crates only; daemon, CLI transport, HUD, shell,
-  and audio runtime paths are not supported yet.
+  and audio runtime paths are not supported yet. The Tauri HUD now supports TCP
+  transport for future Windows use.
 - Full async tool cancellation is not implemented yet.
 - Telegram, mobile clients, and production daemon-owned voice output are not
   implemented yet.
@@ -194,7 +220,7 @@ target/release/cadis chat "hello"
   renderer-neutral state contract only.
 - Concurrent-edit protection for shared state is not production-hardened yet.
 - The Tauri HUD is source-built; packaged desktop HUD artifacts are not
-  published yet.
+  published yet. The npm package installs daemon + CLI only.
 
 ## Package Targets Later
 
@@ -204,3 +230,4 @@ target/release/cadis chat "hello"
 - Homebrew formula for macOS after runtime adapters are validated.
 - Windows installer after transport, shell, path, sandbox, HUD, and audio
   adapters are implemented and tested.
+- Tauri HUD bundled in release artifacts after packaging pipeline is validated.

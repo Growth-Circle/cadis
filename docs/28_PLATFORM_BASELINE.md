@@ -19,6 +19,12 @@ Linux remains the first platform for `cadisd`, the CLI, local Unix socket
 transport, the Tauri HUD, HUD voice capture/playback bridges, and desktop
 runtime behavior.
 
+The canonical HUD (`apps/cadis-hud`) is a Tauri + React application that
+supports both Unix socket and TCP transport. On Linux and macOS it prefers Unix
+sockets; on Windows it uses TCP (`127.0.0.1:7433`) automatically. The legacy
+eframe HUD (`crates/cadis-hud`, now `cadis-hud-legacy`) is deprecated and kept
+for reference only.
+
 macOS validation proves that the full Rust workspace compiles, lints, and passes
 the complete test suite on `macos-latest`. Unix socket integration tests are
 gated behind `#[cfg(unix)]` and run natively on macOS. It does not mean the
@@ -27,9 +33,10 @@ supported for users on macOS.
 
 Windows validation now runs the full Rust workspace test suite on
 `windows-latest`. Unix socket integration tests are gated behind `#[cfg(unix)]`
-and are automatically skipped. TCP transport is used where applicable. Packaged
-daemon, HUD, voice bridge, and shell behavior are not yet supported for users on
-Windows.
+and are automatically skipped. TCP transport is used where applicable. The Tauri
+HUD (`apps/cadis-hud`) now supports TCP transport, enabling future Windows HUD
+use once daemon and shell adapters are validated. Packaged daemon, HUD, voice
+bridge, and shell behavior are not yet supported for users on Windows.
 
 ## 3. Platform Test Notes
 
@@ -67,7 +74,9 @@ The release workflow at `.github/workflows/release.yml` builds binaries for:
 - `aarch64-unknown-linux-gnu` (cross-compiled)
 
 Release artifacts include `cadis` and `cadisd` binaries with SHA-256 checksums.
-The Tauri HUD is not included in release artifacts and must be built from source.
+The Tauri HUD (`apps/cadis-hud`) is not included in release artifacts and must
+be built from source. The npm package (`@growthcircle/cadis`) installs daemon
+and CLI only.
 
 ## 5. Promotion Requirements
 

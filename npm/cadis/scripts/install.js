@@ -10,7 +10,7 @@ const os = require("os");
 const path = require("path");
 
 const REPO = "Growth-Circle/cadis";
-const BINARIES = ["cadis", "cadisd", "cadis-hud"];
+const BINARIES = ["cadis", "cadisd"];
 
 const TARGETS = {
   "linux-x64": "x86_64-unknown-linux-gnu",
@@ -120,20 +120,20 @@ async function main() {
       console.log(" ok");
     } catch (err) {
       console.log(" skipped");
-      // cadis-hud is optional — CLI still works without it
-      if (name !== "cadis-hud") {
-        console.error(`  ${err.message}`);
-        console.error(`  You can download manually from: ${url}`);
-      }
+      console.error(`  ${err.message}`);
+      console.error(`  You can download manually from: ${url}`);
     }
   }
 
   console.log();
   console.log("  \x1b[1;36mC.A.D.I.S.\x1b[0m installed successfully!");
   console.log();
-  console.log("  Run \x1b[1mcadis\x1b[0m to start (launches daemon + HUD)");
-  console.log("  Run \x1b[1mcadis chat \"hello\"\x1b[0m for CLI mode");
+  console.log("  Run \x1b[1mcadis\x1b[0m to start (launches daemon + interactive CLI)");
+  console.log("  Run \x1b[1mcadis chat \"hello\"\x1b[0m for one-shot CLI mode");
   console.log("  Run \x1b[1mcadis help\x1b[0m for all commands");
+  console.log();
+  console.log("  \x1b[2mThe desktop HUD (Tauri) is source-built separately:");
+  console.log("  cd apps/cadis-hud && pnpm install && pnpm tauri:build\x1b[0m");
   console.log();
 }
 

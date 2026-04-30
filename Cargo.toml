@@ -5,6 +5,7 @@ members = [
     "crates/cadis-avatar",
     "crates/cadis-core",
     "crates/cadis-daemon",
+    # Legacy eframe prototype — canonical HUD is apps/cadis-hud (Tauri).
     "crates/cadis-hud",
     "crates/cadis-memory",
     "crates/cadis-models",

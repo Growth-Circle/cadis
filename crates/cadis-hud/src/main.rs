@@ -30,6 +30,11 @@ use types::{
 };
 
 fn main() {
+    eprintln!(
+        "\x1b[33mwarning:\x1b[0m cadis-hud-legacy is a deprecated eframe prototype.\n\
+         The canonical HUD is the Tauri app in apps/cadis-hud.\n\
+         Build it with: cd apps/cadis-hud && pnpm install && pnpm tauri:build\n"
+    );
     if let Err(error) = run() {
         eprintln!("cadis-hud: {error}");
         process::exit(1);
