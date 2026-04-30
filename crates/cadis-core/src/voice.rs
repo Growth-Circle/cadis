@@ -291,7 +291,12 @@ impl OpenAiTtsProvider {
 
     fn openai_voice_id(voice_id: &str) -> &'static str {
         match voice_id {
-            "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer" => voice_id,
+            "alloy" => "alloy",
+            "echo" => "echo",
+            "fable" => "fable",
+            "onyx" => "onyx",
+            "nova" => "nova",
+            "shimmer" => "shimmer",
             _ => "alloy",
         }
     }
@@ -374,7 +379,10 @@ impl TtsProvider for OpenAiTtsProvider {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let audio_path = temp_dir.join(format!("cadis-tts-openai-{}-{nanos}.mp3", std::process::id()));
+        let audio_path = temp_dir.join(format!(
+            "cadis-tts-openai-{}-{nanos}.mp3",
+            std::process::id()
+        ));
 
         let url = format!("{}/audio/speech", self.base_url.trim_end_matches('/'));
 
@@ -391,9 +399,7 @@ impl TtsProvider for OpenAiTtsProvider {
 
         match output {
             Ok(result) if result.status.success() => {
-                let file_size = fs::metadata(&audio_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let file_size = fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0);
                 if file_size == 0 {
                     let _ = fs::remove_file(&audio_path);
                     return Err(TtsError::new(
@@ -440,7 +446,11 @@ fn openai_api_key_from_env() -> Option<String> {
     std::env::var("CADIS_OPENAI_API_KEY")
         .ok()
         .filter(|k| !k.is_empty())
-        .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()))
+        .or_else(|| {
+            std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+        })
 }
 
 pub(crate) fn tts_provider_from_config(provider: &str) -> Box<dyn TtsProvider> {
