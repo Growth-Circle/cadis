@@ -275,9 +275,184 @@ impl TtsProvider for EdgeTtsProvider {
     }
 }
 
+/// Daemon-owned OpenAI TTS provider that calls the OpenAI speech API.
+pub(crate) struct OpenAiTtsProvider {
+    api_key: String,
+    base_url: String,
+}
+
+impl OpenAiTtsProvider {
+    pub(crate) fn new(api_key: String) -> Self {
+        let base_url = std::env::var("CADIS_OPENAI_BASE_URL")
+            .or_else(|_| std::env::var("OPENAI_BASE_URL"))
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
+        Self { api_key, base_url }
+    }
+
+    fn openai_voice_id(voice_id: &str) -> &'static str {
+        match voice_id {
+            "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer" => voice_id,
+            _ => "alloy",
+        }
+    }
+}
+
+impl TtsProvider for OpenAiTtsProvider {
+    fn id(&self) -> &'static str {
+        "openai"
+    }
+
+    fn label(&self) -> &'static str {
+        "OpenAI TTS (daemon HTTP)"
+    }
+
+    fn supported_voices(&self) -> Vec<TtsVoice> {
+        vec![
+            TtsVoice {
+                id: "alloy",
+                label: "Alloy (Neutral)",
+                locale: "en-US",
+                gender: "Neutral",
+            },
+            TtsVoice {
+                id: "echo",
+                label: "Echo (Male)",
+                locale: "en-US",
+                gender: "Male",
+            },
+            TtsVoice {
+                id: "fable",
+                label: "Fable (Neutral)",
+                locale: "en-US",
+                gender: "Neutral",
+            },
+            TtsVoice {
+                id: "onyx",
+                label: "Onyx (Male)",
+                locale: "en-US",
+                gender: "Male",
+            },
+            TtsVoice {
+                id: "nova",
+                label: "Nova (Female)",
+                locale: "en-US",
+                gender: "Female",
+            },
+            TtsVoice {
+                id: "shimmer",
+                label: "Shimmer (Female)",
+                locale: "en-US",
+                gender: "Female",
+            },
+        ]
+    }
+
+    fn speak(&mut self, request: TtsRequest<'_>) -> Result<TtsOutput, TtsError> {
+        let voice = Self::openai_voice_id(request.voice_id);
+
+        pub(crate) const MAX_OPENAI_TTS_CHARS: usize = 4096;
+        let text = if request.text.chars().count() > MAX_OPENAI_TTS_CHARS {
+            truncate_to_utf8_boundary(request.text, MAX_OPENAI_TTS_CHARS).0
+        } else {
+            request.text
+        };
+
+        let speed = 1.0 + (f64::from(request.rate) / 100.0);
+        let speed = speed.clamp(0.25, 4.0);
+
+        let body = serde_json::json!({
+            "model": "tts-1",
+            "voice": voice,
+            "input": text,
+            "speed": speed,
+            "response_format": "mp3"
+        });
+
+        let temp_dir = std::env::temp_dir().join("cadis-openai-tts");
+        let _ = fs::create_dir_all(&temp_dir);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let audio_path = temp_dir.join(format!("cadis-tts-openai-{}-{nanos}.mp3", std::process::id()));
+
+        let url = format!("{}/audio/speech", self.base_url.trim_end_matches('/'));
+
+        let output = Command::new("curl")
+            .args(["-sS", "-X", "POST", &url])
+            .args(["-H", "Content-Type: application/json"])
+            .args(["-H", &format!("Authorization: Bearer {}", self.api_key)])
+            .args(["-d", &serde_json::to_string(&body).unwrap_or_default()])
+            .args(["-o", &audio_path.to_string_lossy()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output();
+
+        match output {
+            Ok(result) if result.status.success() => {
+                let file_size = fs::metadata(&audio_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if file_size == 0 {
+                    let _ = fs::remove_file(&audio_path);
+                    return Err(TtsError::new(
+                        "openai_tts_empty_response",
+                        "OpenAI TTS returned an empty audio file",
+                        true,
+                    ));
+                }
+                Ok(TtsOutput {
+                    provider: "openai".to_owned(),
+                    voice_id: voice.to_owned(),
+                    spoken_chars: request.text.chars().count(),
+                    audio_path: Some(audio_path),
+                })
+            }
+            Ok(result) => {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                let _ = fs::remove_file(&audio_path);
+                Err(TtsError::new(
+                    "openai_tts_failed",
+                    format!("OpenAI TTS request failed: {}", redact(stderr.trim())),
+                    true,
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(TtsError::new(
+                "curl_not_found",
+                "curl is not installed; OpenAI TTS requires curl for HTTP requests",
+                false,
+            )),
+            Err(error) => Err(TtsError::new(
+                "openai_tts_spawn_failed",
+                error.to_string(),
+                true,
+            )),
+        }
+    }
+
+    fn stop(&mut self) -> Result<(), TtsError> {
+        Ok(())
+    }
+}
+
+fn openai_api_key_from_env() -> Option<String> {
+    std::env::var("CADIS_OPENAI_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+        .or_else(|| std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty()))
+}
+
 pub(crate) fn tts_provider_from_config(provider: &str) -> Box<dyn TtsProvider> {
     match provider {
         "edge" => Box::new(EdgeTtsProvider),
+        "openai" => {
+            if let Some(key) = openai_api_key_from_env() {
+                Box::new(OpenAiTtsProvider::new(key))
+            } else {
+                Box::new(StubbedTtsProvider::new(provider))
+            }
+        }
         _ => Box::new(StubbedTtsProvider::new(provider)),
     }
 }
