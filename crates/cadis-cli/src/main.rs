@@ -543,10 +543,7 @@ fn render_models(
             {
                 let filtered: Vec<_> = models
                     .iter()
-                    .filter(|m| {
-                        provider_filter
-                            .map_or(true, |f| m.provider == f)
-                    })
+                    .filter(|m| provider_filter.map_or(true, |f| m.provider == f))
                     .collect();
 
                 if verbose {
@@ -589,7 +586,11 @@ fn render_models(
                 }
 
                 if !filtered.is_empty() && provider_filter.is_some() {
-                    println!("{} model(s) matching provider '{}'", filtered.len(), provider_filter.unwrap_or(""));
+                    println!(
+                        "{} model(s) matching provider '{}'",
+                        filtered.len(),
+                        provider_filter.unwrap_or("")
+                    );
                 }
             }
         }
@@ -2278,19 +2279,37 @@ mod tests {
     #[test]
     fn parse_models() {
         let cli = Cli::parse(args(&["models"])).unwrap();
-        assert_eq!(cli.command, Command::Models { verbose: false, provider: None });
+        assert_eq!(
+            cli.command,
+            Command::Models {
+                verbose: false,
+                provider: None
+            }
+        );
     }
 
     #[test]
     fn parse_models_verbose() {
         let cli = Cli::parse(args(&["models", "--verbose"])).unwrap();
-        assert_eq!(cli.command, Command::Models { verbose: true, provider: None });
+        assert_eq!(
+            cli.command,
+            Command::Models {
+                verbose: true,
+                provider: None
+            }
+        );
     }
 
     #[test]
     fn parse_models_provider_filter() {
         let cli = Cli::parse(args(&["models", "--provider", "openai"])).unwrap();
-        assert_eq!(cli.command, Command::Models { verbose: false, provider: Some("openai".to_owned()) });
+        assert_eq!(
+            cli.command,
+            Command::Models {
+                verbose: false,
+                provider: Some("openai".to_owned())
+            }
+        );
     }
 
     #[test]
