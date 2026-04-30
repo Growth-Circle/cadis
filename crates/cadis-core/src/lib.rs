@@ -8248,7 +8248,10 @@ mod tests {
             let provider = tts_provider_from_config(provider_id);
             assert_eq!(provider.id(), provider_id);
             let voices = provider.supported_voices();
-            assert!(!voices.is_empty(), "{provider_id} should report at least one voice");
+            assert!(
+                !voices.is_empty(),
+                "{provider_id} should report at least one voice"
+            );
             if provider_id != "system" {
                 assert!(voices.iter().any(|voice| voice.id == "id-ID-GadisNeural"));
             }
