@@ -543,13 +543,13 @@ fn render_models(
             {
                 let filtered: Vec<_> = models
                     .iter()
-                    .filter(|m| provider_filter.map_or(true, |f| m.provider == f))
+                    .filter(|m| provider_filter.is_none_or(|f| m.provider == f))
                     .collect();
 
                 if verbose {
                     println!(
-                        "{:<20}\t{:<30}\t{:<22}\t{:<25}\t{:<10}\t{}",
-                        "PROVIDER", "MODEL", "READINESS", "EFFECTIVE", "TYPE", "DISPLAY_NAME"
+                        "{:<20}\t{:<30}\t{:<22}\t{:<25}\t{:<10}\tDISPLAY_NAME",
+                        "PROVIDER", "MODEL", "READINESS", "EFFECTIVE", "TYPE"
                     );
                 }
 
