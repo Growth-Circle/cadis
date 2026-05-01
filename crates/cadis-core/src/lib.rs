@@ -31,12 +31,13 @@ use cadis_protocol::{
     SessionEventPayload, SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload,
     ToolFailedPayload, UiPreferencesPayload, VoiceDoctorCheck, VoiceDoctorPayload,
     VoicePreferences, VoicePreflightRequest, VoicePreflightSummary, VoicePreviewRequest,
-    VoiceRuntimeState, VoiceStatusPayload, WorkerArtifactLocations, WorkerCleanupRequest,
-    WorkerEventPayload, WorkerLogDeltaPayload, WorkerResultRequest, WorkerState, WorkerTailRequest,
-    WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent, WorkerWorktreeState, WorkspaceAccess,
-    WorkspaceDoctorCheck, WorkspaceDoctorPayload, WorkspaceDoctorRequest, WorkspaceGrantId,
-    WorkspaceGrantPayload, WorkspaceGrantRequest, WorkspaceId, WorkspaceKind, WorkspaceListPayload,
-    WorkspaceListRequest, WorkspaceRecordPayload, WorkspaceRegisterRequest, WorkspaceRevokeRequest,
+    VoiceRuntimeState, VoiceStatusPayload, WorkerApplyRequest, WorkerArtifactLocations,
+    WorkerCleanupRequest, WorkerEventPayload, WorkerLogDeltaPayload, WorkerResultRequest,
+    WorkerState, WorkerTailRequest, WorkerWorktreeCleanupPolicy, WorkerWorktreeIntent,
+    WorkerWorktreeState, WorkspaceAccess, WorkspaceDoctorCheck, WorkspaceDoctorPayload,
+    WorkspaceDoctorRequest, WorkspaceGrantId, WorkspaceGrantPayload, WorkspaceGrantRequest,
+    WorkspaceId, WorkspaceKind, WorkspaceListPayload, WorkspaceListRequest, WorkspaceRecordPayload,
+    WorkspaceRegisterRequest, WorkspaceRevokeRequest,
 };
 use cadis_store::{
     redact, AgentHomeDiagnostic, AgentHomeDoctorOptions, AgentHomeTemplate, ApprovalRecord,
@@ -1436,6 +1437,7 @@ impl Runtime {
 
         let required_access = required_tool_access(&directive.tool_name);
         let workspace = match self.resolved_granted_workspace(
+            &directive.tool_name,
             session_id,
             Some(agent_id),
             &directive.input,
