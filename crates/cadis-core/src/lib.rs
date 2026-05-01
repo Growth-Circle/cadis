@@ -719,6 +719,7 @@ impl Runtime {
             ClientRequest::WorkerTail(request) => self.worker_tail(request_id, request),
             ClientRequest::WorkerResult(request) => self.worker_result(request_id, request),
             ClientRequest::WorkerCleanup(request) => self.worker_cleanup(request_id, request),
+            ClientRequest::WorkerApply(request) => self.worker_apply(request_id, request),
             ClientRequest::SessionUnsubscribe(_) => self.accept(request_id, Vec::new()),
         }
     }
@@ -822,6 +823,7 @@ impl Runtime {
 
         let required_access = required_tool_access(&request.tool_name);
         let workspace = match self.resolved_granted_workspace(
+            &request.tool_name,
             &session_id,
             request.agent_id.as_ref(),
             &request.input,
@@ -2072,6 +2074,123 @@ impl Runtime {
             Ok(events) => self.accept(request_id, events),
             Err(error) => self.reject(request_id, error.code, error.message, false),
         }
+    }
+
+    fn worker_apply(
+        &mut self,
+        request_id: RequestId,
+        request: WorkerApplyRequest,
+    ) -> RequestOutcome {
+        let Some(worker) = self.workers.get(&request.worker_id).cloned() else {
+            return self.reject(
+                request_id,
+                "worker_not_found",
+                format!("worker '{}' was not found", request.worker_id),
+                false,
+            );
+        };
+
+        if worker.status != WorkerState::Completed {
+            return self.reject(
+                request_id,
+                "worker_apply_unavailable",
+                format!(
+                    "worker '{}' must be completed before apply",
+                    request.worker_id
+                ),
+                false,
+            );
+        }
+
+        let verified = match self
+            .verify_cadis_worker_worktree(&request.worker_id, request.worktree_path.as_deref())
+        {
+            Ok(verified) => verified,
+            Err(error) => return self.reject(request_id, error.code, error.message, false),
+        };
+
+        let Some(artifacts) = worker.artifacts.as_ref() else {
+            return self.reject(
+                request_id,
+                "worker_patch_missing",
+                format!(
+                    "worker '{}' has no patch artifact metadata",
+                    request.worker_id
+                ),
+                false,
+            );
+        };
+        let patch_path = PathBuf::from(artifacts.patch.trim());
+        let expected_patch = self.profile_home.worker_artifact_paths(&request.worker_id).patch;
+        if patch_path != expected_patch {
+            return self.reject(
+                request_id,
+                "worker_patch_not_owned",
+                format!(
+                    "worker '{}' patch artifact is not CADIS-owned",
+                    request.worker_id
+                ),
+                false,
+            );
+        }
+
+        let patch_path = match fs::canonicalize(&patch_path) {
+            Ok(path) => path,
+            Err(error) => {
+                return self.reject(
+                    request_id,
+                    "worker_patch_missing",
+                    format!(
+                        "worker '{}' patch artifact '{}' is unavailable: {error}",
+                        request.worker_id,
+                        patch_path.display()
+                    ),
+                    false,
+                )
+            }
+        };
+        let patch_content = match fs::read_to_string(&patch_path) {
+            Ok(content) => content,
+            Err(error) => {
+                return self.reject(
+                    request_id,
+                    "worker_patch_unreadable",
+                    format!(
+                        "worker '{}' patch artifact '{}' could not be read: {error}",
+                        request.worker_id,
+                        patch_path.display()
+                    ),
+                    false,
+                )
+            }
+        };
+        if patch_content.trim().is_empty() {
+            return self.reject(
+                request_id,
+                "worker_patch_empty",
+                format!(
+                    "worker '{}' patch artifact '{}' is empty",
+                    request.worker_id,
+                    patch_path.display()
+                ),
+                false,
+            );
+        }
+
+        let tool_request = ToolCallRequest {
+            session_id: Some(worker.session_id),
+            agent_id: worker.agent_id.or(worker.parent_agent_id),
+            tool_name: "worker.apply".to_owned(),
+            input: serde_json::json!({
+                "workspace_id": verified.metadata.workspace_id,
+                "worker_id": request.worker_id,
+                "worktree_path": request
+                    .worktree_path
+                    .unwrap_or_else(|| verified.metadata.worktree_path.display().to_string()),
+            }),
+        };
+
+        self.handle_tool_call(request_id, tool_request)
     }
 
     fn set_agent_specialist(
@@ -4339,6 +4458,7 @@ impl Runtime {
         };
 
         let workspace = match self.resolved_granted_workspace(
+            &request.tool_name,
             &record.session_id,
             request.agent_id.as_ref(),
             &request.input,
@@ -4470,6 +4590,9 @@ impl Runtime {
                 self.try_checkpoint(workspace, &request.input);
                 self.execute_file_patch(workspace, &request.input)
             }
+            "worker.apply" => {
+                self.execute_worker_apply_patch(workspace, &request.input, tool_timeout_secs)
+            }
             "shell.run" => self.execute_shell_run(workspace, &request.input, tool_timeout_secs),
             "git.worktree.create" => self.execute_git_worktree_create(workspace, &request.input),
             "git.worktree.remove" => self.execute_git_worktree_remove(workspace, &request.input),
@@ -4599,6 +4722,148 @@ impl Runtime {
                 "schema": "structured_replace_write_v1",
                 "files": output_files,
                 "truncated": truncated
+            }),
+        })
+    }
+
+    fn execute_worker_apply_patch(
+        &self,
+        workspace: &Path,
+        input: &serde_json::Value,
+        tool_timeout_secs: u64,
+    ) -> Result<ToolExecutionResult, ErrorPayload> {
+        let worker_id = input_string(input, "worker_id")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                tool_error(
+                    "invalid_tool_input",
+                    "worker.apply requires worker_id",
+                    false,
+                )
+            })?;
+        let requested_worktree = input_string(input, "worktree_path");
+        let _verified = self
+            .verify_cadis_worker_worktree(&worker_id, requested_worktree.as_deref())
+            .map_err(|error| tool_error(error.code, error.message, false))?;
+
+        let worker = self.workers.get(&worker_id).ok_or_else(|| {
+            tool_error(
+                "worker_not_found",
+                format!("worker '{worker_id}' was not found"),
+                false,
+            )
+        })?;
+        if worker.status != WorkerState::Completed {
+            return Err(tool_error(
+                "worker_apply_unavailable",
+                format!("worker '{worker_id}' must be completed before apply"),
+                false,
+            ));
+        }
+
+        let artifacts = worker.artifacts.as_ref().ok_or_else(|| {
+            tool_error(
+                "worker_patch_missing",
+                format!("worker '{worker_id}' has no patch artifact metadata"),
+                false,
+            )
+        })?;
+        let patch_path = PathBuf::from(artifacts.patch.trim());
+        let expected_patch = self.profile_home.worker_artifact_paths(&worker_id).patch;
+        if patch_path != expected_patch {
+            return Err(tool_error(
+                "worker_patch_not_owned",
+                format!("worker '{worker_id}' patch artifact is not CADIS-owned"),
+                false,
+            ));
+        }
+        let patch_path = fs::canonicalize(&patch_path).map_err(|error| {
+            tool_error(
+                "worker_patch_missing",
+                format!(
+                    "worker '{worker_id}' patch artifact '{}' is unavailable: {error}",
+                    patch_path.display()
+                ),
+                false,
+            )
+        })?;
+
+        let patch_content = fs::read_to_string(&patch_path).map_err(|error| {
+            tool_error(
+                "worker_patch_unreadable",
+                format!(
+                    "worker '{worker_id}' patch artifact '{}' could not be read: {error}",
+                    patch_path.display()
+                ),
+                false,
+            )
+        })?;
+        if patch_content.trim().is_empty() {
+            return Err(tool_error(
+                "worker_patch_empty",
+                format!(
+                    "worker '{worker_id}' patch artifact '{}' is empty",
+                    patch_path.display()
+                ),
+                false,
+            ));
+        }
+
+        let mut apply = Command::new("git");
+        apply
+            .arg("-C")
+            .arg(workspace)
+            .arg("apply")
+            .arg("--3way")
+            .arg("--whitespace=nowarn")
+            .arg(&patch_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let result = run_bounded_command(apply, StdDuration::from_secs(tool_timeout_secs))?;
+        let stdout = redact(&String::from_utf8_lossy(&result.stdout.bytes));
+        let stderr = redact(&String::from_utf8_lossy(&result.stderr.bytes));
+
+        if result.timed_out {
+            return Err(tool_error(
+                "tool_timeout",
+                format!(
+                    "worker.apply exceeded timeout of {tool_timeout_secs}s for worker '{worker_id}'"
+                ),
+                false,
+            ));
+        }
+        if !result.status_success {
+            let detail = if !stderr.trim().is_empty() {
+                stderr
+            } else if !stdout.trim().is_empty() {
+                stdout
+            } else {
+                "git apply failed without output".to_owned()
+            };
+            return Err(tool_error(
+                "worker_apply_failed",
+                format!(
+                    "worker '{worker_id}' patch apply failed (exit code {:?}): {}",
+                    result.exit_code, detail
+                ),
+                false,
+            ));
+        }
+
+        Ok(ToolExecutionResult {
+            summary: format!("applied worker patch for {worker_id}"),
+            output: serde_json::json!({
+                "worker_id": worker_id,
+                "patch_path": patch_path.display().to_string(),
+                "workspace": workspace.display().to_string(),
+                "exit_code": result.exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_truncated": result.stdout.truncated,
+                "stderr_truncated": result.stderr.truncated
             }),
         })
     }
@@ -5243,11 +5508,16 @@ impl Runtime {
 
     fn resolved_granted_workspace(
         &self,
+        tool_name: &str,
         session_id: &SessionId,
         agent_id: Option<&AgentId>,
         input: &serde_json::Value,
         required_access: WorkspaceAccess,
     ) -> Result<ResolvedWorkspace, ErrorPayload> {
+        if tool_name == "worker.apply" {
+            return self.resolve_worker_apply_workspace(input);
+        }
+
         let workspace_ref = tool_workspace_id(input)
             .or_else(|| tool_workspace_summary(input))
             .or_else(|| self.session_workspace(session_id))
@@ -5273,6 +5543,41 @@ impl Runtime {
                 false,
             ))
         }
+    }
+
+    fn resolve_worker_apply_workspace(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<ResolvedWorkspace, ErrorPayload> {
+        let worker_id = input_string(input, "worker_id")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                tool_error(
+                    "invalid_tool_input",
+                    "worker.apply requires worker_id",
+                    false,
+                )
+            })?;
+        let requested_worktree = input_string(input, "worktree_path");
+        let verified = self
+            .verify_cadis_worker_worktree(&worker_id, requested_worktree.as_deref())
+            .map_err(|error| tool_error(error.code, error.message, false))?;
+        let workspace_id = WorkspaceId::from(verified.metadata.workspace_id.clone());
+        let workspace = self.workspaces.get(&workspace_id).ok_or_else(|| {
+            tool_error(
+                "workspace_not_found",
+                format!(
+                    "workspace '{}' is not registered for worker '{}'",
+                    workspace_id, worker_id
+                ),
+                false,
+            )
+        })?;
+
+        Ok(ResolvedWorkspace {
+            root: workspace.root.clone(),
+        })
     }
 
     fn resolve_registered_workspace(
@@ -10098,6 +10403,114 @@ mod tests {
             project_metadata.state,
             ProjectWorkerWorktreeState::ReviewPending
         );
+    }
+
+    #[test]
+    fn worker_apply_requests_approval_and_applies_patch_after_approval() {
+        let cadis_home = test_workspace("worker-apply-home");
+        let workspace = test_workspace("worker-apply-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home);
+        register_workspace(&mut runtime, "worker-apply", &workspace);
+        let (_session_id, worker_id, worktree_path) =
+            complete_worker_in_workspace(&mut runtime, &workspace, "worker_apply");
+
+        let patch_path = runtime
+            .workers
+            .get(&worker_id)
+            .and_then(|worker| worker.artifacts.as_ref())
+            .map(|artifacts| artifacts.patch.clone())
+            .expect("worker patch artifact path should exist");
+
+        let readme = workspace.join("README.md");
+        let original = fs::read_to_string(&readme).expect("README should read");
+        let patched = format!("{original}Applied from worker patch\n");
+        fs::write(&readme, &patched).expect("README patched content should write");
+        let patch = Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["diff", "--binary", "HEAD", "--", "README.md"])
+            .output()
+            .expect("git diff should run");
+        assert!(
+            patch.status.success(),
+            "git diff should succeed: {}",
+            String::from_utf8_lossy(&patch.stderr)
+        );
+        fs::write(&readme, &original).expect("README should reset to original");
+        fs::write(&patch_path, &patch.stdout).expect("worker patch artifact should write");
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_apply"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerApply(WorkerApplyRequest {
+                worker_id: worker_id.clone(),
+                worktree_path: Some(worktree_path),
+            }),
+        ));
+
+        assert!(matches!(
+            request.response.response,
+            DaemonResponse::RequestAccepted(_)
+        ));
+        assert!(request.events.iter().any(|event| {
+            matches!(&event.event, CadisEvent::ApprovalRequested(payload) if payload.summary.contains("worker.apply requires approval"))
+        }));
+        assert!(!request
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+
+        let approved = approve(&mut runtime, approval_id_from(&request));
+        assert!(approved
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+        assert!(approved.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolCompleted(payload)
+                    if payload.summary.as_deref() == Some(&format!("applied worker patch for {worker_id}"))
+            )
+        }));
+
+        let final_readme = fs::read_to_string(&readme).expect("README should read after apply");
+        assert!(
+            final_readme.contains("Applied from worker patch"),
+            "README should include patch content after apply"
+        );
+    }
+
+    #[test]
+    fn worker_apply_rejects_empty_patch_artifact() {
+        let cadis_home = test_workspace("worker-apply-empty-home");
+        let workspace = test_workspace("worker-apply-empty-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home);
+        register_workspace(&mut runtime, "worker-apply-empty", &workspace);
+        let (_session_id, worker_id, worktree_path) =
+            complete_worker_in_workspace(&mut runtime, &workspace, "worker_apply_empty");
+
+        let patch_path = runtime
+            .workers
+            .get(&worker_id)
+            .and_then(|worker| worker.artifacts.as_ref())
+            .map(|artifacts| artifacts.patch.clone())
+            .expect("worker patch artifact path should exist");
+        fs::write(&patch_path, "\n").expect("empty worker patch should write");
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_apply_empty"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerApply(WorkerApplyRequest {
+                worker_id,
+                worktree_path: Some(worktree_path),
+            }),
+        ));
+
+        assert_rejected(request, "worker_patch_empty");
     }
 
     #[test]

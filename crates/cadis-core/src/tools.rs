@@ -111,6 +111,18 @@ impl ToolRegistry {
                 false,
                 false,
             ),
+            ToolDefinition::approval_placeholder(
+                "worker.apply",
+                "Apply a daemon-owned worker patch to a registered workspace",
+                cadis_protocol::RiskClass::WorkspaceEdit,
+                ToolInputSchema::WorkspaceMutation,
+                &[ToolSideEffect::EditWorkspace],
+                60,
+                ToolCancellationBehavior::Cooperative,
+                ToolWorkspaceBehavior::PathScoped,
+                false,
+                false,
+            ),
             ToolDefinition::safe_read(
                 "git.diff",
                 "Read git diff output for an approved workspace",
@@ -463,7 +475,7 @@ pub(crate) fn tool_workspace_id(input: &serde_json::Value) -> Option<String> {
 pub(crate) fn required_tool_access(tool_name: &str) -> WorkspaceAccess {
     match tool_name {
         "shell.run" => WorkspaceAccess::Exec,
-        "file.write" | "file.patch" => WorkspaceAccess::Write,
+        "file.write" | "file.patch" | "worker.apply" => WorkspaceAccess::Write,
         _ => WorkspaceAccess::Read,
     }
 }
@@ -482,6 +494,8 @@ pub(crate) fn tool_command_summary(tool_name: &str, input: &serde_json::Value) -
             })
         }),
         "file.patch" => file_patch_path_summary(input),
+        "worker.apply" => input_string(input, "worker_id")
+            .map(|worker_id| format!("worker {worker_id} patch")),
         _ => input_string(input, "path"),
     }
     .map(|value| redact(&value))
