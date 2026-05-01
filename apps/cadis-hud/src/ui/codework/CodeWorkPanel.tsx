@@ -7,6 +7,7 @@ const EMPTY_VALUE = "not reported by daemon";
 
 export function CodeWorkPanel() {
   const open = useHud((s) => s.codeWorkPanelOpen);
+  const gateway = useHud((s) => s.gateway);
   const selectedWorkerId = useHud((s) => s.selectedWorkerId);
   const workers = useHud((s) => s.workers);
   const agents = useHud((s) => s.agents);
@@ -24,6 +25,7 @@ export function CodeWorkPanel() {
   const isTerminal = worker
     ? ["completed", "failed", "cancelled"].includes(worker.status)
     : false;
+  const disconnected = gateway !== "connected";
 
   if (!open) return null;
 
@@ -131,8 +133,8 @@ export function CodeWorkPanel() {
           </button>
           <button
             type="button"
-            disabled={!worker || !isTerminal}
-            title="Send worker.cleanup to daemon"
+            disabled={!worker || !isTerminal || disconnected}
+            title={disconnected ? "Daemon disconnected" : "Send worker.cleanup to daemon"}
             onClick={() => worker && sendWorkerCleanup(worker.id, worker.worktree?.worktreePath)}
           >
             DISCARD

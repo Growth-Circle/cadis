@@ -541,6 +541,10 @@ describe("cadisActions", () => {
     const apply = screen.getByRole("button", { name: "APPLY" });
     expect(apply).toBeDisabled();
     expect(apply.getAttribute("title")).toBe("Pending daemon worker.apply support");
+
+    const discard = screen.getByRole("button", { name: "DISCARD" });
+    expect(discard).toBeDisabled();
+    expect(discard.getAttribute("title")).toBe("Daemon disconnected");
   });
 
   it("routes theme/opacity/avatar preference changes through daemon via ui.preferences.set", async () => {
