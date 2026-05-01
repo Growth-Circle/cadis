@@ -227,12 +227,110 @@ fn open_in_editor(path: String) -> Result<(), String> {
     if !canonical_str.contains("/.cadis/worktrees/") && !canonical_str.contains("\\.cadis\\worktrees\\") {
         return Err("path is not inside a CADIS-owned worktree".to_owned());
     }
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "code".to_owned());
-    std::process::Command::new(&editor)
-        .arg(&canonical)
-        .spawn()
-        .map_err(|e| format!("failed to open editor: {e}"))?;
-    Ok(())
+    launch_editor_with_fallback(&canonical)
+}
+
+fn launch_editor_with_fallback(path: &Path) -> Result<(), String> {
+    let editor_env = env::var("EDITOR").ok();
+    let mut errors = Vec::new();
+
+    for (program, args) in editor_launch_plan(editor_env.as_deref()) {
+        let mut command = Command::new(&program);
+        command.args(&args).arg(path);
+        match command.spawn() {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                errors.push(format!(
+                    "{} ({error})",
+                    format_editor_command(&program, &args)
+                ));
+            }
+        }
+    }
+
+    match open_with_system_default(path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            errors.push(format!("system default opener ({error})"));
+            Err(format!(
+                "failed to open editor for '{}': {}",
+                path.display(),
+                errors.join("; ")
+            ))
+        }
+    }
+}
+
+fn editor_launch_plan(editor_env: Option<&str>) -> Vec<(String, Vec<String>)> {
+    let mut plan: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some((program, args)) = parse_editor_command(editor_env) {
+        push_editor_candidate(&mut plan, program, args);
+    }
+    for program in default_editor_candidates() {
+        push_editor_candidate(&mut plan, (*program).to_owned(), Vec::new());
+    }
+    plan
+}
+
+fn parse_editor_command(editor_env: Option<&str>) -> Option<(String, Vec<String>)> {
+    let value = editor_env?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let mut parts = value.split_whitespace();
+    let program = parts.next()?.trim();
+    if program.is_empty() {
+        return None;
+    }
+    let args = parts.map(|value| value.to_owned()).collect::<Vec<_>>();
+    Some((program.to_owned(), args))
+}
+
+fn push_editor_candidate(plan: &mut Vec<(String, Vec<String>)>, program: String, args: Vec<String>) {
+    if plan
+        .iter()
+        .any(|(existing_program, existing_args)| existing_program == &program && existing_args == &args)
+    {
+        return;
+    }
+    plan.push((program, args));
+}
+
+fn format_editor_command(program: &str, args: &[String]) -> String {
+    if args.is_empty() {
+        return program.to_owned();
+    }
+    format!("{} {}", program, args.join(" "))
+}
+
+fn default_editor_candidates() -> &'static [&'static str] {
+    #[cfg(target_os = "windows")]
+    {
+        &["code", "cursor", "codium", "notepad++"]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        &["code", "cursor", "codium"]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        &["code", "cursor", "codium"]
+    }
+}
+
+fn open_with_system_default(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer").arg(path).spawn().map(|_| ())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(path).spawn().map(|_| ())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open").arg(path).spawn().map(|_| ())
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1475,6 +1573,35 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0]["frame"], "response");
         assert_eq!(frames[1]["payload"]["event_id"], "evt_1");
+    }
+
+    #[test]
+    fn parse_editor_command_handles_empty_and_args() {
+        assert_eq!(parse_editor_command(None), None);
+        assert_eq!(parse_editor_command(Some("   ")), None);
+        assert_eq!(
+            parse_editor_command(Some("code --reuse-window --wait")),
+            Some((
+                "code".to_owned(),
+                vec!["--reuse-window".to_owned(), "--wait".to_owned()]
+            ))
+        );
+    }
+
+    #[test]
+    fn editor_launch_plan_prefers_editor_env_and_deduplicates() {
+        let plan = editor_launch_plan(Some("code --reuse-window"));
+        assert_eq!(plan.first().map(|item| item.0.as_str()), Some("code"));
+        assert_eq!(
+            plan.first().map(|item| item.1.clone()),
+            Some(vec!["--reuse-window".to_owned()])
+        );
+
+        let duplicates = plan
+            .iter()
+            .filter(|(program, args)| program == "code" && args.is_empty())
+            .count();
+        assert_eq!(duplicates, 1);
     }
 
     fn unique_temp_dir() -> PathBuf {
