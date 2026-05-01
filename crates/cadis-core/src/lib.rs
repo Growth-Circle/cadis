@@ -2121,7 +2121,10 @@ impl Runtime {
             );
         };
         let patch_path = PathBuf::from(artifacts.patch.trim());
-        let expected_patch = self.profile_home.worker_artifact_paths(&request.worker_id).patch;
+        let expected_patch = self
+            .profile_home
+            .worker_artifact_paths(&request.worker_id)
+            .patch;
         if patch_path != expected_patch {
             return self.reject(
                 request_id,

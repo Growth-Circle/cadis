@@ -494,8 +494,9 @@ pub(crate) fn tool_command_summary(tool_name: &str, input: &serde_json::Value) -
             })
         }),
         "file.patch" => file_patch_path_summary(input),
-        "worker.apply" => input_string(input, "worker_id")
-            .map(|worker_id| format!("worker {worker_id} patch")),
+        "worker.apply" => {
+            input_string(input, "worker_id").map(|worker_id| format!("worker {worker_id} patch"))
+        }
         _ => input_string(input, "path"),
     }
     .map(|value| redact(&value))
