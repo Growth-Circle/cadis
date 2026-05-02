@@ -10,7 +10,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Current CADIS protocol version.
-pub const CURRENT_PROTOCOL_VERSION: &str = "0.1";
+pub const CURRENT_PROTOCOL_VERSION: &str = "0.2";
 
 macro_rules! string_id {
     ($(#[$meta:meta])* $name:ident) => {
@@ -319,6 +319,9 @@ pub enum DaemonResponse {
     /// Request was rejected before execution.
     #[serde(rename = "request.rejected")]
     RequestRejected(ErrorPayload),
+    /// Worker artifact file content.
+    #[serde(rename = "worker.artifact.read.response")]
+    WorkerArtifactRead(WorkerArtifactReadResponse),
 }
 
 /// Acknowledgement payload for accepted requests.
@@ -450,6 +453,9 @@ pub enum ClientRequest {
     /// Request approval-gated patch application for a daemon-owned worker.
     #[serde(rename = "worker.apply")]
     WorkerApply(WorkerApplyRequest),
+    /// Read a worker artifact file content.
+    #[serde(rename = "worker.artifact.read")]
+    WorkerArtifactRead(WorkerArtifactReadRequest),
     /// List available model descriptors.
     #[serde(rename = "models.list")]
     ModelsList(EmptyPayload),
@@ -692,6 +698,28 @@ pub struct WorkerApplyRequest {
     /// daemon-owned worker metadata exactly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
+}
+
+/// Payload for reading a worker artifact file content.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkerArtifactReadRequest {
+    /// Worker identifier.
+    pub worker_id: String,
+    /// Artifact file path relative to worktree root (e.g., "diff.patch", "changed-files.json").
+    pub artifact_path: String,
+}
+
+/// Response payload for worker artifact file content.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkerArtifactReadResponse {
+    /// Worker identifier.
+    pub worker_id: String,
+    /// Artifact file path that was read.
+    pub artifact_path: String,
+    /// File content as UTF-8 string.
+    pub content: String,
+    /// File size in bytes.
+    pub size_bytes: u64,
 }
 
 /// Payload for listing registered workspaces.

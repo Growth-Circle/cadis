@@ -227,6 +227,9 @@ impl HudApp {
                         .push(ChatMessage::system(format_error(&error)));
                 }
                 DaemonResponse::RequestAccepted(_) => {}
+                DaemonResponse::WorkerArtifactRead(_) => {
+                    // Not yet implemented in legacy HUD
+                }
             },
             ServerFrame::Event(event) => self.apply_event(event),
         }
