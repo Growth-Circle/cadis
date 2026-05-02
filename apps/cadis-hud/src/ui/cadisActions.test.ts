@@ -531,7 +531,7 @@ describe("cadisActions", () => {
     expect(screen.getByText("started: Worker Coding: run focused HUD worker tests")).toBeInTheDocument();
   });
 
-  it("apply button is disabled while disconnected", () => {
+  it("unsafe worker actions are disabled while disconnected", () => {
     for (const frame of mockCadisDaemonWorkerStream) {
       handleCadisFrameForTest(frame);
     }
@@ -541,6 +541,10 @@ describe("cadisActions", () => {
     const apply = screen.getByRole("button", { name: "APPLY" });
     expect(apply).toBeDisabled();
     expect(apply.getAttribute("title")).toBe("Daemon disconnected");
+
+    const discard = screen.getByRole("button", { name: "DISCARD" });
+    expect(discard).toBeDisabled();
+    expect(discard.getAttribute("title")).toBe("Daemon disconnected");
   });
 
   it("sends worker.apply from code work panel when connected", async () => {
