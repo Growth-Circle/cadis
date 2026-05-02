@@ -18,6 +18,7 @@ beforeEach(() => {
   sendAgentRenameMock.mockClear().mockReturnValue(true);
   sendAgentSpecialistUpdateMock.mockClear().mockReturnValue(true);
   useHud.setState({
+    gateway: "connected",
     agentRenameTarget: "atlas",
     agents: [
       {
@@ -58,5 +59,16 @@ describe("AgentRenameDialog", () => {
 
     const input = screen.getByLabelText(/agent name/i) as HTMLInputElement;
     expect(input.maxLength).toBe(32);
+  });
+
+  it("disables save while disconnected", () => {
+    useHud.setState({ gateway: "disconnected" });
+    render(createElement(AgentRenameDialog));
+
+    const save = screen.getByRole("button", { name: "SAVE" });
+    expect(save).toBeDisabled();
+    fireEvent.click(save);
+    expect(sendAgentRenameMock).not.toHaveBeenCalled();
+    expect(sendAgentSpecialistUpdateMock).not.toHaveBeenCalled();
   });
 });

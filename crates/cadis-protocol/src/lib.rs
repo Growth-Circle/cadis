@@ -447,6 +447,9 @@ pub enum ClientRequest {
     /// Request daemon-owned worker worktree cleanup planning.
     #[serde(rename = "worker.cleanup")]
     WorkerCleanup(WorkerCleanupRequest),
+    /// Request approval-gated patch application for a daemon-owned worker.
+    #[serde(rename = "worker.apply")]
+    WorkerApply(WorkerApplyRequest),
     /// List available model descriptors.
     #[serde(rename = "models.list")]
     ModelsList(EmptyPayload),
@@ -672,6 +675,17 @@ pub struct WorkerResultRequest {
 /// Payload for requesting worker worktree cleanup planning.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct WorkerCleanupRequest {
+    /// Worker identifier.
+    pub worker_id: String,
+    /// Optional caller-observed worktree path. When supplied, it must match the
+    /// daemon-owned worker metadata exactly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
+}
+
+/// Payload for requesting approval-gated worker patch application.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkerApplyRequest {
     /// Worker identifier.
     pub worker_id: String,
     /// Optional caller-observed worktree path. When supplied, it must match the
@@ -2004,6 +2018,34 @@ mod tests {
                 "request_id": "req_1",
                 "client_id": "cli_1",
                 "type": "worker.cleanup",
+                "payload": {
+                    "worker_id": "worker_000001",
+                    "worktree_path": ".cadis/worktrees/worker_000001"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn worker_apply_request_matches_documented_shape() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_1"),
+            ClientId::from("cli_1"),
+            ClientRequest::WorkerApply(WorkerApplyRequest {
+                worker_id: "worker_000001".to_owned(),
+                worktree_path: Some(".cadis/worktrees/worker_000001".to_owned()),
+            }),
+        );
+
+        let value = serde_json::to_value(&envelope).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "protocol_version": CURRENT_PROTOCOL_VERSION,
+                "request_id": "req_1",
+                "client_id": "cli_1",
+                "type": "worker.apply",
                 "payload": {
                     "worker_id": "worker_000001",
                     "worktree_path": ".cadis/worktrees/worker_000001"
