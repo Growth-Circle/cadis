@@ -721,6 +721,12 @@ impl Runtime {
             ClientRequest::WorkerResult(request) => self.worker_result(request_id, request),
             ClientRequest::WorkerCleanup(request) => self.worker_cleanup(request_id, request),
             ClientRequest::WorkerApply(request) => self.worker_apply(request_id, request),
+            ClientRequest::WorkerArtifactRead(_) => self.reject(
+                request_id,
+                "not_implemented",
+                "worker.artifact.read is not yet implemented in the daemon",
+                false,
+            ),
             ClientRequest::SessionUnsubscribe(_) => self.accept(request_id, Vec::new()),
         }
     }
