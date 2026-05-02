@@ -221,10 +221,12 @@ fn voice_stt_stop() -> Result<(), String> {
 fn open_in_editor(path: String) -> Result<(), String> {
     // Desktop convenience: open a CADIS-owned worktree in the user's editor.
     // Validate the canonical path contains a .cadis/worktrees/ segment.
-    let canonical = std::fs::canonicalize(&path)
-        .map_err(|e| format!("cannot resolve path: {e}"))?;
+    let canonical =
+        std::fs::canonicalize(&path).map_err(|e| format!("cannot resolve path: {e}"))?;
     let canonical_str = canonical.to_string_lossy();
-    if !canonical_str.contains("/.cadis/worktrees/") && !canonical_str.contains("\\.cadis\\worktrees\\") {
+    if !canonical_str.contains("/.cadis/worktrees/")
+        && !canonical_str.contains("\\.cadis\\worktrees\\")
+    {
         return Err("path is not inside a CADIS-owned worktree".to_owned());
     }
     launch_editor_with_fallback(&canonical)
@@ -277,20 +279,89 @@ fn parse_editor_command(editor_env: Option<&str>) -> Option<(String, Vec<String>
     if value.is_empty() {
         return None;
     }
-    let mut parts = value.split_whitespace();
-    let program = parts.next()?.trim();
-    if program.is_empty() {
+    let mut parts = split_editor_command(value).into_iter();
+    let program = parts.next()?;
+    if program.trim().is_empty() {
         return None;
     }
-    let args = parts.map(|value| value.to_owned()).collect::<Vec<_>>();
-    Some((program.to_owned(), args))
+    let args = parts.collect::<Vec<_>>();
+    Some((program, args))
 }
 
-fn push_editor_candidate(plan: &mut Vec<(String, Vec<String>)>, program: String, args: Vec<String>) {
-    if plan
-        .iter()
-        .any(|(existing_program, existing_args)| existing_program == &program && existing_args == &args)
-    {
+fn split_editor_command(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut chars = value.chars().peekable();
+    let mut quote = None;
+    let mut in_token = false;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(active_quote) if ch == active_quote => {
+                quote = None;
+                in_token = true;
+            }
+            Some(_) if ch == '\\' => {
+                if should_escape_editor_char(chars.peek().copied(), true) {
+                    let next = chars.next().unwrap_or(ch);
+                    current.push(next);
+                } else {
+                    current.push(ch);
+                }
+                in_token = true;
+            }
+            Some(_) => {
+                current.push(ch);
+                in_token = true;
+            }
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                in_token = true;
+            }
+            None if ch == '\\' => {
+                if should_escape_editor_char(chars.peek().copied(), false) {
+                    let next = chars.next().unwrap_or(ch);
+                    current.push(next);
+                } else {
+                    current.push(ch);
+                }
+                in_token = true;
+            }
+            None if ch.is_whitespace() => {
+                if in_token {
+                    parts.push(std::mem::take(&mut current));
+                    in_token = false;
+                }
+            }
+            None => {
+                current.push(ch);
+                in_token = true;
+            }
+        }
+    }
+
+    if in_token {
+        parts.push(current);
+    }
+    parts
+}
+
+fn should_escape_editor_char(next: Option<char>, in_quote: bool) -> bool {
+    match next {
+        Some('\\' | '\'' | '"') => true,
+        Some(ch) if !in_quote && ch.is_whitespace() => true,
+        _ => false,
+    }
+}
+
+fn push_editor_candidate(
+    plan: &mut Vec<(String, Vec<String>)>,
+    program: String,
+    args: Vec<String>,
+) {
+    if plan.iter().any(|(existing_program, existing_args)| {
+        existing_program == &program && existing_args == &args
+    }) {
         return;
     }
     plan.push((program, args));
@@ -1136,7 +1207,8 @@ where
 }
 
 fn send_cadis_request(transport: &DaemonTransport, request: Value) -> io::Result<Vec<Value>> {
-    let mut stream = connect_daemon(transport).map_err(|msg| io::Error::new(io::ErrorKind::ConnectionRefused, msg))?;
+    let mut stream = connect_daemon(transport)
+        .map_err(|msg| io::Error::new(io::ErrorKind::ConnectionRefused, msg))?;
 
     serde_json::to_writer(&mut stream, &request)?;
     stream.write_all(b"\n")?;
@@ -1584,6 +1656,43 @@ mod tests {
             Some((
                 "code".to_owned(),
                 vec!["--reuse-window".to_owned(), "--wait".to_owned()]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_editor_command_handles_quoted_program_path() {
+        assert_eq!(
+            parse_editor_command(Some("\"/opt/Visual Studio Code/code\" --reuse-window")),
+            Some((
+                "/opt/Visual Studio Code/code".to_owned(),
+                vec!["--reuse-window".to_owned()]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_editor_command_handles_quoted_and_escaped_args() {
+        assert_eq!(
+            parse_editor_command(Some("code '--profile CADIS Work' --goto src\\ main.rs:10")),
+            Some((
+                "code".to_owned(),
+                vec![
+                    "--profile CADIS Work".to_owned(),
+                    "--goto".to_owned(),
+                    "src main.rs:10".to_owned()
+                ]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_editor_command_preserves_unescaped_windows_backslashes() {
+        assert_eq!(
+            parse_editor_command(Some(r#"C:\Tools\editor.exe --reuse-window"#)),
+            Some((
+                r#"C:\Tools\editor.exe"#.to_owned(),
+                vec!["--reuse-window".to_owned()]
             ))
         );
     }
