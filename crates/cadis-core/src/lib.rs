@@ -4815,44 +4815,70 @@ impl Runtime {
             ));
         }
 
-        let mut apply = Command::new("git");
-        apply
-            .arg("-C")
-            .arg(workspace)
-            .arg("apply")
-            .arg("--3way")
-            .arg("--whitespace=nowarn")
-            .arg(&patch_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let affected_paths = worker_apply_patch_paths(workspace, &patch_path, tool_timeout_secs)?;
+        ensure_worker_apply_paths_clean(workspace, &affected_paths, tool_timeout_secs)?;
 
-        let result = run_bounded_command(apply, StdDuration::from_secs(tool_timeout_secs))?;
+        let preflight = run_worker_apply_git(
+            workspace,
+            &patch_path,
+            &["--check", "--whitespace=nowarn"],
+            tool_timeout_secs,
+        )?;
+        if preflight.timed_out {
+            return Err(tool_error(
+                "tool_timeout",
+                format!(
+                    "worker.apply preflight exceeded timeout of {tool_timeout_secs}s for worker '{worker_id}'"
+                ),
+                false,
+            ));
+        }
+        if !preflight.status_success {
+            return Err(tool_error(
+                "worker_apply_preflight_failed",
+                format!(
+                    "worker '{worker_id}' patch preflight failed; no changes were applied: {}",
+                    worker_apply_command_detail(
+                        &preflight,
+                        "git apply --check failed without output"
+                    )
+                ),
+                false,
+            ));
+        }
+
+        let checkpoint =
+            capture_worker_apply_checkpoint(workspace, &affected_paths, tool_timeout_secs)?;
+        let result = run_worker_apply_git(
+            workspace,
+            &patch_path,
+            &["--3way", "--whitespace=nowarn"],
+            tool_timeout_secs,
+        )?;
         let stdout = redact(&String::from_utf8_lossy(&result.stdout.bytes));
         let stderr = redact(&String::from_utf8_lossy(&result.stderr.bytes));
 
         if result.timed_out {
+            let rollback =
+                rollback_worker_apply(workspace, &patch_path, &checkpoint, tool_timeout_secs);
             return Err(tool_error(
                 "tool_timeout",
                 format!(
-                    "worker.apply exceeded timeout of {tool_timeout_secs}s for worker '{worker_id}'"
+                    "worker.apply exceeded timeout of {tool_timeout_secs}s for worker '{worker_id}'; rollback {}",
+                    rollback.message
                 ),
                 false,
             ));
         }
         if !result.status_success {
-            let detail = if !stderr.trim().is_empty() {
-                stderr
-            } else if !stdout.trim().is_empty() {
-                stdout
-            } else {
-                "git apply failed without output".to_owned()
-            };
+            let rollback =
+                rollback_worker_apply(workspace, &patch_path, &checkpoint, tool_timeout_secs);
+            let detail = worker_apply_command_detail(&result, "git apply failed without output");
             return Err(tool_error(
                 "worker_apply_failed",
                 format!(
-                    "worker '{worker_id}' patch apply failed (exit code {:?}): {}",
-                    result.exit_code, detail
+                    "worker '{worker_id}' patch apply failed (exit code {:?}): {}; rollback {}",
+                    result.exit_code, detail, rollback.message
                 ),
                 false,
             ));
@@ -5520,7 +5546,7 @@ impl Runtime {
         required_access: WorkspaceAccess,
     ) -> Result<ResolvedWorkspace, ErrorPayload> {
         if tool_name == "worker.apply" {
-            return self.resolve_worker_apply_workspace(input);
+            return self.resolve_worker_apply_workspace(input, agent_id, required_access);
         }
 
         let workspace_ref = tool_workspace_id(input)
@@ -5553,6 +5579,8 @@ impl Runtime {
     fn resolve_worker_apply_workspace(
         &self,
         input: &serde_json::Value,
+        request_agent_id: Option<&AgentId>,
+        required_access: WorkspaceAccess,
     ) -> Result<ResolvedWorkspace, ErrorPayload> {
         let worker_id = input_string(input, "worker_id")
             .map(|value| value.trim().to_owned())
@@ -5569,6 +5597,13 @@ impl Runtime {
             .verify_cadis_worker_worktree(&worker_id, requested_worktree.as_deref())
             .map_err(|error| tool_error(error.code, error.message, false))?;
         let workspace_id = WorkspaceId::from(verified.metadata.workspace_id.clone());
+        let worker = self.workers.get(&worker_id).ok_or_else(|| {
+            tool_error(
+                "worker_not_found",
+                format!("worker '{worker_id}' was not found"),
+                false,
+            )
+        })?;
         let workspace = self.workspaces.get(&workspace_id).ok_or_else(|| {
             tool_error(
                 "workspace_not_found",
@@ -5580,9 +5615,25 @@ impl Runtime {
             )
         })?;
 
-        Ok(ResolvedWorkspace {
-            root: workspace.root.clone(),
-        })
+        let grant_agent_id = worker
+            .agent_id
+            .as_ref()
+            .or(worker.parent_agent_id.as_ref())
+            .or(request_agent_id);
+        if self.has_workspace_grant(&workspace.id, grant_agent_id, required_access) {
+            Ok(ResolvedWorkspace {
+                root: workspace.root.clone(),
+            })
+        } else {
+            Err(tool_error(
+                "workspace_grant_required",
+                format!(
+                    "no active {:?} grant for workspace '{}' and worker '{}'",
+                    required_access, workspace.id, worker_id
+                ),
+                false,
+            ))
+        }
     }
 
     fn resolve_registered_workspace(
@@ -7500,6 +7551,504 @@ fn run_worker_validation_command(
     run_bounded_command(command, StdDuration::from_millis(WORKER_COMMAND_TIMEOUT_MS))
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkerApplyCheckpoint {
+    pre_status: Vec<u8>,
+    paths: Vec<WorkerApplyPathSnapshot>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkerApplyPathSnapshot {
+    relative_path: String,
+    state: WorkerApplyPathState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkerApplyPathState {
+    Missing,
+    File(Vec<u8>),
+    Directory,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WorkerApplyRollback {
+    restored: bool,
+    message: String,
+}
+
+fn worker_apply_patch_paths(
+    workspace: &Path,
+    patch_path: &Path,
+    timeout_secs: u64,
+) -> Result<Vec<String>, ErrorPayload> {
+    let result = run_worker_apply_git(
+        workspace,
+        patch_path,
+        &["--numstat", "-z", "--whitespace=nowarn"],
+        timeout_secs,
+    )?;
+    if result.timed_out {
+        return Err(tool_error(
+            "tool_timeout",
+            format!("worker.apply patch inspection exceeded timeout of {timeout_secs}s"),
+            false,
+        ));
+    }
+    if result.stdout.truncated {
+        return Err(tool_error(
+            "worker_apply_patch_too_large",
+            "worker.apply patch path list exceeded bounded output",
+            false,
+        ));
+    }
+    if !result.status_success {
+        return Err(tool_error(
+            "worker_apply_preflight_failed",
+            format!(
+                "worker.apply could not inspect patch paths; no changes were applied: {}",
+                worker_apply_command_detail(&result, "git apply --numstat failed without output")
+            ),
+            false,
+        ));
+    }
+
+    let mut paths = Vec::new();
+    for record in result.stdout.bytes.split(|byte| *byte == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        let record = String::from_utf8_lossy(record);
+        let mut fields = record.splitn(3, '\t');
+        let _added = fields.next();
+        let _deleted = fields.next();
+        let Some(path) = fields.next() else {
+            return Err(tool_error(
+                "worker_apply_preflight_failed",
+                "worker.apply patch path inspection returned malformed numstat output",
+                false,
+            ));
+        };
+        push_worker_apply_path(&mut paths, path)?;
+    }
+
+    if paths.is_empty() {
+        return Err(tool_error(
+            "worker_patch_empty",
+            "worker.apply patch does not contain file changes",
+            false,
+        ));
+    }
+
+    Ok(paths)
+}
+
+fn push_worker_apply_path(paths: &mut Vec<String>, path: &str) -> Result<(), ErrorPayload> {
+    let path = validate_worker_apply_repo_path(path)?;
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
+    Ok(())
+}
+
+fn validate_worker_apply_repo_path(path: &str) -> Result<String, ErrorPayload> {
+    if path.is_empty() || path == "/dev/null" {
+        return Err(tool_error(
+            "worker_apply_preflight_failed",
+            "worker.apply patch contains an invalid path",
+            false,
+        ));
+    }
+    let repo_path = Path::new(path);
+    if repo_path.is_absolute()
+        || repo_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(tool_error(
+            "outside_workspace",
+            format!("worker.apply patch path '{path}' is outside the workspace"),
+            false,
+        ));
+    }
+    if file_patch_path_is_protected(repo_path) {
+        return Err(tool_error(
+            "protected_path",
+            "worker.apply refuses to modify protected workspace metadata paths",
+            false,
+        ));
+    }
+    if file_patch_path_is_secret_like(repo_path) {
+        return Err(tool_error(
+            "secret_path_rejected",
+            "worker.apply refuses to modify secret-like paths",
+            false,
+        ));
+    }
+    Ok(path.to_owned())
+}
+
+fn ensure_worker_apply_paths_clean(
+    workspace: &Path,
+    paths: &[String],
+    timeout_secs: u64,
+) -> Result<(), ErrorPayload> {
+    let status = worker_apply_git_status(workspace, paths, timeout_secs)?;
+    if status.is_empty() {
+        return Ok(());
+    }
+
+    Err(tool_error(
+        "worker_apply_dirty_paths",
+        format!(
+            "worker.apply refuses to apply over pre-existing changes in affected paths: {}",
+            worker_apply_status_summary(&status)
+        ),
+        false,
+    ))
+}
+
+fn capture_worker_apply_checkpoint(
+    workspace: &Path,
+    paths: &[String],
+    timeout_secs: u64,
+) -> Result<WorkerApplyCheckpoint, ErrorPayload> {
+    let pre_status = worker_apply_git_status(workspace, &[], timeout_secs)?;
+    let mut snapshots = Vec::with_capacity(paths.len());
+    for relative_path in paths {
+        snapshots.push(snapshot_worker_apply_path(workspace, relative_path)?);
+    }
+    Ok(WorkerApplyCheckpoint {
+        pre_status,
+        paths: snapshots,
+    })
+}
+
+fn snapshot_worker_apply_path(
+    workspace: &Path,
+    relative_path: &str,
+) -> Result<WorkerApplyPathSnapshot, ErrorPayload> {
+    let relative_path = validate_worker_apply_repo_path(relative_path)?;
+    let path = workspace.join(&relative_path);
+    ensure_worker_apply_snapshot_path(workspace, &path)?;
+
+    let state = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(tool_error(
+                "worker_apply_checkpoint_failed",
+                format!(
+                    "worker.apply refuses to checkpoint symlink path '{}'",
+                    relative_path
+                ),
+                false,
+            ))
+        }
+        Ok(metadata) if metadata.is_file() => {
+            let bytes = fs::read(&path).map_err(|error| {
+                tool_error(
+                    "worker_apply_checkpoint_failed",
+                    format!("could not checkpoint '{}': {error}", relative_path),
+                    false,
+                )
+            })?;
+            WorkerApplyPathState::File(bytes)
+        }
+        Ok(metadata) if metadata.is_dir() => WorkerApplyPathState::Directory,
+        Ok(_) => {
+            return Err(tool_error(
+                "worker_apply_checkpoint_failed",
+                format!(
+                    "worker.apply refuses to checkpoint unsupported path '{}'",
+                    relative_path
+                ),
+                false,
+            ))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => WorkerApplyPathState::Missing,
+        Err(error) => {
+            return Err(tool_error(
+                "worker_apply_checkpoint_failed",
+                format!("could not inspect '{}': {error}", relative_path),
+                false,
+            ))
+        }
+    };
+
+    Ok(WorkerApplyPathSnapshot {
+        relative_path,
+        state,
+    })
+}
+
+fn ensure_worker_apply_snapshot_path(workspace: &Path, path: &Path) -> Result<(), ErrorPayload> {
+    let workspace = workspace.canonicalize().map_err(|error| {
+        tool_error(
+            "workspace_unavailable",
+            format!("workspace {} is unavailable: {error}", workspace.display()),
+            false,
+        )
+    })?;
+
+    let candidate = path
+        .ancestors()
+        .find(|ancestor| ancestor.exists())
+        .and_then(|ancestor| ancestor.canonicalize().ok());
+    if candidate
+        .as_ref()
+        .is_some_and(|candidate| !candidate.starts_with(&workspace))
+    {
+        return Err(tool_error(
+            "outside_workspace",
+            format!(
+                "worker.apply patch path '{}' resolves outside the workspace",
+                path.display()
+            ),
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn rollback_worker_apply(
+    workspace: &Path,
+    patch_path: &Path,
+    checkpoint: &WorkerApplyCheckpoint,
+    timeout_secs: u64,
+) -> WorkerApplyRollback {
+    let mut notes = Vec::new();
+    match run_worker_apply_git(
+        workspace,
+        patch_path,
+        &["--reverse", "--whitespace=nowarn"],
+        timeout_secs,
+    ) {
+        Ok(result) if result.status_success => notes.push("reverse patch applied".to_owned()),
+        Ok(result) => notes.push(format!(
+            "reverse patch failed: {}",
+            worker_apply_command_detail(&result, "git apply --reverse failed without output")
+        )),
+        Err(error) => notes.push(format!("reverse patch failed: {}", error.message)),
+    }
+
+    if let Err(error) = worker_apply_restore_index(workspace, &checkpoint.paths, timeout_secs) {
+        notes.push(format!("index restore failed: {error}"));
+    }
+    for snapshot in &checkpoint.paths {
+        if let Err(error) = restore_worker_apply_path(workspace, snapshot) {
+            notes.push(format!(
+                "path restore failed for '{}': {error}",
+                snapshot.relative_path
+            ));
+        }
+    }
+
+    match worker_apply_git_status(workspace, &[], timeout_secs) {
+        Ok(status) if status == checkpoint.pre_status => WorkerApplyRollback {
+            restored: true,
+            message: format!("restored pre-apply status ({})", notes.join("; ")),
+        },
+        Ok(status) => WorkerApplyRollback {
+            restored: false,
+            message: format!(
+                "attempted but workspace status changed from [{}] to [{}] ({})",
+                worker_apply_status_summary(&checkpoint.pre_status),
+                worker_apply_status_summary(&status),
+                notes.join("; ")
+            ),
+        },
+        Err(error) => WorkerApplyRollback {
+            restored: false,
+            message: format!(
+                "attempted but status verification failed: {} ({})",
+                error.message,
+                notes.join("; ")
+            ),
+        },
+    }
+}
+
+fn worker_apply_restore_index(
+    workspace: &Path,
+    snapshots: &[WorkerApplyPathSnapshot],
+    timeout_secs: u64,
+) -> Result<(), String> {
+    if snapshots.is_empty() {
+        return Ok(());
+    }
+    let paths = snapshots
+        .iter()
+        .map(|snapshot| snapshot.relative_path.clone())
+        .collect::<Vec<_>>();
+    let result = run_worker_apply_git_command(
+        workspace,
+        &["restore", "--staged", "--source=HEAD", "--"],
+        &paths,
+        timeout_secs,
+    )
+    .map_err(|error| error.message)?;
+    if result.timed_out {
+        return Err(format!(
+            "git restore --staged exceeded timeout of {timeout_secs}s"
+        ));
+    }
+    if result.status_success {
+        Ok(())
+    } else {
+        Err(worker_apply_command_detail(
+            &result,
+            "git restore --staged failed without output",
+        ))
+    }
+}
+
+fn restore_worker_apply_path(
+    workspace: &Path,
+    snapshot: &WorkerApplyPathSnapshot,
+) -> Result<(), String> {
+    let path = workspace.join(&snapshot.relative_path);
+    match &snapshot.state {
+        WorkerApplyPathState::Missing => remove_worker_apply_path(&path),
+        WorkerApplyPathState::File(bytes) => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            fs::write(&path, bytes).map_err(|error| error.to_string())
+        }
+        WorkerApplyPathState::Directory => {
+            if path.exists() && !path.is_dir() {
+                remove_worker_apply_path(&path)?;
+            }
+            fs::create_dir_all(&path).map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn remove_worker_apply_path(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {
+            fs::remove_dir_all(path).map_err(|error| error.to_string())
+        }
+        Ok(_) => fs::remove_file(path).map_err(|error| error.to_string()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn worker_apply_git_status(
+    workspace: &Path,
+    paths: &[String],
+    timeout_secs: u64,
+) -> Result<Vec<u8>, ErrorPayload> {
+    let mut args = vec!["status", "--porcelain=v1", "-z", "--untracked-files=all"];
+    if !paths.is_empty() {
+        args.push("--");
+    }
+    let result = if paths.is_empty() {
+        run_worker_apply_git_command(workspace, &args, &[], timeout_secs)?
+    } else {
+        run_worker_apply_git_command(workspace, &args, paths, timeout_secs)?
+    };
+    if result.timed_out {
+        return Err(tool_error(
+            "tool_timeout",
+            format!("worker.apply status snapshot exceeded timeout of {timeout_secs}s"),
+            false,
+        ));
+    }
+    if result.stdout.truncated {
+        return Err(tool_error(
+            "worker_apply_status_truncated",
+            "worker.apply status snapshot exceeded bounded output",
+            false,
+        ));
+    }
+    if result.status_success {
+        Ok(result.stdout.bytes)
+    } else {
+        Err(tool_error(
+            "worker_apply_status_failed",
+            worker_apply_command_detail(&result, "git status failed without output"),
+            false,
+        ))
+    }
+}
+
+fn run_worker_apply_git(
+    workspace: &Path,
+    patch_path: &Path,
+    args: &[&str],
+    timeout_secs: u64,
+) -> Result<ShellRunResult, ErrorPayload> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(workspace)
+        .arg("apply")
+        .args(args)
+        .arg(patch_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run_bounded_command(command, StdDuration::from_secs(timeout_secs))
+}
+
+fn run_worker_apply_git_command(
+    workspace: &Path,
+    args: &[&str],
+    paths: &[String],
+    timeout_secs: u64,
+) -> Result<ShellRunResult, ErrorPayload> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(workspace)
+        .args(args)
+        .args(paths)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run_bounded_command(command, StdDuration::from_secs(timeout_secs))
+}
+
+fn worker_apply_command_detail(result: &ShellRunResult, fallback: &str) -> String {
+    let stdout = redact(&String::from_utf8_lossy(&result.stdout.bytes));
+    let stderr = redact(&String::from_utf8_lossy(&result.stderr.bytes));
+    let mut detail = if !stderr.trim().is_empty() {
+        stderr
+    } else if !stdout.trim().is_empty() {
+        stdout
+    } else {
+        fallback.to_owned()
+    };
+    if result.stderr.truncated || result.stdout.truncated {
+        detail.push_str(" [output truncated]");
+    }
+    detail
+}
+
+fn worker_apply_status_summary(status: &[u8]) -> String {
+    let mut entries = status
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .take(8)
+        .map(|entry| redact(&String::from_utf8_lossy(entry)).replace('\n', " "))
+        .collect::<Vec<_>>();
+    let truncated = status
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .count()
+        > 8;
+    if entries.is_empty() {
+        return "clean".to_owned();
+    }
+    if truncated {
+        entries.push("...".to_owned());
+    }
+    entries.join(", ")
+}
+
 fn worker_command_report(
     worker_command: &str,
     cwd: &str,
@@ -8381,6 +8930,47 @@ mod tests {
         (session_id, completed.worker_id.clone(), worktree_path)
     }
 
+    fn write_worker_readme_append_patch(
+        runtime: &Runtime,
+        worker_id: &str,
+        workspace: &Path,
+        line: &str,
+    ) -> String {
+        let patch_path = runtime
+            .workers
+            .get(worker_id)
+            .and_then(|worker| worker.artifacts.as_ref())
+            .map(|artifacts| artifacts.patch.clone())
+            .expect("worker patch artifact path should exist");
+
+        let readme = workspace.join("README.md");
+        let original = fs::read_to_string(&readme).expect("README should read");
+        let patched = format!("{original}{line}\n");
+        fs::write(&readme, &patched).expect("README patched content should write");
+        let patch = Command::new("git")
+            .arg("-C")
+            .arg(workspace)
+            .args(["diff", "--binary", "HEAD", "--", "README.md"])
+            .output()
+            .expect("git diff should run");
+        assert!(
+            patch.status.success(),
+            "git diff should succeed: {}",
+            String::from_utf8_lossy(&patch.stderr)
+        );
+        fs::write(&readme, &original).expect("README should reset to original");
+        fs::write(&patch_path, &patch.stdout).expect("worker patch artifact should write");
+        original
+    }
+
+    fn worker_owner_agent(runtime: &Runtime, worker_id: &str) -> AgentId {
+        runtime
+            .workers
+            .get(worker_id)
+            .and_then(|worker| worker.agent_id.clone().or(worker.parent_agent_id.clone()))
+            .expect("worker should have an owner agent")
+    }
+
     fn grant_workspace(runtime: &mut Runtime, workspace_id: &str, access: Vec<WorkspaceAccess>) {
         grant_workspace_for_agent(runtime, workspace_id, access, None)
     }
@@ -8406,6 +8996,15 @@ mod tests {
             outcome.response.response,
             DaemonResponse::RequestAccepted(_)
         ));
+    }
+
+    fn assert_tool_failed_code(outcome: &RequestOutcome, code: &str) {
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload) if payload.error.code == code
+            )
+        }));
     }
 
     fn approval_id_from(outcome: &RequestOutcome) -> ApprovalId {
@@ -10421,30 +11020,14 @@ mod tests {
         let (_session_id, worker_id, worktree_path) =
             complete_worker_in_workspace(&mut runtime, &workspace, "worker_apply");
 
-        let patch_path = runtime
-            .workers
-            .get(&worker_id)
-            .and_then(|worker| worker.artifacts.as_ref())
-            .map(|artifacts| artifacts.patch.clone())
-            .expect("worker patch artifact path should exist");
-
         let readme = workspace.join("README.md");
-        let original = fs::read_to_string(&readme).expect("README should read");
-        let patched = format!("{original}Applied from worker patch\n");
-        fs::write(&readme, &patched).expect("README patched content should write");
-        let patch = Command::new("git")
-            .arg("-C")
-            .arg(&workspace)
-            .args(["diff", "--binary", "HEAD", "--", "README.md"])
-            .output()
-            .expect("git diff should run");
-        assert!(
-            patch.status.success(),
-            "git diff should succeed: {}",
-            String::from_utf8_lossy(&patch.stderr)
+        let original = write_worker_readme_append_patch(
+            &runtime,
+            &worker_id,
+            &workspace,
+            "Applied from worker patch",
         );
-        fs::write(&readme, &original).expect("README should reset to original");
-        fs::write(&patch_path, &patch.stdout).expect("worker patch artifact should write");
+        grant_workspace(&mut runtime, "worker-apply", vec![WorkspaceAccess::Write]);
 
         let request = runtime.handle_request(RequestEnvelope::new(
             RequestId::from("req_worker_apply"),
@@ -10466,6 +11049,11 @@ mod tests {
             .events
             .iter()
             .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+        assert_eq!(
+            fs::read_to_string(&readme).expect("README should still read"),
+            original,
+            "worker.apply must not mutate before approval"
+        );
 
         let approved = approve(&mut runtime, approval_id_from(&request));
         assert!(approved
@@ -10484,6 +11072,253 @@ mod tests {
         assert!(
             final_readme.contains("Applied from worker patch"),
             "README should include patch content after apply"
+        );
+    }
+
+    #[test]
+    fn worker_apply_requires_active_write_grant_for_worker_owner() {
+        let cadis_home = test_workspace("worker-apply-grant-home");
+        let workspace = test_workspace("worker-apply-grant-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home);
+        register_workspace(&mut runtime, "worker-apply-grant", &workspace);
+        let (_session_id, worker_id, worktree_path) =
+            complete_worker_in_workspace(&mut runtime, &workspace, "worker_apply_grant");
+        let original = write_worker_readme_append_patch(
+            &runtime,
+            &worker_id,
+            &workspace,
+            "Grant-gated worker patch",
+        );
+        let readme = workspace.join("README.md");
+        let owner_agent = worker_owner_agent(&runtime, &worker_id);
+
+        grant_workspace(
+            &mut runtime,
+            "worker-apply-grant",
+            vec![WorkspaceAccess::Read],
+        );
+        let read_only = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_apply_read_only_grant"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerApply(WorkerApplyRequest {
+                worker_id: worker_id.clone(),
+                worktree_path: Some(worktree_path.clone()),
+            }),
+        ));
+        assert_tool_failed_code(&read_only, "workspace_grant_required");
+        assert!(!read_only
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+        assert_eq!(
+            fs::read_to_string(&readme).expect("README should read"),
+            original
+        );
+
+        grant_workspace_for_agent(
+            &mut runtime,
+            "worker-apply-grant",
+            vec![WorkspaceAccess::Write],
+            Some(AgentId::from("other-agent")),
+        );
+        let wrong_agent = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_apply_wrong_agent_grant"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerApply(WorkerApplyRequest {
+                worker_id: worker_id.clone(),
+                worktree_path: Some(worktree_path.clone()),
+            }),
+        ));
+        assert_tool_failed_code(&wrong_agent, "workspace_grant_required");
+        assert!(!wrong_agent
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+
+        grant_workspace_for_agent(
+            &mut runtime,
+            "worker-apply-grant",
+            vec![WorkspaceAccess::Write],
+            Some(owner_agent),
+        );
+        let allowed = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_apply_owner_write_grant"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerApply(WorkerApplyRequest {
+                worker_id,
+                worktree_path: Some(worktree_path),
+            }),
+        ));
+        assert!(allowed.events.iter().any(|event| {
+            matches!(&event.event, CadisEvent::ApprovalRequested(payload) if payload.summary.contains("worker.apply requires approval"))
+        }));
+        assert!(!allowed
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ToolStarted(_))));
+        assert_eq!(
+            fs::read_to_string(&readme).expect("README should read"),
+            original
+        );
+    }
+
+    #[test]
+    fn worker_apply_preflight_failure_does_not_mutate_workspace() {
+        let cadis_home = test_workspace("worker-apply-preflight-home");
+        let workspace = test_workspace("worker-apply-preflight-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home);
+        register_workspace(&mut runtime, "worker-apply-preflight", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "worker-apply-preflight",
+            vec![WorkspaceAccess::Write],
+        );
+        let (_session_id, worker_id, worktree_path) =
+            complete_worker_in_workspace(&mut runtime, &workspace, "worker_apply_preflight");
+        let patch_path = runtime
+            .workers
+            .get(&worker_id)
+            .and_then(|worker| worker.artifacts.as_ref())
+            .map(|artifacts| artifacts.patch.clone())
+            .expect("worker patch artifact path should exist");
+        fs::write(
+            patch_path,
+            "diff --git a/README.md b/README.md\n\
+             --- a/README.md\n\
+             +++ b/README.md\n\
+             @@ -20,1 +20,1 @@\n\
+             -missing preflight context\n\
+             +should not apply\n",
+        )
+        .expect("invalid-context worker patch should write");
+        let readme = workspace.join("README.md");
+        let original = fs::read_to_string(&readme).expect("README should read");
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_apply_preflight"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerApply(WorkerApplyRequest {
+                worker_id,
+                worktree_path: Some(worktree_path),
+            }),
+        ));
+        assert!(request
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+
+        let approved = approve(&mut runtime, approval_id_from(&request));
+        assert_tool_failed_code(&approved, "worker_apply_preflight_failed");
+        assert_eq!(
+            fs::read_to_string(&readme).expect("README should read after preflight failure"),
+            original
+        );
+    }
+
+    #[test]
+    fn worker_apply_rejects_dirty_affected_paths_without_mutating() {
+        let cadis_home = test_workspace("worker-apply-dirty-home");
+        let workspace = test_workspace("worker-apply-dirty-workspace");
+        init_git_workspace(&workspace);
+
+        let mut runtime = runtime_with_home(cadis_home);
+        register_workspace(&mut runtime, "worker-apply-dirty", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "worker-apply-dirty",
+            vec![WorkspaceAccess::Write],
+        );
+        let (_session_id, worker_id, worktree_path) =
+            complete_worker_in_workspace(&mut runtime, &workspace, "worker_apply_dirty");
+        let patch_original =
+            write_worker_readme_append_patch(&runtime, &worker_id, &workspace, "Worker patch");
+        let readme = workspace.join("README.md");
+        let dirty_content = format!("{patch_original}local dirty change\n");
+        fs::write(&readme, &dirty_content).expect("dirty README should write");
+
+        let request = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_worker_apply_dirty"),
+            ClientId::from("hud_1"),
+            ClientRequest::WorkerApply(WorkerApplyRequest {
+                worker_id,
+                worktree_path: Some(worktree_path),
+            }),
+        ));
+        assert!(request
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+
+        let approved = approve(&mut runtime, approval_id_from(&request));
+        assert_tool_failed_code(&approved, "worker_apply_dirty_paths");
+        assert_eq!(
+            fs::read_to_string(&readme).expect("README should read after dirty reject"),
+            dirty_content,
+            "worker.apply must not apply over dirty affected paths"
+        );
+    }
+
+    #[test]
+    fn worker_apply_rejects_protected_and_secret_patch_paths() {
+        let protected = validate_worker_apply_repo_path(".cadis/workspace.toml")
+            .expect_err("protected metadata path should be rejected");
+        assert_eq!(protected.code, "protected_path");
+
+        let secret = validate_worker_apply_repo_path("nested/.env.production")
+            .expect_err("secret-like path should be rejected");
+        assert_eq!(secret.code, "secret_path_rejected");
+    }
+
+    #[test]
+    fn worker_apply_rollback_restores_checkpoint_snapshot() {
+        let workspace = test_workspace("worker-apply-rollback-workspace");
+        let patch_workspace = test_workspace("worker-apply-rollback-patch");
+        init_git_workspace(&workspace);
+        let patch_path = patch_workspace.join("not-a-reverse.patch");
+        fs::write(&patch_path, "not a patch\n").expect("rollback patch fixture should write");
+
+        let readme = workspace.join("README.md");
+        let original = fs::read_to_string(&readme).expect("README should read");
+        let generated = workspace.join("generated.txt");
+        let affected_paths = vec!["README.md".to_owned(), "generated.txt".to_owned()];
+        let checkpoint = capture_worker_apply_checkpoint(&workspace, &affected_paths, 30)
+            .expect("worker.apply checkpoint should capture");
+
+        fs::write(&readme, "partial worker apply\n").expect("partial README write should work");
+        fs::write(&generated, "partial generated file\n")
+            .expect("partial generated write should work");
+        run_git(&workspace, &["add", "generated.txt"]);
+
+        let rollback = rollback_worker_apply(&workspace, &patch_path, &checkpoint, 30);
+        assert!(
+            rollback.restored,
+            "rollback should restore checkpoint: {}",
+            rollback.message
+        );
+        assert_eq!(
+            fs::read_to_string(&readme).expect("README should read after rollback"),
+            original
+        );
+        assert!(!generated.exists(), "rollback should remove created path");
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(["status", "--porcelain=v1", "--untracked-files=all"])
+            .output()
+            .expect("git status should run");
+        assert!(
+            status.status.success(),
+            "git status should succeed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        assert!(
+            status.stdout.is_empty(),
+            "workspace should return to pre-apply status: {}",
+            String::from_utf8_lossy(&status.stdout)
         );
     }
 
