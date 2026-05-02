@@ -49,9 +49,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             render_status(&frames, cli.json)
         }
         Command::Doctor => run_doctor(&cli),
-        Command::Models => {
+        Command::Models { verbose, provider } => {
             let frames = send_request(&cli, ClientRequest::ModelsList(EmptyPayload::default()))?;
-            render_models(&frames, cli.json)
+            render_models(&frames, cli.json, *verbose, provider.as_deref())
         }
         Command::Agents => {
             let frames = send_request(&cli, ClientRequest::AgentList(EmptyPayload::default()))?;
@@ -525,7 +525,12 @@ fn render_status(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-fn render_models(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error>> {
+fn render_models(
+    frames: &[ServerFrame],
+    json: bool,
+    verbose: bool,
+    provider_filter: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
     if json {
         return print_json_frames(frames);
     }
@@ -536,24 +541,69 @@ fn render_models(frames: &[ServerFrame], json: bool) -> Result<(), Box<dyn Error
             if let cadis_protocol::CadisEvent::ModelsListResponse(ModelsListPayload { models }) =
                 &event.event
             {
-                for model in models {
+                let filtered: Vec<_> = models
+                    .iter()
+                    .filter(|m| provider_filter.is_none_or(|f| m.provider == f))
+                    .collect();
+
+                if verbose {
+                    println!("{}", verbose_models_header());
+                }
+
+                for model in &filtered {
+                    if verbose {
+                        println!("{}", verbose_model_row(model));
+                    } else {
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}\t{}",
+                            model.provider,
+                            model.model,
+                            model_readiness_label(model.readiness),
+                            effective_model_label(
+                                model.effective_provider.as_deref(),
+                                model.effective_model.as_deref()
+                            ),
+                            if model.fallback { "fallback" } else { "real" },
+                            model.display_name
+                        );
+                    }
+                }
+
+                if !filtered.is_empty() && provider_filter.is_some() {
                     println!(
-                        "{}\t{}\t{}\t{}\t{}\t{}",
-                        model.provider,
-                        model.model,
-                        model_readiness_label(model.readiness),
-                        effective_model_label(
-                            model.effective_provider.as_deref(),
-                            model.effective_model.as_deref()
-                        ),
-                        if model.fallback { "fallback" } else { "real" },
-                        model.display_name
+                        "{} model(s) matching provider '{}'",
+                        filtered.len(),
+                        provider_filter.unwrap_or("")
                     );
                 }
             }
         }
     }
     Ok(())
+}
+
+fn verbose_models_header() -> String {
+    format!(
+        "{:<20}\t{:<30}\t{:<22}\t{:<25}\t{:<10}\t{}\t{}",
+        "PROVIDER", "MODEL", "READINESS", "EFFECTIVE", "TYPE", "DISPLAY_NAME", "CAPABILITIES"
+    )
+}
+
+fn verbose_model_row(model: &cadis_protocol::ModelDescriptor) -> String {
+    let caps = model.capabilities.join(",");
+    format!(
+        "{:<20}\t{:<30}\t{:<22}\t{:<25}\t{:<10}\t{}\tcaps={}",
+        model.provider,
+        model.model,
+        model_readiness_label(model.readiness),
+        effective_model_label(
+            model.effective_provider.as_deref(),
+            model.effective_model.as_deref()
+        ),
+        if model.fallback { "fallback" } else { "real" },
+        model.display_name,
+        caps
+    )
 }
 
 fn model_readiness_label(readiness: Option<cadis_protocol::ModelReadiness>) -> &'static str {
@@ -1387,7 +1437,7 @@ impl Cli {
             Some("daemon") => Command::Daemon(args.collect()),
             Some("status") => Command::Status,
             Some("doctor") => Command::Doctor,
-            Some("models") => Command::Models,
+            Some("models") => parse_models(args.collect())?,
             Some("agents") => Command::Agents,
             Some("worker") => Command::Worker(parse_worker(args.collect())?),
             Some("workspace") => Command::Workspace(parse_workspace(args.collect())?),
@@ -1454,7 +1504,10 @@ enum Command {
     Daemon(Vec<String>),
     Status,
     Doctor,
-    Models,
+    Models {
+        verbose: bool,
+        provider: Option<String>,
+    },
     Agents,
     Worker(WorkerCommand),
     Workspace(WorkspaceCommand),
@@ -1972,6 +2025,27 @@ fn parse_session_subscribe(args: Vec<String>) -> Result<SessionCommand, Box<dyn 
     })
 }
 
+fn parse_models(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
+    let mut verbose = false;
+    let mut provider = None;
+    let mut args = args.into_iter();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--verbose" | "-v" => verbose = true,
+            "--provider" | "-p" => {
+                provider = Some(
+                    args.next()
+                        .ok_or_else(|| invalid_input("--provider requires a provider name"))?,
+                );
+            }
+            value => return Err(invalid_input(format!("unknown models option: {value}")).into()),
+        }
+    }
+
+    Ok(Command::Models { verbose, provider })
+}
+
 fn parse_events(args: Vec<String>) -> Result<Command, Box<dyn Error>> {
     let mut replay_limit = Some(128);
     let mut since_event_id = None;
@@ -2180,11 +2254,14 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+const MODELS_USAGE: &str = "models [-v|--verbose] [-p|--provider NAME]";
+
 fn print_help() {
     println!(
         "cadis {}\n\nUSAGE:\n  cadis                  Launch daemon + HUD (default)\n  cadis [--socket PATH] [--tcp] [--json] <COMMAND>\n\nCOMMANDS:\n  help                   Print this help\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  worker <COMMAND>       Inspect daemon-owned workers\n  workspace <COMMAND>    Manage registered workspaces and grants\n  profile [COMMAND]      Manage daemon profiles\n  session <COMMAND>      Manage session event streams\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nThe default command (no args) starts cadisd if needed and launches the\ncanonical Tauri HUD from apps/cadis-hud. If the HUD binary is not found,\nit falls back to an interactive CLI chat session.\n\nWORKER COMMANDS:\n  worker tail <ID> [--lines COUNT]\n  worker result <ID>\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nPROFILE COMMANDS:\n  profile list           List profiles (default)\n  profile create <ID>    Create a new profile\n  profile export <ID>    Export profile as TOML\n  profile import <ID> <FILE>  Import profile from TOML file\n  profile remove <ID>    Remove a profile\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --tcp                  Connect via TCP (default on Windows, reads CADIS_TCP_PORT)\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
         env!("CARGO_PKG_VERSION")
     );
+    println!("\nMODEL COMMAND:\n  {MODELS_USAGE}");
 }
 
 #[cfg(test)]
@@ -2213,7 +2290,77 @@ mod tests {
     #[test]
     fn parse_models() {
         let cli = Cli::parse(args(&["models"])).unwrap();
-        assert_eq!(cli.command, Command::Models);
+        assert_eq!(
+            cli.command,
+            Command::Models {
+                verbose: false,
+                provider: None
+            }
+        );
+    }
+
+    #[test]
+    fn parse_models_verbose() {
+        let cli = Cli::parse(args(&["models", "--verbose"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Models {
+                verbose: true,
+                provider: None
+            }
+        );
+    }
+
+    #[test]
+    fn parse_models_provider_filter() {
+        let cli = Cli::parse(args(&["models", "--provider", "openai"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Models {
+                verbose: false,
+                provider: Some("openai".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn parse_models_short_verbose_and_provider_filter() {
+        let cli = Cli::parse(args(&["models", "-v", "-p", "ollama"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Models {
+                verbose: true,
+                provider: Some("ollama".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn verbose_models_header_matches_caps_rows() {
+        let model = cadis_protocol::ModelDescriptor {
+            provider: "ollama".to_owned(),
+            model: "qwen2.5-coder".to_owned(),
+            display_name: "Ollama qwen2.5-coder".to_owned(),
+            capabilities: vec!["streaming".to_owned(), "local_model".to_owned()],
+            readiness: None,
+            effective_provider: Some("ollama".to_owned()),
+            effective_model: Some("qwen2.5-coder".to_owned()),
+            fallback: false,
+        };
+        let header = verbose_models_header();
+        let row = verbose_model_row(&model);
+
+        assert!(header.ends_with("CAPABILITIES"));
+        assert_eq!(header.split('\t').count(), row.split('\t').count());
+        assert_eq!(
+            row.split('\t').next_back(),
+            Some("caps=streaming,local_model")
+        );
+    }
+
+    #[test]
+    fn help_text_documents_models_options() {
+        assert_eq!(MODELS_USAGE, "models [-v|--verbose] [-p|--provider NAME]");
     }
 
     #[test]
