@@ -12,6 +12,7 @@ import {
 
 export function AgentRenameDialog() {
   const target = useHud((s) => s.agentRenameTarget);
+  const gateway = useHud((s) => s.gateway);
   const agent = useHud((s) => s.agents.find((a) => a.spec.id === s.agentRenameTarget));
   const close = useHud((s) => s.setAgentRenameTarget);
   const [name, setName] = useState("");
@@ -32,6 +33,7 @@ export function AgentRenameDialog() {
   }, [target, agent?.spec.name, agent?.spec.role, agent?.specialist]);
 
   if (!target || !agent) return null;
+  const disconnected = gateway !== "connected";
 
   const selectedSpecialist =
     specialistId === CUSTOM_SPECIALIST_ID
@@ -39,6 +41,10 @@ export function AgentRenameDialog() {
       : specialistOption(specialistId) ?? defaultSpecialistForRole(agent.spec.role);
 
   const submit = () => {
+    if (disconnected) {
+      setWarning("CADIS daemon is disconnected. Reconnect first to save agent settings.");
+      return;
+    }
     const next = normalizeAgentName(name);
     const renameDelivered = sendAgentRename(target, next);
     const specialistDelivered = sendAgentSpecialistUpdate(target, selectedSpecialist);
@@ -80,6 +86,7 @@ export function AgentRenameDialog() {
             value={name}
             maxLength={32}
             autoFocus
+            disabled={disconnected}
             onChange={(e) => setName(e.target.value)}
           />
         </section>
@@ -93,6 +100,7 @@ export function AgentRenameDialog() {
             id="agent-specialist-input"
             className="voice-config__select"
             value={specialistId}
+            disabled={disconnected}
             onChange={(e) => setSpecialistId(e.target.value)}
           >
             {SPECIALIST_OPTIONS.map((option) => (
@@ -113,6 +121,7 @@ export function AgentRenameDialog() {
               className="voice-config__input"
               value={customLabel}
               maxLength={48}
+              disabled={disconnected}
               onChange={(e) => setCustomLabel(e.target.value)}
             />
           </section>
@@ -129,6 +138,7 @@ export function AgentRenameDialog() {
             value={selectedSpecialist.persona}
             rows={5}
             maxLength={1200}
+            disabled={disconnected}
             onChange={(e) => {
               if (specialistId !== CUSTOM_SPECIALIST_ID) return;
               setCustomPersona(e.target.value);
@@ -138,12 +148,22 @@ export function AgentRenameDialog() {
         </section>
 
         {warning && <div className="voice-config__hint">{warning}</div>}
+        {disconnected && !warning && (
+          <div className="voice-config__hint">
+            CADIS daemon disconnected. Reconnect to save agent settings.
+          </div>
+        )}
 
         <footer className="voice-config__foot">
           <button type="button" className="voice-config__btn" onClick={() => close(null)}>
             CANCEL
           </button>
-          <button type="submit" className="voice-config__btn voice-config__btn--primary">
+          <button
+            type="submit"
+            className="voice-config__btn voice-config__btn--primary"
+            disabled={disconnected}
+            title={disconnected ? "Daemon disconnected" : undefined}
+          >
             SAVE
           </button>
         </footer>

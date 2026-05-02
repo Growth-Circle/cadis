@@ -282,12 +282,14 @@ function VoiceTab() {
 }
 
 function ModelsTab() {
+  const gateway = useHud((s) => s.gateway);
   const models = useHud((s) => s.availableModels);
   const defaultModel = useHud((s) => s.defaultModel);
   const agents = useHud((s) => s.agents);
   const agentModels = useHud((s) => s.agentModels);
   const chatPrefs = useHud((s) => s.chatPreferences);
   const setChatPreferences = useHud((s) => s.setChatPreferences);
+  const disconnected = gateway !== "connected";
   const updateChatPrefs = (patch: Partial<typeof chatPrefs>) => {
     const next = { ...chatPrefs, ...patch };
     setChatPreferences(patch);
@@ -317,6 +319,8 @@ function ModelsTab() {
                 <select
                   className="voice-config__select"
                   value={current}
+                  disabled={disconnected}
+                  title={disconnected ? "Daemon disconnected" : undefined}
                   onChange={(e) => {
                     const nextModel = e.target.value;
                     sendAgentModelUpdate(a.spec.id, nextModel);
@@ -343,6 +347,7 @@ function ModelsTab() {
           <input
             type="checkbox"
             checked={chatPrefs.thinking}
+            disabled={disconnected}
             onChange={(e) => updateChatPrefs({ thinking: e.target.checked })}
           />
           Enable thinking mode
@@ -354,11 +359,19 @@ function ModelsTab() {
           <input
             type="checkbox"
             checked={chatPrefs.fast}
+            disabled={disconnected}
             onChange={(e) => updateChatPrefs({ fast: e.target.checked })}
           />
           Fast responses
         </label>
       </section>
+      {disconnected && (
+        <section className="voice-config__row">
+          <div className="voice-config__hint">
+            CADIS daemon disconnected. Model and chat preference updates are temporarily disabled.
+          </div>
+        </section>
+      )}
     </>
   );
 }

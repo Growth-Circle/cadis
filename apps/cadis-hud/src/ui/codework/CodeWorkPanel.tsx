@@ -1,12 +1,13 @@
 import { useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useHud, type WorkerRecord } from "../hudState.js";
-import { sendWorkerCleanup } from "../cadisActions.js";
+import { sendWorkerApply, sendWorkerCleanup } from "../cadisActions.js";
 
 const EMPTY_VALUE = "not reported by daemon";
 
 export function CodeWorkPanel() {
   const open = useHud((s) => s.codeWorkPanelOpen);
+  const gateway = useHud((s) => s.gateway);
   const selectedWorkerId = useHud((s) => s.selectedWorkerId);
   const workers = useHud((s) => s.workers);
   const agents = useHud((s) => s.agents);
@@ -24,6 +25,10 @@ export function CodeWorkPanel() {
   const isTerminal = worker
     ? ["completed", "failed", "cancelled"].includes(worker.status)
     : false;
+  const canApply = worker
+    ? worker.status === "completed" && Boolean(worker.artifacts?.patch?.trim())
+    : false;
+  const disconnected = gateway !== "connected";
 
   if (!open) return null;
 
@@ -124,15 +129,22 @@ export function CodeWorkPanel() {
         <div>
           <button
             type="button"
-            disabled
-            title="Pending daemon worker.apply support"
+            disabled={!canApply || disconnected}
+            title={
+              disconnected
+                ? "Daemon disconnected"
+                : canApply
+                  ? "Send worker.apply to daemon"
+                  : "Worker must be completed with a patch artifact"
+            }
+            onClick={() => worker && sendWorkerApply(worker.id, worker.worktree?.worktreePath)}
           >
             APPLY
           </button>
           <button
             type="button"
-            disabled={!worker || !isTerminal}
-            title="Send worker.cleanup to daemon"
+            disabled={!worker || !isTerminal || disconnected}
+            title={disconnected ? "Daemon disconnected" : "Send worker.cleanup to daemon"}
             onClick={() => worker && sendWorkerCleanup(worker.id, worker.worktree?.worktreePath)}
           >
             DISCARD
