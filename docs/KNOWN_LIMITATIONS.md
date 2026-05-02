@@ -1,6 +1,6 @@
 # Known Limitations
 
-This document lists known limitations of C.A.D.I.S. v1.2.x.
+This document lists known limitations of C.A.D.I.S. v1.1.x.
 
 ## Platform
 
@@ -22,13 +22,14 @@ This document lists known limitations of C.A.D.I.S. v1.2.x.
 
 ## Voice
 
-- **No production voice.** Edge TTS runs as a subprocess bridge through the
-  HUD. Daemon-owned TTS provider execution is not implemented. Whisper
-  transcription depends on a local `whisper-cli` binary.
-- **TTS providers other than Edge and OpenAI use stub implementations.** Edge TTS
-  and OpenAI TTS produce real audio output; System and other provider backends
-  remain stubs. OpenAI TTS requires `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY`
-  and `curl` to be available.
+- **Voice remains early.** Edge TTS, OpenAI TTS, and System TTS can produce real
+  audio output, but speech workflows are still less mature than text-only flows.
+  Whisper transcription depends on a local `whisper-cli` binary.
+- **TTS providers other than Edge, OpenAI, and System use stub implementations.**
+  OpenAI TTS requires `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` and `curl` to be
+  available. System TTS uses `espeak` on Linux, `say` on macOS, and PowerShell
+  `System.Speech` on Windows. OpenAI and System TTS fall back to stubs if their
+  runtime prerequisites are not available.
 
 ## Clients
 
@@ -48,9 +49,8 @@ This document lists known limitations of C.A.D.I.S. v1.2.x.
   inline logic. Further decomposition is ongoing.
 - **Worker artifact view in HUD is read-only.** Apply/discard actions route
   through daemon approval but the full patch-apply flow needs more work.
-- **`file.patch` concurrent-edit detection is basic.** Structured file patching
-  uses atomic temp-file writes with rollback, but concurrent-edit conflict
-  detection remains simple and may not cover all race conditions.
+- **`file.patch` lacks atomic writes.** Structured file patching works but does
+  not yet use atomic temp-file writes or concurrent-edit protection.
 
 ## Configuration
 
