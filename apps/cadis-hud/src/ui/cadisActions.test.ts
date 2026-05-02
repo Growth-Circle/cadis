@@ -531,7 +531,7 @@ describe("cadisActions", () => {
     expect(screen.getByText("started: Worker Coding: run focused HUD worker tests")).toBeInTheDocument();
   });
 
-  it("apply button is disabled pending daemon worker.apply support", () => {
+  it("unsafe worker actions are disabled while disconnected", () => {
     for (const frame of mockCadisDaemonWorkerStream) {
       handleCadisFrameForTest(frame);
     }
@@ -540,7 +540,37 @@ describe("cadisActions", () => {
 
     const apply = screen.getByRole("button", { name: "APPLY" });
     expect(apply).toBeDisabled();
-    expect(apply.getAttribute("title")).toBe("Pending daemon worker.apply support");
+    expect(apply.getAttribute("title")).toBe("Daemon disconnected");
+
+    const discard = screen.getByRole("button", { name: "DISCARD" });
+    expect(discard).toBeDisabled();
+    expect(discard.getAttribute("title")).toBe("Daemon disconnected");
+  });
+
+  it("sends worker.apply from code work panel when connected", async () => {
+    connect();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4));
+    invokeMock.mockClear();
+
+    for (const frame of mockCadisDaemonWorkerStream) {
+      handleCadisFrameForTest(frame);
+    }
+    useHud.getState().selectWorker("worker_mock_001");
+
+    render(createElement(CodeWorkPanel));
+
+    const apply = screen.getByRole("button", { name: "APPLY" });
+    expect(apply).toBeEnabled();
+    fireEvent.click(apply);
+
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    expect(sentRequest()).toMatchObject({
+      type: "worker.apply",
+      payload: {
+        worker_id: "worker_mock_001",
+        worktree_path: ".cadis/worktrees/worker_mock_001",
+      },
+    });
   });
 
   it("routes theme/opacity/avatar preference changes through daemon via ui.preferences.set", async () => {

@@ -244,10 +244,10 @@ a registered workspace and an active workspace grant before execution or
 approval flow proceeds. `agent_id` is optional; when present, it lets daemon tool
 execution satisfy agent-scoped workspace grants. The current baseline supports
 safe read-only execution for `file.read`, `file.search`, `git.status`, and
-`git.diff`. `shell.run` and `file.patch` create an approval request after the
-workspace grant check, then execute only after approval and daemon-side
-revalidation. Other risky placeholders such as `file.write` still fail closed
-after approval until a later runtime implements the gated action.
+`git.diff`. `shell.run`, `file.patch`, and `worker.apply` create an approval
+request after the workspace grant check, then execute only after approval and
+daemon-side revalidation. Other risky placeholders such as `file.write` still
+fail closed after approval until a later runtime implements the gated action.
 
 Example:
 
@@ -340,11 +340,15 @@ Worker integration uses the same protocol flow. The current worker command
 baseline runs only the daemon-owned validation command inside the active worker
 worktree and records bounded redacted output in events/artifacts. Future
 configurable worker commands/tests must use daemon-owned policy and cwd inside
-the worker worktree. Applying a worker artifact to the parent workspace is a
-separate `file.patch` or future patch-apply tool call with its own approval;
-`worker.completed` alone does not authorize parent-checkout mutation.
-Cleanup/removal of a worker worktree is also a separate approval-gated flow and
-must require a CADIS-owned worker/worktree record.
+the worker worktree. Applying a worker artifact to the parent workspace uses
+`worker.apply`, which must resolve a CADIS-owned worker/worktree record, require
+an active write grant for the worker owner on the parent workspace, emit approval
+events before mutation, preflight the patch, reject protected metadata,
+secret-like paths, and dirty affected paths, and fail closed with rollback
+reporting if apply fails. `worker.completed` alone does not authorize
+parent-checkout mutation. Cleanup/removal of a worker worktree is also a
+separate approval-gated flow and must require a CADIS-owned worker/worktree
+record.
 
 `patch.created` and `test.result` are summary events for code-work presentation.
 They do not carry authority to mutate the parent checkout. `patch.created`
@@ -734,6 +738,8 @@ tool outputs are:
 - `shell.run`: `cwd`, `exit_code`, `stdout`, `stderr`, truncation flags,
   `timeout_ms`
 - `file.patch`: `schema`, `files[]`, `truncated`
+- `worker.apply`: `worker_id`, `patch_path`, `workspace`, `exit_code`,
+  `stdout`, `stderr`, truncation flags
 
 ## 8. Compatibility Rules
 
