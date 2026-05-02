@@ -281,6 +281,9 @@ pub(crate) struct OpenAiTtsProvider {
     base_url: String,
 }
 
+const OPENAI_TTS_ERROR_BODY_LIMIT_BYTES: usize = 2 * 1024;
+const OPENAI_TTS_MIN_MP3_BYTES: u64 = 16;
+
 impl OpenAiTtsProvider {
     pub(crate) fn new(api_key: String) -> Self {
         let base_url = std::env::var("CADIS_OPENAI_BASE_URL")
@@ -386,27 +389,39 @@ impl TtsProvider for OpenAiTtsProvider {
 
         let url = format!("{}/audio/speech", self.base_url.trim_end_matches('/'));
 
+        let request_body = serde_json::to_string(&body).unwrap_or_default();
         let output = Command::new("curl")
-            .args(["-sS", "-X", "POST", &url])
-            .args(["-H", "Content-Type: application/json"])
-            .args(["-H", &format!("Authorization: Bearer {}", self.api_key)])
-            .args(["-d", &serde_json::to_string(&body).unwrap_or_default()])
-            .args(["-o", &audio_path.to_string_lossy()])
+            .args(openai_tts_curl_args(
+                &url,
+                &request_body,
+                &audio_path,
+                &self.api_key,
+            ))
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output();
 
         match output {
             Ok(result) if result.status.success() => {
-                let file_size = fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0);
-                if file_size == 0 {
+                let http_status = parse_curl_http_status(&result.stdout);
+                if let Some(status) = http_status.filter(|status| !(200..300).contains(status)) {
                     let _ = fs::remove_file(&audio_path);
                     return Err(TtsError::new(
-                        "openai_tts_empty_response",
-                        "OpenAI TTS returned an empty audio file",
+                        "openai_tts_failed",
+                        openai_tts_failure_message(
+                            Some(status),
+                            result.status.code(),
+                            &result.stderr,
+                            &audio_path,
+                            &self.api_key,
+                        ),
                         true,
                     ));
+                }
+                if let Err(error) = validate_openai_tts_audio_file(&audio_path, &self.api_key) {
+                    let _ = fs::remove_file(&audio_path);
+                    return Err(error);
                 }
                 Ok(TtsOutput {
                     provider: "openai".to_owned(),
@@ -416,13 +431,16 @@ impl TtsProvider for OpenAiTtsProvider {
                 })
             }
             Ok(result) => {
-                let stderr = String::from_utf8_lossy(&result.stderr);
+                let http_status = parse_curl_http_status(&result.stdout);
+                let message = openai_tts_failure_message(
+                    http_status,
+                    result.status.code(),
+                    &result.stderr,
+                    &audio_path,
+                    &self.api_key,
+                );
                 let _ = fs::remove_file(&audio_path);
-                Err(TtsError::new(
-                    "openai_tts_failed",
-                    format!("OpenAI TTS request failed: {}", redact(stderr.trim())),
-                    true,
-                ))
+                Err(TtsError::new("openai_tts_failed", message, true))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Err(TtsError::new(
                 "curl_not_found",
@@ -439,6 +457,168 @@ impl TtsProvider for OpenAiTtsProvider {
 
     fn stop(&mut self) -> Result<(), TtsError> {
         Ok(())
+    }
+}
+
+fn openai_tts_curl_args(
+    url: &str,
+    request_body: &str,
+    audio_path: &Path,
+    api_key: &str,
+) -> Vec<String> {
+    vec![
+        "--silent".to_owned(),
+        "--show-error".to_owned(),
+        "--fail-with-body".to_owned(),
+        "--request".to_owned(),
+        "POST".to_owned(),
+        url.to_owned(),
+        "--header".to_owned(),
+        "Content-Type: application/json".to_owned(),
+        "--header".to_owned(),
+        format!("Authorization: Bearer {api_key}"),
+        "--data".to_owned(),
+        request_body.to_owned(),
+        "--output".to_owned(),
+        audio_path.to_string_lossy().into_owned(),
+        "--write-out".to_owned(),
+        "%{http_code}".to_owned(),
+    ]
+}
+
+fn parse_curl_http_status(stdout: &[u8]) -> Option<u16> {
+    let status = String::from_utf8_lossy(stdout).trim().parse::<u16>().ok()?;
+    (status > 0).then_some(status)
+}
+
+fn validate_openai_tts_audio_file(audio_path: &Path, api_key: &str) -> Result<u64, TtsError> {
+    let file_size = fs::metadata(audio_path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if file_size == 0 {
+        return Err(TtsError::new(
+            "openai_tts_empty_response",
+            "OpenAI TTS returned an empty audio file",
+            true,
+        ));
+    }
+
+    let mut file = fs::File::open(audio_path).map_err(|error| {
+        TtsError::new(
+            "openai_tts_audio_read_failed",
+            format!(
+                "OpenAI TTS audio file could not be read: {}",
+                redact_openai_tts_context(&error.to_string(), api_key)
+            ),
+            true,
+        )
+    })?;
+    let mut header = [0_u8; 16];
+    let header_len = file.read(&mut header).map_err(|error| {
+        TtsError::new(
+            "openai_tts_audio_read_failed",
+            format!(
+                "OpenAI TTS audio file could not be read: {}",
+                redact_openai_tts_context(&error.to_string(), api_key)
+            ),
+            true,
+        )
+    })?;
+
+    if file_size < OPENAI_TTS_MIN_MP3_BYTES || !looks_like_mp3_header(&header[..header_len]) {
+        let mut message =
+            format!("OpenAI TTS response was not a plausible MP3 ({file_size} bytes)");
+        if let Some(body) = read_openai_tts_body_context(audio_path, api_key) {
+            message.push_str(": response body: ");
+            message.push_str(&body);
+        }
+        return Err(TtsError::new(
+            "openai_tts_invalid_audio",
+            redact_openai_tts_context(&message, api_key),
+            true,
+        ));
+    }
+
+    Ok(file_size)
+}
+
+fn looks_like_mp3_header(header: &[u8]) -> bool {
+    header.starts_with(b"ID3")
+        || header
+            .get(..2)
+            .is_some_and(|bytes| bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0)
+}
+
+fn openai_tts_failure_message(
+    http_status: Option<u16>,
+    exit_code: Option<i32>,
+    stderr: &[u8],
+    body_path: &Path,
+    api_key: &str,
+) -> String {
+    let status = match (http_status, exit_code) {
+        (Some(status), Some(code)) => format!(" (HTTP {status}, curl exit {code})"),
+        (Some(status), None) => format!(" (HTTP {status})"),
+        (None, Some(code)) => format!(" (curl exit {code})"),
+        (None, None) => String::new(),
+    };
+    let context = openai_tts_error_context(stderr, body_path, api_key)
+        .unwrap_or_else(|| "no response details".to_owned());
+    redact_openai_tts_context(
+        &format!("OpenAI TTS request failed{status}: {context}"),
+        api_key,
+    )
+}
+
+fn openai_tts_error_context(stderr: &[u8], body_path: &Path, api_key: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(stderr) = sanitize_openai_tts_context(&String::from_utf8_lossy(stderr), api_key) {
+        parts.push(format!("curl stderr: {stderr}"));
+    }
+    if let Some(body) = read_openai_tts_body_context(body_path, api_key) {
+        parts.push(format!("response body: {body}"));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+fn read_openai_tts_body_context(body_path: &Path, api_key: &str) -> Option<String> {
+    let mut file = fs::File::open(body_path).ok()?;
+    let mut buffer = vec![0_u8; OPENAI_TTS_ERROR_BODY_LIMIT_BYTES + 1];
+    let bytes_read = file.read(&mut buffer).ok()?;
+    if bytes_read == 0 {
+        return None;
+    }
+
+    let truncated = bytes_read > OPENAI_TTS_ERROR_BODY_LIMIT_BYTES;
+    buffer.truncate(bytes_read.min(OPENAI_TTS_ERROR_BODY_LIMIT_BYTES));
+    let mut context = sanitize_openai_tts_context(&String::from_utf8_lossy(&buffer), api_key)?;
+    if truncated {
+        context.push_str(" ...");
+    }
+    Some(context)
+}
+
+fn sanitize_openai_tts_context(input: &str, api_key: &str) -> Option<String> {
+    let printable = input
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let compact = printable.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!compact.is_empty()).then(|| redact_openai_tts_context(&compact, api_key))
+}
+
+fn redact_openai_tts_context(input: &str, api_key: &str) -> String {
+    let redacted = redact(input);
+    if api_key.is_empty() {
+        redacted
+    } else {
+        redacted.replace(api_key, "[REDACTED]")
     }
 }
 
@@ -730,4 +910,106 @@ pub(crate) fn is_supported_voice_provider(provider: &str) -> bool {
 
 pub(crate) fn clamp_voice_adjustment(value: i16) -> i16 {
     value.clamp(-50, 50)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_tts_curl_args_fail_on_http_errors_and_write_status() {
+        let audio_path = Path::new("/tmp/cadis-openai-test.mp3");
+        let args = openai_tts_curl_args(
+            "https://example.test/v1/audio/speech",
+            r#"{"input":"hello"}"#,
+            audio_path,
+            "literal-test-key",
+        );
+
+        assert!(args.contains(&"--fail-with-body".to_owned()));
+        assert!(args.contains(&"--show-error".to_owned()));
+        assert!(args.contains(&"--write-out".to_owned()));
+        assert!(args.contains(&"%{http_code}".to_owned()));
+        assert!(args.contains(&"--output".to_owned()));
+        assert!(args.contains(&audio_path.to_string_lossy().into_owned()));
+    }
+
+    #[test]
+    fn openai_tts_parses_curl_http_status() {
+        assert_eq!(parse_curl_http_status(b"200"), Some(200));
+        assert_eq!(parse_curl_http_status(b"401"), Some(401));
+        assert_eq!(parse_curl_http_status(b"000"), None);
+        assert_eq!(parse_curl_http_status(b"not-a-status"), None);
+    }
+
+    #[test]
+    fn openai_tts_audio_validation_accepts_mp3_signatures() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let id3_path = temp_dir.path().join("id3.mp3");
+        let frame_path = temp_dir.path().join("frame.mp3");
+
+        let mut id3_mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x21".to_vec();
+        id3_mp3.extend([0_u8; 32]);
+        fs::write(&id3_path, &id3_mp3).expect("ID3 fixture should be written");
+
+        let mut frame_mp3 = vec![0xff, 0xfb, 0x90, 0x64];
+        frame_mp3.extend([0_u8; 32]);
+        fs::write(&frame_path, &frame_mp3).expect("frame fixture should be written");
+
+        assert_eq!(
+            validate_openai_tts_audio_file(&id3_path, "literal-test-key").unwrap(),
+            id3_mp3.len() as u64
+        );
+        assert_eq!(
+            validate_openai_tts_audio_file(&frame_path, "literal-test-key").unwrap(),
+            frame_mp3.len() as u64
+        );
+    }
+
+    #[test]
+    fn openai_tts_audio_validation_rejects_json_error_body() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let body_path = temp_dir.path().join("error.mp3");
+        let api_key = "literal-test-key";
+        fs::write(
+            &body_path,
+            format!(r#"{{"error":{{"message":"invalid API key {api_key}"}}}}"#),
+        )
+        .expect("error fixture should be written");
+
+        let error = validate_openai_tts_audio_file(&body_path, api_key).unwrap_err();
+
+        assert_eq!(error.code, "openai_tts_invalid_audio");
+        assert!(error.message.contains("not a plausible MP3"));
+        assert!(error.message.contains("response body"));
+        assert!(error.message.contains("[REDACTED]"));
+        assert!(!error.message.contains(api_key));
+    }
+
+    #[test]
+    fn openai_tts_failure_message_redacts_stderr_and_body() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let body_path = temp_dir.path().join("error.mp3");
+        let api_key = "literal-test-key";
+        fs::write(
+            &body_path,
+            format!(r#"{{"error":{{"message":"Authorization: Bearer {api_key}"}}}}"#),
+        )
+        .expect("error fixture should be written");
+
+        let message = openai_tts_failure_message(
+            Some(401),
+            Some(22),
+            format!("curl: (22) failed for {api_key}").as_bytes(),
+            &body_path,
+            api_key,
+        );
+
+        assert!(message.contains("HTTP 401"));
+        assert!(message.contains("curl exit 22"));
+        assert!(message.contains("curl stderr"));
+        assert!(message.contains("response body"));
+        assert!(message.contains("[REDACTED]"));
+        assert!(!message.contains(api_key));
+    }
 }
