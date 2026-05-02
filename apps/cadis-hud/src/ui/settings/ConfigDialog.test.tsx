@@ -34,4 +34,36 @@ describe("ConfigDialog", () => {
     const labels = Array.from(buttons).map((b) => b.textContent);
     expect(labels).toEqual(["Voice", "Models", "Appearance", "Window"]);
   });
+
+  it("disables model mutation controls while disconnected", () => {
+    useHud.setState({
+      configOpen: true,
+      configTab: "models",
+      gateway: "disconnected",
+      defaultModel: "openai/gpt-5.5",
+      availableModels: ["openai/gpt-5.5"],
+      agentModels: { main: "openai/gpt-5.5" },
+      chatPreferences: { thinking: false, fast: false },
+      agents: [
+        {
+          spec: { id: "main", name: "CADIS", role: "Core", icon: "C", hue: 180, tasks: [] },
+          status: "idle",
+          currentTask: { verb: "ready", target: "CADIS", detail: "openai/gpt-5.5" },
+          specialist: { id: "core", label: "Core", persona: "" },
+          uptimeSeconds: 0,
+        },
+      ],
+    });
+
+    render(createElement(ConfigDialog));
+    for (const select of screen.getAllByRole("combobox")) {
+      expect(select).toBeDisabled();
+    }
+    for (const checkbox of screen.getAllByRole("checkbox")) {
+      expect(checkbox).toBeDisabled();
+    }
+    expect(
+      screen.getByText(/model and chat preference updates are temporarily disabled/i),
+    ).toBeInTheDocument();
+  });
 });
