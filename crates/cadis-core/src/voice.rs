@@ -1,6 +1,7 @@
 //! Voice, TTS providers, speech decisions, and voice doctor utilities.
 
 use super::*;
+use std::io::Write as _;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VoicePreflightRecord {
@@ -310,79 +311,36 @@ impl TtsProvider for SystemTtsProvider {
             ));
         }
 
-        pub(crate) const MAX_SYSTEM_TTS_CHARS: usize = 2000;
-        let text = if text.chars().count() > MAX_SYSTEM_TTS_CHARS {
-            truncate_to_utf8_boundary(text, MAX_SYSTEM_TTS_CHARS).0
-        } else {
-            text
-        };
-
-        let result = if cfg!(target_os = "macos") {
-            Command::new("say")
-                .arg("-v")
-                .arg(request.voice_id)
-                .arg("--rate")
-                .arg(format!("{}", words_per_minute(request.rate)))
-                .arg(text)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-        } else if cfg!(target_os = "windows") {
-            let ps_script = format!(
-                "Add-Type -AssemblyName System.Speech; \
-                 $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
-                 $synth.Rate = {}; \
-                 $synth.Speak(\"{}\")",
-                ps_rate(request.rate),
-                text.replace('\\', "\\\\").replace('"', "\\\"")
-            );
-            Command::new("powershell")
-                .args(["-NoProfile", "-Command", &ps_script])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-        } else {
-            let speed_arg = format!("{}", words_per_minute(request.rate));
-            Command::new("espeak")
-                .args(["-v", request.voice_id, "-s", &speed_arg])
-                .arg(text)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-        };
+        let platform = SystemTtsPlatform::current();
+        let binary = system_tts_binary_for_platform(platform)
+            .unwrap_or_else(|| default_system_tts_binary(platform));
+        let plan = system_tts_command_plan(platform, binary, text, request.voice_id, request.rate);
+        let result = run_system_tts_command(&plan);
 
         match result {
             Ok(output) if output.status.success() => Ok(TtsOutput {
                 provider: "system".to_owned(),
-                voice_id: request.voice_id.to_owned(),
-                spoken_chars: request.text.chars().count(),
+                voice_id: plan.voice_id,
+                spoken_chars: plan.spoken_chars,
                 audio_path: None,
             }),
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 Err(TtsError::new(
                     "system_tts_failed",
-                    format!("system TTS failed: {}", stderr.trim()),
+                    format!("system TTS failed: {}", redact(stderr.trim())),
                     true,
                 ))
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let binary = if cfg!(target_os = "macos") {
-                    "say"
-                } else if cfg!(target_os = "windows") {
-                    "powershell"
-                } else {
-                    "espeak"
-                };
-                Err(TtsError::new(
-                    "system_tts_not_found",
-                    format!("{binary} is not installed; system TTS requires {binary}"),
-                    false,
-                ))
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(TtsError::new(
+                "system_tts_not_found",
+                format!(
+                    "{} is not installed; system TTS requires {}",
+                    plan.binary,
+                    system_tts_binary_requirement(platform)
+                ),
+                false,
+            )),
             Err(error) => Err(TtsError::new(
                 "system_tts_spawn_failed",
                 error.to_string(),
@@ -396,6 +354,152 @@ impl TtsProvider for SystemTtsProvider {
     }
 }
 
+const SYSTEM_DEFAULT_VOICE_ID: &str = "default";
+const MAX_SYSTEM_TTS_CHARS: usize = 2000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SystemTtsPlatform {
+    Linux,
+    Macos,
+    Windows,
+}
+
+impl SystemTtsPlatform {
+    fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Macos
+        } else if cfg!(target_os = "windows") {
+            Self::Windows
+        } else {
+            Self::Linux
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SystemTtsCommandPlan {
+    binary: &'static str,
+    args: Vec<String>,
+    stdin_text: Option<String>,
+    voice_id: String,
+    spoken_chars: usize,
+}
+
+fn system_tts_command_plan(
+    platform: SystemTtsPlatform,
+    binary: &'static str,
+    text: &str,
+    voice_id: &str,
+    rate: i16,
+) -> SystemTtsCommandPlan {
+    let text = if text.chars().count() > MAX_SYSTEM_TTS_CHARS {
+        truncate_to_utf8_boundary(text, MAX_SYSTEM_TTS_CHARS).0
+    } else {
+        text
+    };
+    let spoken_chars = text.chars().count();
+    let voice_id = system_tts_voice_id(voice_id).to_owned();
+    let args = match platform {
+        SystemTtsPlatform::Macos => vec![
+            "-r".to_owned(),
+            words_per_minute(rate).to_string(),
+            text.to_owned(),
+        ],
+        SystemTtsPlatform::Windows => vec![
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-EncodedCommand".to_owned(),
+            base64_encode_utf16le(&system_tts_powershell_script(rate)),
+        ],
+        SystemTtsPlatform::Linux => vec![
+            "-s".to_owned(),
+            words_per_minute(rate).to_string(),
+            text.to_owned(),
+        ],
+    };
+
+    SystemTtsCommandPlan {
+        binary,
+        args,
+        stdin_text: (platform == SystemTtsPlatform::Windows).then(|| text.to_owned()),
+        voice_id,
+        spoken_chars,
+    }
+}
+
+fn run_system_tts_command(plan: &SystemTtsCommandPlan) -> io::Result<std::process::Output> {
+    let mut child = Command::new(plan.binary)
+        .args(&plan.args)
+        .stdin(if plan.stdin_text.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(text) = &plan.stdin_text {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "system TTS subprocess stdin was not available",
+            )
+        })?;
+        stdin.write_all(text.as_bytes())?;
+    }
+
+    child.wait_with_output()
+}
+
+fn system_tts_voice_id(_voice_id: &str) -> &'static str {
+    SYSTEM_DEFAULT_VOICE_ID
+}
+
+fn system_tts_powershell_script(rate: i16) -> String {
+    format!(
+        "Add-Type -AssemblyName System.Speech\n\
+         $synth = [System.Speech.Synthesis.SpeechSynthesizer]::new()\n\
+         $synth.Rate = {}\n\
+         $text = [Console]::In.ReadToEnd()\n\
+         if ($text.Length -gt 0) {{ $synth.Speak($text) }}\n\
+         $synth.Dispose()\n",
+        ps_rate(rate)
+    )
+}
+
+fn base64_encode_utf16le(value: &str) -> String {
+    let mut bytes = Vec::with_capacity(value.len() * 2);
+    for code_unit in value.encode_utf16() {
+        bytes.extend_from_slice(&code_unit.to_le_bytes());
+    }
+    base64_encode(&bytes)
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+
+        encoded.push(TABLE[(first >> 2) as usize] as char);
+        encoded.push(TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            encoded.push(TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+        if chunk.len() > 2 {
+            encoded.push(TABLE[(third & 0b0011_1111) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+    encoded
+}
+
 fn words_per_minute(rate: i16) -> u32 {
     let base: f64 = 175.0;
     let adjusted = base * (1.0 + f64::from(rate) / 100.0);
@@ -403,24 +507,91 @@ fn words_per_minute(rate: i16) -> u32 {
 }
 
 fn ps_rate(rate: i16) -> i32 {
-    (f64::from(rate) / 10.0).round() as i32
+    ((f64::from(rate) / 10.0).round() as i32).clamp(-10, 10)
+}
+
+fn system_tts_binary_candidates(platform: SystemTtsPlatform) -> &'static [&'static str] {
+    match platform {
+        SystemTtsPlatform::Macos => &["say"],
+        SystemTtsPlatform::Windows => &["powershell"],
+        SystemTtsPlatform::Linux => &["espeak", "espeak-ng"],
+    }
+}
+
+fn default_system_tts_binary(platform: SystemTtsPlatform) -> &'static str {
+    system_tts_binary_candidates(platform)[0]
+}
+
+fn system_tts_binary_requirement(platform: SystemTtsPlatform) -> String {
+    system_tts_binary_candidates(platform).join(" or ")
+}
+
+fn system_tts_binary_for_platform(platform: SystemTtsPlatform) -> Option<&'static str> {
+    system_tts_binary_candidates(platform)
+        .iter()
+        .copied()
+        .find(|binary| command_exists_on_path(binary, platform))
+}
+
+fn command_exists_on_path(binary: &str, platform: SystemTtsPlatform) -> bool {
+    let Some(path_value) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let pathext_value = std::env::var_os("PATHEXT");
+    command_exists_in_path(binary, platform, &path_value, pathext_value.as_deref())
+}
+
+fn command_exists_in_path(
+    binary: &str,
+    platform: SystemTtsPlatform,
+    path_value: &std::ffi::OsStr,
+    pathext_value: Option<&std::ffi::OsStr>,
+) -> bool {
+    std::env::split_paths(path_value).any(|dir| {
+        command_path_candidates(binary, platform, &dir, pathext_value)
+            .iter()
+            .any(|candidate| candidate.is_file())
+    })
+}
+
+fn command_path_candidates(
+    binary: &str,
+    platform: SystemTtsPlatform,
+    dir: &Path,
+    pathext_value: Option<&std::ffi::OsStr>,
+) -> Vec<PathBuf> {
+    if platform != SystemTtsPlatform::Windows || Path::new(binary).extension().is_some() {
+        return vec![dir.join(binary)];
+    }
+
+    let mut candidates = vec![dir.join(binary)];
+    for extension in windows_pathexts(pathext_value) {
+        candidates.push(dir.join(format!("{binary}{extension}")));
+    }
+    candidates
+}
+
+fn windows_pathexts(pathext_value: Option<&std::ffi::OsStr>) -> Vec<String> {
+    if let Some(value) = pathext_value {
+        let extensions = value
+            .to_string_lossy()
+            .split(';')
+            .map(str::trim)
+            .filter(|extension| !extension.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !extensions.is_empty() {
+            return extensions;
+        }
+    }
+    [".COM", ".EXE", ".BAT", ".CMD"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 fn system_tts_available() -> bool {
-    let binary = if cfg!(target_os = "macos") {
-        "say"
-    } else if cfg!(target_os = "windows") {
-        "powershell"
-    } else {
-        "espeak"
-    };
-    Command::new(binary)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
+    system_tts_binary_for_platform(SystemTtsPlatform::current()).is_some()
 }
 
 pub(crate) fn tts_provider_from_config(provider: &str) -> Box<dyn TtsProvider> {
@@ -700,4 +871,129 @@ pub(crate) fn is_supported_voice_provider(provider: &str) -> bool {
 
 pub(crate) fn clamp_voice_adjustment(value: i16) -> i16 {
     value.clamp(-50, 50)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_tts_maps_configured_voice_ids_to_default() {
+        for voice_id in [
+            "",
+            "default",
+            "id-ID-GadisNeural",
+            "en-US-AvaNeural",
+            "bad; Start-Process calc",
+        ] {
+            assert_eq!(system_tts_voice_id(voice_id), SYSTEM_DEFAULT_VOICE_ID);
+        }
+    }
+
+    #[test]
+    fn system_tts_macos_plan_uses_default_voice_without_voice_flag() {
+        let plan = system_tts_command_plan(
+            SystemTtsPlatform::Macos,
+            "say",
+            "Hello",
+            "id-ID-GadisNeural",
+            0,
+        );
+
+        assert_eq!(plan.binary, "say");
+        assert_eq!(plan.voice_id, SYSTEM_DEFAULT_VOICE_ID);
+        assert_eq!(plan.stdin_text, None);
+        assert_eq!(
+            plan.args,
+            vec!["-r".to_owned(), "175".to_owned(), "Hello".to_owned()]
+        );
+        assert!(!plan
+            .args
+            .iter()
+            .any(|arg| arg == "-v" || arg == "id-ID-GadisNeural"));
+    }
+
+    #[test]
+    fn system_tts_linux_plan_uses_default_voice_without_voice_flag() {
+        let plan = system_tts_command_plan(
+            SystemTtsPlatform::Linux,
+            "espeak",
+            "Hello",
+            "id-ID-GadisNeural",
+            0,
+        );
+
+        assert_eq!(plan.binary, "espeak");
+        assert_eq!(plan.voice_id, SYSTEM_DEFAULT_VOICE_ID);
+        assert_eq!(plan.stdin_text, None);
+        assert_eq!(
+            plan.args,
+            vec!["-s".to_owned(), "175".to_owned(), "Hello".to_owned()]
+        );
+        assert!(!plan
+            .args
+            .iter()
+            .any(|arg| arg == "-v" || arg == "id-ID-GadisNeural"));
+    }
+
+    #[test]
+    fn system_tts_windows_plan_passes_speech_text_on_stdin() {
+        let text = "hello\"; Start-Process calc; #";
+        let plan = system_tts_command_plan(
+            SystemTtsPlatform::Windows,
+            "powershell",
+            text,
+            "id-ID-GadisNeural",
+            0,
+        );
+
+        assert_eq!(plan.binary, "powershell");
+        assert_eq!(plan.voice_id, SYSTEM_DEFAULT_VOICE_ID);
+        assert_eq!(plan.stdin_text.as_deref(), Some(text));
+        assert!(plan.args.iter().any(|arg| arg == "-EncodedCommand"));
+        assert!(!plan
+            .args
+            .iter()
+            .any(|arg| arg.contains(text) || arg.contains("Start-Process")));
+    }
+
+    #[test]
+    fn powershell_script_is_encoded_as_utf16le_base64() {
+        assert_eq!(base64_encode_utf16le("A"), "QQA=");
+        let script = system_tts_powershell_script(50);
+        assert!(script.contains("[Console]::In.ReadToEnd()"));
+        assert!(script.contains("$synth.Rate = 5"));
+        assert!(!script.contains("Start-Process"));
+        assert_eq!(ps_rate(500), 10);
+        assert_eq!(ps_rate(-500), -10);
+    }
+
+    #[test]
+    fn system_tts_path_lookup_checks_presence_without_version_flags() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::write(temp.path().join("say"), b"").expect("say fixture should write");
+        std::fs::write(temp.path().join("powershell.EXE"), b"")
+            .expect("powershell fixture should write");
+        let path_value =
+            std::env::join_paths(std::iter::once(temp.path())).expect("path should join");
+
+        assert!(command_exists_in_path(
+            "say",
+            SystemTtsPlatform::Macos,
+            &path_value,
+            None,
+        ));
+        assert!(command_exists_in_path(
+            "powershell",
+            SystemTtsPlatform::Windows,
+            &path_value,
+            Some(std::ffi::OsStr::new(".EXE;.CMD")),
+        ));
+        assert!(!command_exists_in_path(
+            "espeak",
+            SystemTtsPlatform::Linux,
+            &path_value,
+            None,
+        ));
+    }
 }
