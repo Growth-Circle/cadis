@@ -1,6 +1,6 @@
 # Known Limitations
 
-This document lists known limitations of C.A.D.I.S. v1.1.x.
+This document lists known limitations of C.A.D.I.S. v1.2.x.
 
 ## Platform
 
@@ -46,8 +46,9 @@ This document lists known limitations of C.A.D.I.S. v1.1.x.
   inline logic. Further decomposition is ongoing.
 - **Worker artifact view in HUD is read-only.** Apply/discard actions route
   through daemon approval but the full patch-apply flow needs more work.
-- **`file.patch` lacks atomic writes.** Structured file patching works but does
-  not yet use atomic temp-file writes or concurrent-edit protection.
+- **`file.patch` concurrent-edit detection is basic.** Structured file patching
+  uses atomic temp-file writes with rollback, but concurrent-edit conflict
+  detection remains simple and may not cover all race conditions.
 
 ## Configuration
 
