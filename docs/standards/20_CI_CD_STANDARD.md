@@ -36,7 +36,7 @@ Required `main` status checks:
 - `Repository hygiene`
 - `Rust workspace`
 - `HUD frontend`
-- `macOS Rust source baseline`
+- `macOS Rust full test`
 - `Windows portable crate baseline`
 
 Baseline checks:
