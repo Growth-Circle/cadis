@@ -22,14 +22,14 @@ This document lists known limitations of C.A.D.I.S. v1.1.x.
 
 ## Voice
 
-- **No production voice.** Edge TTS runs as a subprocess bridge through the
-  HUD. Daemon-owned TTS provider execution is not implemented. Whisper
-  transcription depends on a local `whisper-cli` binary.
-- **TTS providers other than Edge and System use stub implementations.** Edge TTS
-  and System TTS produce real audio output; other provider backends remain stubs.
-  System TTS uses `espeak` on Linux, `say` on macOS, and PowerShell
-  `System.Speech` on Windows. It falls back to a stub if the platform binary is
-  not found.
+- **Voice remains early.** Edge TTS, OpenAI TTS, and System TTS can produce real
+  audio output, but speech workflows are still less mature than text-only flows.
+  Whisper transcription depends on a local `whisper-cli` binary.
+- **TTS providers other than Edge, OpenAI, and System use stub implementations.**
+  OpenAI TTS requires `CADIS_OPENAI_API_KEY` or `OPENAI_API_KEY` and `curl` to be
+  available. System TTS uses `espeak` on Linux, `say` on macOS, and PowerShell
+  `System.Speech` on Windows. OpenAI and System TTS fall back to stubs if their
+  runtime prerequisites are not available.
 
 ## Clients
 
