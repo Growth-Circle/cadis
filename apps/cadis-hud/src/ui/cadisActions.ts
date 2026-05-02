@@ -245,21 +245,15 @@ export function sendVoicePreflight(report: VoiceDoctorReport, surface = "cadis-h
   return true;
 }
 
-// TODO: Pending daemon worker.apply support — file.patch needs workspace_id
-// and patch operations, not just worker_id. Re-enable when daemon resolves
-// worker patches via a dedicated worker.apply request.
-// export function sendApplyPatch(workerId: string, _patchPath?: string): boolean {
-//   if (!connected) return false;
-//   void callCadis("tool.call", {
-//     session_id: null,
-//     agent_id: null,
-//     tool_name: "file.patch",
-//     input: { worker_id: workerId },
-//   }).then((ok) => {
-//     if (!ok) scheduleReconnect();
-//   });
-//   return true;
-// }
+export function sendWorkerApply(workerId: string, worktreePath?: string): boolean {
+  if (!connected) return false;
+  const payload: Record<string, unknown> = { worker_id: workerId };
+  if (worktreePath) payload.worktree_path = worktreePath;
+  void callCadis("worker.apply", payload).then((ok) => {
+    if (!ok) scheduleReconnect();
+  });
+  return true;
+}
 
 export function sendWorkerCleanup(workerId: string, worktreePath?: string): boolean {
   if (!connected) return false;
