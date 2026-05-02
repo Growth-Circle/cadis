@@ -547,28 +547,12 @@ fn render_models(
                     .collect();
 
                 if verbose {
-                    println!(
-                        "{:<20}\t{:<30}\t{:<22}\t{:<25}\t{:<10}\tDISPLAY_NAME",
-                        "PROVIDER", "MODEL", "READINESS", "EFFECTIVE", "TYPE"
-                    );
+                    println!("{}", verbose_models_header());
                 }
 
                 for model in &filtered {
                     if verbose {
-                        let caps = model.capabilities.join(",");
-                        println!(
-                            "{:<20}\t{:<30}\t{:<22}\t{:<25}\t{:<10}\t{}\tcaps={}",
-                            model.provider,
-                            model.model,
-                            model_readiness_label(model.readiness),
-                            effective_model_label(
-                                model.effective_provider.as_deref(),
-                                model.effective_model.as_deref()
-                            ),
-                            if model.fallback { "fallback" } else { "real" },
-                            model.display_name,
-                            caps
-                        );
+                        println!("{}", verbose_model_row(model));
                     } else {
                         println!(
                             "{}\t{}\t{}\t{}\t{}\t{}",
@@ -596,6 +580,30 @@ fn render_models(
         }
     }
     Ok(())
+}
+
+fn verbose_models_header() -> String {
+    format!(
+        "{:<20}\t{:<30}\t{:<22}\t{:<25}\t{:<10}\t{}\t{}",
+        "PROVIDER", "MODEL", "READINESS", "EFFECTIVE", "TYPE", "DISPLAY_NAME", "CAPABILITIES"
+    )
+}
+
+fn verbose_model_row(model: &cadis_protocol::ModelDescriptor) -> String {
+    let caps = model.capabilities.join(",");
+    format!(
+        "{:<20}\t{:<30}\t{:<22}\t{:<25}\t{:<10}\t{}\tcaps={}",
+        model.provider,
+        model.model,
+        model_readiness_label(model.readiness),
+        effective_model_label(
+            model.effective_provider.as_deref(),
+            model.effective_model.as_deref()
+        ),
+        if model.fallback { "fallback" } else { "real" },
+        model.display_name,
+        caps
+    )
 }
 
 fn model_readiness_label(readiness: Option<cadis_protocol::ModelReadiness>) -> &'static str {
@@ -2246,11 +2254,14 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
+const MODELS_USAGE: &str = "models [-v|--verbose] [-p|--provider NAME]";
+
 fn print_help() {
     println!(
         "cadis {}\n\nUSAGE:\n  cadis                  Launch daemon + HUD (default)\n  cadis [--socket PATH] [--tcp] [--json] <COMMAND>\n\nCOMMANDS:\n  help                   Print this help\n  daemon [ARGS...]       Launch cadisd from PATH or sibling target directory\n  status                 Show daemon status\n  doctor                 Check local config and daemon connectivity\n  models                 List model provider options\n  agents                 List daemon-owned agents\n  worker <COMMAND>       Inspect daemon-owned workers\n  workspace <COMMAND>    Manage registered workspaces and grants\n  profile [COMMAND]      Manage daemon profiles\n  session <COMMAND>      Manage session event streams\n  voice [COMMAND]        Show daemon-visible voice status or doctor checks\n  events [OPTIONS]       Subscribe to daemon runtime events\n  spawn <ROLE> [OPTIONS] Spawn a child/subagent\n  chat <MESSAGE>         Send a one-shot chat message\n  run [--cwd PATH] <TASK> Send a desktop MVP task as a chat request\n  tool [OPTIONS] <NAME>  Request a daemon-owned tool call\n  approve <ID>           Respond to an approval request\n  deny <ID>              Deny an approval request\n\nThe default command (no args) starts cadisd if needed and launches the\ncanonical Tauri HUD from apps/cadis-hud. If the HUD binary is not found,\nit falls back to an interactive CLI chat session.\n\nWORKER COMMANDS:\n  worker tail <ID> [--lines COUNT]\n  worker result <ID>\n\nWORKSPACE COMMANDS:\n  workspace list [--grants]\n  workspace register <ID> <ROOT> [--kind project|documents|sandbox|worktree]\n  workspace grant <ID> [--access read,write,exec,admin] [--agent AGENT]\n  workspace revoke (--grant ID | --workspace ID)\n  workspace doctor [--workspace ID] [--root PATH]\n\nPROFILE COMMANDS:\n  profile list           List profiles (default)\n  profile create <ID>    Create a new profile\n  profile export <ID>    Export profile as TOML\n  profile import <ID> <FILE>  Import profile from TOML file\n  profile remove <ID>    Remove a profile\n\nSESSION COMMANDS:\n  session subscribe <ID> [--replay COUNT] [--since EVENT_ID] [--no-snapshot]\n\nVOICE COMMANDS:\n  voice status           Show daemon-visible voice status\n  voice doctor           Show voice doctor and local bridge preflight state\n\nEVENT OPTIONS:\n  --snapshot             Print one daemon-owned state snapshot and exit\n  --replay <COUNT>       Replay up to COUNT buffered events before live events\n  --since <EVENT_ID>     Replay retained events after EVENT_ID\n  --no-snapshot          Subscribe without initial state snapshot\n\nSPAWN OPTIONS:\n  --name <NAME>          Display name for the new agent\n  --parent <AGENT>       Parent agent ID, default main\n  --model <MODEL>        Provider/model identifier\n\nTOOL OPTIONS:\n  --cwd <PATH>           Workspace root for file and git tools\n  --workspace <ID>       Registered workspace ID for file and git tools\n  --session <ID>         Attach the tool call to a session\n  --agent <ID>           Use an agent context for scoped workspace grants\n  --input <JSON>         Structured tool input\n\nGLOBAL OPTIONS:\n  --socket <PATH>        Unix socket path\n  --tcp                  Connect via TCP (default on Windows, reads CADIS_TCP_PORT)\n  --json                 Print NDJSON server frames\n  --version, -V          Print version\n  --help, -h             Print help",
         env!("CARGO_PKG_VERSION")
     );
+    println!("\nMODEL COMMAND:\n  {MODELS_USAGE}");
 }
 
 #[cfg(test)]
@@ -2310,6 +2321,46 @@ mod tests {
                 provider: Some("openai".to_owned())
             }
         );
+    }
+
+    #[test]
+    fn parse_models_short_verbose_and_provider_filter() {
+        let cli = Cli::parse(args(&["models", "-v", "-p", "ollama"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Models {
+                verbose: true,
+                provider: Some("ollama".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn verbose_models_header_matches_caps_rows() {
+        let model = cadis_protocol::ModelDescriptor {
+            provider: "ollama".to_owned(),
+            model: "qwen2.5-coder".to_owned(),
+            display_name: "Ollama qwen2.5-coder".to_owned(),
+            capabilities: vec!["streaming".to_owned(), "local_model".to_owned()],
+            readiness: None,
+            effective_provider: Some("ollama".to_owned()),
+            effective_model: Some("qwen2.5-coder".to_owned()),
+            fallback: false,
+        };
+        let header = verbose_models_header();
+        let row = verbose_model_row(&model);
+
+        assert!(header.ends_with("CAPABILITIES"));
+        assert_eq!(header.split('\t').count(), row.split('\t').count());
+        assert_eq!(
+            row.split('\t').next_back(),
+            Some("caps=streaming,local_model")
+        );
+    }
+
+    #[test]
+    fn help_text_documents_models_options() {
+        assert_eq!(MODELS_USAGE, "models [-v|--verbose] [-p|--provider NAME]");
     }
 
     #[test]
