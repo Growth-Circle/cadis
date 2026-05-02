@@ -386,6 +386,7 @@ pub(crate) struct ToolExecutionResult {
 // is tracked as future Track D work.
 
 /// Context passed to tool executors at invocation time.
+/// Reserved for future Track D work: structured tool execution migration.
 #[allow(dead_code)]
 pub(crate) struct ToolContext {
     pub(crate) workspace: PathBuf,
@@ -394,6 +395,7 @@ pub(crate) struct ToolContext {
 }
 
 /// Trait for structured tool execution backends.
+/// Reserved for future Track D work: structured tool execution migration.
 #[allow(dead_code)]
 pub(crate) trait ToolExecutor: Send + Sync {
     fn execute(
@@ -918,6 +920,7 @@ pub(crate) fn file_patch_path_is_secret_like(path: &Path) -> bool {
 }
 
 /// Item 17: Returns true if an environment variable name looks secret-bearing.
+/// Reserved for future use in policy enforcement.
 #[allow(dead_code)]
 pub(crate) fn is_secret_env_var(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -941,6 +944,7 @@ pub(crate) fn is_secret_env_var(name: &str) -> bool {
 }
 
 /// Item 17: Returns true if a config value looks like it contains a secret.
+/// Reserved for future use in policy enforcement.
 #[allow(dead_code)]
 pub(crate) fn is_secret_config_value(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
