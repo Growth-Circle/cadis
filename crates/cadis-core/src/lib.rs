@@ -23,9 +23,9 @@ use cadis_protocol::{
     AgentRole, AgentSessionEventPayload, AgentSessionId, AgentSessionStatus, AgentSpawnRequest,
     AgentSpecialistChangedPayload, AgentSpecialistSetRequest, AgentStatus,
     AgentStatusChangedPayload, AgentTailRequest, ApprovalDecision, ApprovalId,
-    ApprovalRequestPayload, ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent,
-    ClientRequest, ContentKind, DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope,
-    EventId, MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
+    ApprovalResolvedPayload, ApprovalResponseRequest, CadisEvent, ClientRequest, ContentKind,
+    DaemonResponse, DaemonStatusPayload, ErrorPayload, EventEnvelope, EventId,
+    MessageCompletedPayload, MessageDeltaPayload, MessageSendRequest, ModelDescriptor,
     ModelInvocationPayload, ModelReadiness, ModelsListPayload, OrchestratorRoutePayload,
     ProtocolVersion, RequestAcceptedPayload, RequestEnvelope, RequestId, ResponseEnvelope,
     SessionEventPayload, SessionId, Timestamp, ToolCallId, ToolCallRequest, ToolEventPayload,
@@ -44,7 +44,7 @@ use cadis_store::{
     ApprovalState, ApprovalStore, CadisConfig, CadisHome, CheckpointManager, CheckpointPolicy,
     DeniedPaths, GrantSource as StoreGrantSource, MediaManifestStore, ProfileHome,
     ProjectWorkerWorktreeMetadata, ProjectWorkerWorktreeState, ProjectWorkspaceStore,
-    ProjectWorktreeDiagnostic, StateRecoveryDiagnostic, StateStore, WorkerArtifactPathSet,
+    ProjectWorktreeDiagnostic, StateRecoveryDiagnostic, StateStore,
     WorkspaceAccess as StoreWorkspaceAccess, WorkspaceAlias,
     WorkspaceGrantRecord as StoreWorkspaceGrantRecord, WorkspaceKind as StoreWorkspaceKind,
     WorkspaceMetadata, WorkspaceRegistry, WorkspaceVcs, WorktreeCleanupExecutor,
@@ -52,15 +52,21 @@ use cadis_store::{
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+mod approval_helpers;
 mod orchestrator;
 mod search_index;
+mod session_helpers;
 mod tools;
 mod voice;
+mod worker_helpers;
 mod workspace;
 
+use approval_helpers::*;
 use orchestrator::*;
+use session_helpers::*;
 use tools::*;
 use voice::*;
+use worker_helpers::*;
 use workspace::*;
 
 const FILE_READ_LIMIT_BYTES: usize = 64 * 1024;
@@ -77,6 +83,7 @@ const WORKER_TAIL_DEFAULT_LINES: usize = 64;
 const WORKER_TAIL_MAX_LINES: usize = 1_000;
 const WORKER_DEFAULT_COMMAND: &str = "git status --short";
 const WORKER_COMMAND_TIMEOUT_MS: u64 = 5_000;
+#[allow(dead_code)]
 const WORKER_COMMAND_LOG_LIMIT_BYTES: usize = 4 * 1024;
 const WORKER_COMMAND_SUMMARY_LIMIT_BYTES: usize = 512;
 const AGENT_PERSONA_MAX_CHARS: usize = 1_200;
@@ -6691,111 +6698,6 @@ fn next_approval_counter(approvals: &HashMap<ApprovalId, ApprovalRecord>) -> u64
         + 1
 }
 
-fn worker_status_is_terminal(status: WorkerState) -> bool {
-    status.is_terminal()
-}
-
-fn worker_state_str(s: WorkerState) -> String {
-    match s {
-        WorkerState::Queued => "queued",
-        WorkerState::Running => "running",
-        WorkerState::Completed => "completed",
-        WorkerState::Failed => "failed",
-        WorkerState::Cancelled => "cancelled",
-    }
-    .to_owned()
-}
-
-fn agent_session_lifecycle_event(payload: AgentSessionEventPayload) -> CadisEvent {
-    match payload.status {
-        AgentSessionStatus::Completed => CadisEvent::AgentSessionCompleted(payload),
-        AgentSessionStatus::Failed
-        | AgentSessionStatus::TimedOut
-        | AgentSessionStatus::BudgetExceeded => CadisEvent::AgentSessionFailed(payload),
-        AgentSessionStatus::Cancelled => CadisEvent::AgentSessionCancelled(payload),
-        AgentSessionStatus::Started | AgentSessionStatus::Running => {
-            CadisEvent::AgentSessionUpdated(payload)
-        }
-    }
-}
-
-fn worker_lifecycle_event(payload: WorkerEventPayload) -> CadisEvent {
-    let kind = payload.status.as_deref().and_then(|s| match s {
-        "completed" => Some(WorkerLifecycleEventKind::Completed),
-        "cancelled" | "canceled" => Some(WorkerLifecycleEventKind::Cancelled),
-        "failed" => Some(WorkerLifecycleEventKind::Failed),
-        "running" | "queued" => Some(WorkerLifecycleEventKind::Started),
-        _ => None,
-    });
-    match kind {
-        Some(WorkerLifecycleEventKind::Completed) => CadisEvent::WorkerCompleted(payload),
-        Some(WorkerLifecycleEventKind::Failed) => CadisEvent::WorkerFailed(payload),
-        Some(WorkerLifecycleEventKind::Cancelled) => CadisEvent::WorkerCancelled(payload),
-        Some(WorkerLifecycleEventKind::Started) | None => CadisEvent::WorkerStarted(payload),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum WorkerLifecycleEventKind {
-    Started,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-fn worker_lifecycle_event_kind(status: WorkerState) -> WorkerLifecycleEventKind {
-    match status {
-        WorkerState::Completed => WorkerLifecycleEventKind::Completed,
-        WorkerState::Cancelled => WorkerLifecycleEventKind::Cancelled,
-        status if worker_status_is_terminal(status) => WorkerLifecycleEventKind::Failed,
-        _ => WorkerLifecycleEventKind::Started,
-    }
-}
-
-fn worker_terminal_worktree_state(
-    record: &WorkerRecord,
-    status: WorkerState,
-) -> Option<WorkerWorktreeState> {
-    if !worker_status_is_terminal(status) {
-        return None;
-    }
-    let worktree = record.worktree.as_ref()?;
-    if worktree.state != WorkerWorktreeState::Active {
-        return None;
-    }
-    if worker_lifecycle_event_kind(status) == WorkerLifecycleEventKind::Cancelled {
-        return Some(WorkerWorktreeState::CleanupPending);
-    }
-
-    Some(match worktree.cleanup_policy {
-        WorkerWorktreeCleanupPolicy::OnCompletion => WorkerWorktreeState::CleanupPending,
-        WorkerWorktreeCleanupPolicy::Explicit | WorkerWorktreeCleanupPolicy::AfterApply => {
-            WorkerWorktreeState::ReviewPending
-        }
-    })
-}
-
-fn plan_worker_terminal_worktree(record: &mut WorkerRecord, status: WorkerState) {
-    let Some(state) = worker_terminal_worktree_state(record, status) else {
-        return;
-    };
-    if let Some(worktree) = &mut record.worktree {
-        worktree.state = state;
-    }
-}
-
-fn project_worker_worktree_state_for_worker_state(
-    state: WorkerWorktreeState,
-) -> ProjectWorkerWorktreeState {
-    match state {
-        WorkerWorktreeState::Planned => ProjectWorkerWorktreeState::Planned,
-        WorkerWorktreeState::Active => ProjectWorkerWorktreeState::Ready,
-        WorkerWorktreeState::ReviewPending => ProjectWorkerWorktreeState::ReviewPending,
-        WorkerWorktreeState::CleanupPending => ProjectWorkerWorktreeState::CleanupPending,
-        WorkerWorktreeState::Removed => ProjectWorkerWorktreeState::Removed,
-    }
-}
-
 fn resolve_project_path(project_root: &Path, path: impl AsRef<Path>) -> PathBuf {
     let path = path.as_ref();
     if path.is_absolute() {
@@ -6874,26 +6776,6 @@ fn timestamp_is_past(timestamp: &Timestamp) -> bool {
     DateTime::parse_from_rfc3339(timestamp.as_str())
         .map(|timestamp| timestamp.with_timezone(&Utc) <= Utc::now())
         .unwrap_or(true)
-}
-
-fn approval_is_expired(record: &ApprovalRecord) -> bool {
-    DateTime::parse_from_rfc3339(record.expires_at.as_str())
-        .map(|expires_at| expires_at.with_timezone(&Utc) <= Utc::now())
-        .unwrap_or(true)
-}
-
-fn approval_request_payload(record: &ApprovalRecord) -> ApprovalRequestPayload {
-    ApprovalRequestPayload {
-        approval_id: record.approval_id.clone(),
-        session_id: record.session_id.clone(),
-        tool_call_id: record.tool_call_id.clone(),
-        risk_class: record.risk_class,
-        title: record.title.clone(),
-        summary: record.summary.clone(),
-        command: record.command.clone(),
-        workspace: record.workspace.clone(),
-        expires_at: record.expires_at.clone(),
-    }
 }
 
 fn input_string(input: &serde_json::Value, key: &str) -> Option<String> {
@@ -7203,18 +7085,6 @@ fn agent_status_label(status: AgentStatus) -> &'static str {
     }
 }
 
-fn agent_session_status_label(status: AgentSessionStatus) -> &'static str {
-    match status {
-        AgentSessionStatus::Started => "started",
-        AgentSessionStatus::Running => "running",
-        AgentSessionStatus::Completed => "completed",
-        AgentSessionStatus::Failed => "failed",
-        AgentSessionStatus::Cancelled => "cancelled",
-        AgentSessionStatus::TimedOut => "timed_out",
-        AgentSessionStatus::BudgetExceeded => "budget_exceeded",
-    }
-}
-
 fn planned_worker_worktree(
     worker_id: &str,
     workspace: Option<&str>,
@@ -7246,17 +7116,6 @@ fn planned_worker_worktree(
         base_ref: Some("HEAD".to_owned()),
         state: WorkerWorktreeState::Planned,
         cleanup_policy: WorkerWorktreeCleanupPolicy::Explicit,
-    }
-}
-
-fn worker_artifact_locations(paths: &WorkerArtifactPathSet) -> WorkerArtifactLocations {
-    WorkerArtifactLocations {
-        root: paths.root.display().to_string(),
-        patch: paths.patch.display().to_string(),
-        test_report: paths.test_report.display().to_string(),
-        summary: paths.summary.display().to_string(),
-        changed_files: paths.changed_files.display().to_string(),
-        memory_candidates: paths.memory_candidates.display().to_string(),
     }
 }
 
@@ -8086,57 +7945,7 @@ fn worker_command_report(
     }
 }
 
-fn worker_command_failure(report: &WorkerCommandReport) -> WorkerCommandFailure {
-    if report.timed_out {
-        return WorkerCommandFailure {
-            code: "worker_command_timeout".to_owned(),
-            message: format!(
-                "worker command timed out after timeout_ms={}: {}",
-                report.timeout_ms, report.command
-            ),
-        };
-    }
-
-    let detail = if !report.stderr.trim().is_empty() {
-        report.stderr.trim()
-    } else if !report.stdout.trim().is_empty() {
-        report.stdout.trim()
-    } else {
-        "command exited without output"
-    };
-    WorkerCommandFailure {
-        code: "worker_command_failed".to_owned(),
-        message: format!(
-            "worker command exited with code {:?}: {}",
-            report.exit_code,
-            truncate_redacted_text(detail, WORKER_COMMAND_SUMMARY_LIMIT_BYTES)
-        ),
-    }
-}
-
-fn worker_command_logs(report: &WorkerCommandReport) -> Vec<String> {
-    let mut logs = Vec::new();
-    if !report.stdout.is_empty() || report.stdout_truncated {
-        logs.push(bounded_worker_command_log(
-            "stdout",
-            &report.stdout,
-            report.stdout_truncated,
-        ));
-    }
-    if !report.stderr.is_empty() || report.stderr_truncated {
-        logs.push(bounded_worker_command_log(
-            "stderr",
-            &report.stderr,
-            report.stderr_truncated,
-        ));
-    }
-    logs.push(format!(
-        "command finished: status={} exit_code={:?}\n",
-        report.status, report.exit_code
-    ));
-    logs
-}
-
+#[allow(dead_code)]
 fn bounded_worker_command_log(label: &str, content: &str, source_truncated: bool) -> String {
     let header = format!("command {label}:\n");
     let marker = format!("\n[{label} truncated]\n");
@@ -8176,53 +7985,6 @@ fn truncate_to_utf8_boundary(content: &str, limit: usize) -> (&str, bool) {
         end -= 1;
     }
     (&content[..end], true)
-}
-
-fn worker_command_summary_markdown(report: &WorkerCommandReport) -> String {
-    let mut content = format!(
-        "\n## Daemon Validation\n\nCommand: `{}`\n\nStatus: {}\n\nExit code: {:?}\n\n",
-        redact(&report.command),
-        report.status,
-        report.exit_code
-    );
-    if !report.stdout.is_empty() || report.stdout_truncated {
-        content.push_str("Stdout:\n\n```text\n");
-        content.push_str(&report.stdout);
-        if report.stdout_truncated {
-            if !content.ends_with('\n') {
-                content.push('\n');
-            }
-            content.push_str("[stdout truncated]\n");
-        }
-        content.push_str("```\n\n");
-    }
-    if !report.stderr.is_empty() || report.stderr_truncated {
-        content.push_str("Stderr:\n\n```text\n");
-        content.push_str(&report.stderr);
-        if report.stderr_truncated {
-            if !content.ends_with('\n') {
-                content.push('\n');
-            }
-            content.push_str("[stderr truncated]\n");
-        }
-        content.push_str("```\n\n");
-    }
-    content
-}
-
-fn worker_command_report_json(report: &WorkerCommandReport) -> serde_json::Value {
-    serde_json::json!({
-        "command": report.command.clone(),
-        "cwd": report.cwd.clone(),
-        "status": report.status.clone(),
-        "exit_code": report.exit_code,
-        "timed_out": report.timed_out,
-        "stdout": report.stdout.clone(),
-        "stderr": report.stderr.clone(),
-        "stdout_truncated": report.stdout_truncated,
-        "stderr_truncated": report.stderr_truncated,
-        "timeout_ms": report.timeout_ms,
-    })
 }
 
 fn write_worker_artifacts(
@@ -8502,17 +8264,6 @@ fn branch_slug(value: &str) -> String {
     } else {
         slug.chars().take(32).collect()
     }
-}
-
-fn agent_session_is_terminal(status: AgentSessionStatus) -> bool {
-    matches!(
-        status,
-        AgentSessionStatus::Completed
-            | AgentSessionStatus::Failed
-            | AgentSessionStatus::Cancelled
-            | AgentSessionStatus::TimedOut
-            | AgentSessionStatus::BudgetExceeded
-    )
 }
 
 fn json_usize(value: &serde_json::Value, key: &str) -> Option<usize> {
