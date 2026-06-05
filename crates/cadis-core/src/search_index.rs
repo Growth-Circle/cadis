@@ -53,18 +53,26 @@ impl SearchIndex {
                     continue;
                 }
                 let path = entry.path();
+                // Canonicalize to resolve symlinks and verify the path stays inside the workspace.
+                let canonical = match path.canonicalize() {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                if !canonical.starts_with(root) {
+                    continue;
+                }
                 let Ok(meta) = entry.metadata() else { continue };
                 if meta.is_dir() {
-                    stack.push(path);
+                    stack.push(canonical);
                 } else if meta.is_file() && meta.len() <= MAX_FILE_SIZE {
-                    let Ok(content) = fs::read(&path) else {
+                    let Ok(content) = fs::read(&canonical) else {
                         continue;
                     };
                     if is_binary(&content) {
                         continue;
                     }
                     let trigrams = extract_trigrams(&content);
-                    entries.push(IndexEntry { path, trigrams });
+                    entries.push(IndexEntry { path: canonical, trigrams });
                 }
             }
         }

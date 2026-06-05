@@ -5296,6 +5296,12 @@ impl Runtime {
         for entry in entries {
             let entry = entry.map_err(|e| tool_error("file_list_failed", e.to_string(), false))?;
             let meta = entry.metadata().ok();
+            // Skip entries whose canonical path escapes the workspace (symlink defense).
+            if let Ok(canonical) = entry.path().canonicalize() {
+                if !canonical.starts_with(workspace) {
+                    continue;
+                }
+            }
             let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
             let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
             let name = entry.file_name().to_string_lossy().to_string();
