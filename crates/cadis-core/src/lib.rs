@@ -5168,7 +5168,7 @@ impl Runtime {
             ));
         }
 
-        let resolved = workspace.join(&path);
+        let resolved = resolve_git_worktree_path(workspace, &path)?;
 
         // Try with -b first (new branch); fall back to existing branch.
         let output = Command::new("git")
@@ -5246,7 +5246,7 @@ impl Runtime {
             )
         })?;
 
-        let resolved = workspace.join(&path);
+        let resolved = resolve_git_worktree_path(workspace, &path)?;
 
         let output = Command::new("git")
             .args(["worktree", "remove", &resolved.to_string_lossy(), "--force"])
@@ -9899,6 +9899,87 @@ mod tests {
                 CadisEvent::ToolFailed(payload)
                     if payload.tool_name == "file.patch"
                         && payload.error.code == "workspace_grant_required"
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+    }
+
+    #[test]
+    fn git_worktree_create_rejects_outside_workspace_path() {
+        let workspace = test_workspace("git-worktree-create-outside");
+        fs::write(workspace.join("README.md"), "hello\n").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "git-worktree-create-outside", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "git-worktree-create-outside",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_git_worktree_create_outside"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "git.worktree.create".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "git-worktree-create-outside",
+                    "branch": "feature/escape",
+                    "path": "../outside-worktree"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "git.worktree.create"
+                        && payload.error.code == "outside_workspace"
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+    }
+
+    #[test]
+    fn git_worktree_remove_rejects_outside_workspace_path() {
+        let workspace = test_workspace("git-worktree-remove-outside");
+        fs::write(workspace.join("README.md"), "hello\n").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "git-worktree-remove-outside", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "git-worktree-remove-outside",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_git_worktree_remove_outside"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "git.worktree.remove".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "git-worktree-remove-outside",
+                    "path": "../outside-worktree"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "git.worktree.remove"
+                        && payload.error.code == "outside_workspace"
             )
         }));
         assert!(!outcome

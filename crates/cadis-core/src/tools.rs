@@ -957,6 +957,72 @@ pub(crate) fn is_secret_config_value(value: &str) -> bool {
         || lower.contains("private_key=")
 }
 
+pub(crate) fn resolve_git_worktree_path(
+    workspace: &Path,
+    user_path: &str,
+) -> Result<PathBuf, ErrorPayload> {
+    let trimmed = user_path.trim();
+    if trimmed.is_empty() {
+        return Err(tool_error(
+            "invalid_tool_input",
+            "git worktree path cannot be empty",
+            false,
+        ));
+    }
+
+    let relative = Path::new(trimmed);
+    if relative.is_absolute() || path_has_parent_or_root(relative) {
+        return Err(tool_error(
+            "outside_workspace",
+            "git worktree path must be relative to the workspace",
+            false,
+        ));
+    }
+
+    let workspace = workspace.canonicalize().map_err(|error| {
+        tool_error(
+            "path_resolution_failed",
+            format!("could not resolve workspace: {error}"),
+            false,
+        )
+    })?;
+    let candidate = workspace.join(relative);
+    if let Ok(resolved) = candidate.canonicalize() {
+        if !resolved.starts_with(&workspace) {
+            return Err(tool_error(
+                "outside_workspace",
+                "git worktree path resolves outside the workspace",
+                false,
+            ));
+        }
+        return Ok(resolved);
+    }
+
+    let parent = candidate.parent().ok_or_else(|| {
+        tool_error(
+            "invalid_tool_input",
+            "git worktree path must have a parent directory",
+            false,
+        )
+    })?;
+    let parent = parent.canonicalize().map_err(|error| {
+        tool_error(
+            "path_resolution_failed",
+            format!("could not resolve git worktree parent: {error}"),
+            false,
+        )
+    })?;
+    if !parent.starts_with(&workspace) {
+        return Err(tool_error(
+            "outside_workspace",
+            "git worktree parent resolves outside the workspace",
+            false,
+        ));
+    }
+
+    Ok(candidate)
+}
+
 pub(crate) fn validate_git_pathspec(pathspec: &str) -> Result<String, ErrorPayload> {
     let trimmed = pathspec.trim();
     if trimmed.is_empty() {
@@ -1106,5 +1172,37 @@ pub(crate) fn tool_error(
         code: code.into(),
         message: redact(&message.into()),
         retryable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn resolve_git_worktree_path_rejects_parent_dir_escape() {
+        let workspace = std::env::temp_dir().join(format!(
+            "cadis-worktree-path-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&workspace).expect("workspace dir should exist");
+        let error = resolve_git_worktree_path(&workspace, "../outside")
+            .expect_err("parent dir path should be rejected");
+        assert_eq!(error.code, "outside_workspace");
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn resolve_git_worktree_path_accepts_relative_child() {
+        let workspace = std::env::temp_dir().join(format!(
+            "cadis-worktree-path-test-child-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&workspace).expect("workspace dir should exist");
+        let resolved =
+            resolve_git_worktree_path(&workspace, "worktrees/feature").expect("valid child path");
+        assert!(resolved.starts_with(workspace.canonicalize().expect("workspace canonical")));
+        let _ = fs::remove_dir_all(&workspace);
     }
 }
