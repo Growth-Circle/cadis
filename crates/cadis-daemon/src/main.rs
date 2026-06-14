@@ -150,7 +150,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     {
         let socket_path = socket_path
             .ok_or_else(|| invalid_input("socket path required (use --tcp-port on Windows)"))?;
-        run_socket(socket_path, runtime, event_log, event_bus).await
+        run_socket(socket_path, runtime, event_log, event_bus, config.tcp_auth_token.clone()).await
     }
 
     #[cfg(not(unix))]
@@ -259,9 +259,20 @@ async fn verify_tcp_auth<R: tokio::io::AsyncBufRead + Unpin>(
     let value: serde_json::Value = serde_json::from_str(line.trim())
         .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "tcp auth failed"))?;
     match value.get("auth_token").and_then(|v| v.as_str()) {
-        Some(token) if token == expected => Ok(()),
+        Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => Ok(()),
         _ => Err(io::Error::new(io::ErrorKind::PermissionDenied, "tcp auth failed").into()),
     }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut result = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
 }
 
 #[cfg(unix)]
@@ -270,12 +281,14 @@ async fn run_socket(
     runtime: Arc<Mutex<Runtime>>,
     event_log: EventLog,
     event_bus: EventBus,
+    tcp_auth_token: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     prepare_socket_path(&socket_path)?;
     let listener = TokioUnixListener::bind(&socket_path)?;
     eprintln!("cadisd listening on {}", socket_path.display());
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let tcp_auth_token = tcp_auth_token.map(Arc::new);
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -289,9 +302,16 @@ async fn run_socket(
                         let event_log = event_log.clone();
                         let event_bus = event_bus.clone();
                         let shutdown = Arc::clone(&shutdown);
+                        let tcp_auth_token = tcp_auth_token.clone();
                         tokio::spawn(async move {
                             let (reader, writer) = stream.into_split();
-                            let reader = tokio::io::BufReader::new(reader);
+                            let mut reader = tokio::io::BufReader::new(reader);
+                            if let Some(ref expected) = tcp_auth_token {
+                                if let Err(error) = verify_tcp_auth(&mut reader, expected).await {
+                                    eprintln!("cadisd auth rejected: {error}");
+                                    return;
+                                }
+                            }
                             if let Err(error) = serve_connection(
                                 reader, writer, runtime, event_log, event_bus, shutdown,
                             ).await {
