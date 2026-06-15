@@ -1,15 +1,20 @@
 # Crates
 
-Rust workspace crates will live here.
+Rust workspace crates for CADIS runtime and supporting tools.
 
-Planned first crates:
+## Core Crates
 
 - `cadis-protocol` - typed requests, responses, events, versioning, serialization
-- `cadis-avatar` - renderer-independent Wulan avatar state engine, gesture model, face-tracking privacy config, wgpu-first renderer contract, and feature-gated adapter-ready wgpu render-plan spike
-- `cadis-core`
-- `cadis-daemon`
-- `cadis-cli`
-- `cadis-store`
-- `cadis-policy`
+- `cadis-avatar` - Wulan avatar state engine, gesture model, face-tracking privacy config, wgpu-first renderer
+- `cadis-core` - core runtime primitives and agent orchestration
+- `cadis-daemon` - main daemon (cadisd) with Tokio async runtime
+- `cadis-cli` - command-line interface client
+- `cadis-store` - persistent state storage and config management
+- `cadis-policy` - approval engine and risk classification
+- `cadis-models` - model provider abstraction (Ollama, OpenAI, CodexCli, Auto, Echo)
+- `cadis-memory` - semantic memory and session persistence
+- `cadis-output-filter` - 60-90% token reduction for context efficiency
+- `cadis-telegram` - Telegram adapter integration
+- `cadis-hud` - native HUD (apps/cadis-hud) using Tauri and React
 
-Crates should be added only when implementation starts and each crate has a clear responsibility.
+Each crate has clear responsibility boundaries and is tested independently.

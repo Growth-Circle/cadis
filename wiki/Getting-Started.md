@@ -35,14 +35,12 @@ Binaries are at `target/release/cadisd` and `target/release/cadis`.
 ## Start the daemon
 
 ```bash
-cadisd --check   # verify config
 cadisd           # start
 ```
 
 Or from a source build:
 
 ```bash
-target/release/cadisd --check
 target/release/cadisd
 ```
 

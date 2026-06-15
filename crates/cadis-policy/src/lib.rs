@@ -163,10 +163,12 @@ impl CancellationToken {
 // ── Denied path enforcement (Track D item 6) ────────────────────────
 
 /// Checks whether a path is denied by the configured denied path list.
+/// Returns true if the path matches a denied path, or if the path cannot be
+/// canonicalized (fail-closed on path resolution errors).
 pub fn is_denied_path(path: &Path, denied_paths: &[PathBuf]) -> bool {
     let Ok(canonical) = path.canonicalize() else {
-        // If we can't resolve, check raw prefix match.
-        return denied_paths.iter().any(|denied| path.starts_with(denied));
+        // If we can't resolve, deny by default (fail-closed security posture).
+        return true;
     };
     denied_paths.iter().any(|denied| {
         if let Ok(denied_canonical) = denied.canonicalize() {
@@ -777,7 +779,19 @@ decision = "deny"
     #[test]
     fn denied_path_blocks_matching_prefix() {
         let denied = vec![PathBuf::from("/etc")];
+        // Use paths that definitely exist on the system
         assert!(is_denied_path(Path::new("/etc/shadow"), &denied));
-        assert!(!is_denied_path(Path::new("/tmp/safe"), &denied));
+        // Current working directory definitely exists
+        assert!(!is_denied_path(Path::new("."), &denied));
+    }
+
+    #[test]
+    fn denied_path_fails_closed_on_non_existent_path() {
+        // Paths that don't exist cannot be canonicalized and should be denied
+        let denied = vec![PathBuf::from("/etc")];
+        assert!(is_denied_path(
+            Path::new("/non/existent/path/that/cannot/be/resolved"),
+            &denied
+        ));
     }
 }
