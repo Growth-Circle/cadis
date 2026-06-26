@@ -1075,9 +1075,11 @@ impl EventFilter {
 
 impl EventBus {
     fn new(max_replay: usize) -> Self {
+        // Cap initial capacity to prevent excessive allocation if max_replay is misconfigured.
+        let capacity = max_replay.min(1024);
         Self {
             inner: Arc::new(Mutex::new(EventBusInner {
-                replay: VecDeque::with_capacity(max_replay),
+                replay: VecDeque::with_capacity(capacity),
                 subscribers: Vec::new(),
             })),
             max_replay,
@@ -1091,10 +1093,25 @@ impl EventBus {
         };
 
         if self.max_replay > 0 {
+            // Enforce strict buffer limit before adding new event.
             while inner.replay.len() >= self.max_replay {
                 inner.replay.pop_front();
             }
             inner.replay.push_back(event.clone());
+
+            // Safety check: ensure buffer never exceeds limit after insertion.
+            // This guards against logic errors or capacity mismatches.
+            if inner.replay.len() > self.max_replay {
+                eprintln!(
+                    "cadisd event bus error: replay buffer exceeded limit ({} > {})",
+                    inner.replay.len(),
+                    self.max_replay
+                );
+                // Drain excess events to restore invariant.
+                while inner.replay.len() > self.max_replay {
+                    inner.replay.pop_front();
+                }
+            }
         }
 
         inner.subscribers.retain(|subscriber| {
