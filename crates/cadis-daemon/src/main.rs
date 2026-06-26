@@ -349,12 +349,12 @@ fn dispatch_request(
 
     let envelope = match serde_json::from_str::<RequestEnvelope>(line) {
         Ok(envelope) => envelope,
-        Err(error) => {
+        Err(_error) => {
             let response = ResponseEnvelope::new(
                 RequestId::from("req_invalid"),
                 DaemonResponse::RequestRejected(ErrorPayload {
                     code: "invalid_request".to_owned(),
-                    message: format!("request JSON was invalid: {error}"),
+                    message: "request JSON was invalid".to_owned(),
                     retryable: false,
                 }),
             );
