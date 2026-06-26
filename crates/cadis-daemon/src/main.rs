@@ -37,6 +37,9 @@ use cadis_store::{
 };
 
 const EVENT_REPLAY_LIMIT: usize = 256;
+/// Maximum allowed JSON request line size in bytes (10 MB).
+/// Requests exceeding this limit are rejected to prevent memory exhaustion.
+const MAX_REQUEST_LINE_BYTES: usize = 10 * 1024 * 1024;
 
 fn main() {
     // Handle --stdio outside the tokio runtime so that blocking model providers
@@ -345,6 +348,22 @@ fn dispatch_request(
 ) -> Result<DispatchAction, io::Error> {
     if line.trim().is_empty() {
         return Ok(DispatchAction::Skip);
+    }
+
+    // Reject requests exceeding size limit to prevent memory exhaustion.
+    if line.len() > MAX_REQUEST_LINE_BYTES {
+        let response = ResponseEnvelope::new(
+            RequestId::from("req_too_large"),
+            DaemonResponse::RequestRejected(ErrorPayload {
+                code: "request_too_large".to_owned(),
+                message: format!(
+                    "request line exceeds maximum size of {} bytes",
+                    MAX_REQUEST_LINE_BYTES
+                ),
+                retryable: false,
+            }),
+        );
+        return Ok(DispatchAction::ParseError(ServerFrame::Response(response)));
     }
 
     let envelope = match serde_json::from_str::<RequestEnvelope>(line) {
