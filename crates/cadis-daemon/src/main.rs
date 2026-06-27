@@ -37,6 +37,7 @@ use cadis_store::{
 };
 
 const EVENT_REPLAY_LIMIT: usize = 256;
+const MAX_RESPONSE_CHARS: usize = 1_000_000;
 
 fn main() {
     // Handle --stdio outside the tokio runtime so that blocking model providers
@@ -651,6 +652,16 @@ where
                             invocation = Some(started.clone());
                         }
                         ModelStreamEvent::Delta(delta) => {
+                            if final_content.len() + delta.len() > MAX_RESPONSE_CHARS {
+                                return Err(ModelError::with_code(
+                                    "response_too_large",
+                                    format!(
+                                        "response exceeded {} characters, truncating",
+                                        MAX_RESPONSE_CHARS,
+                                    ),
+                                    true,
+                                ));
+                            }
                             final_content.push_str(delta);
                             emitted_delta = true;
                         }
@@ -872,6 +883,16 @@ fn serve_pending_message_generation<W: Write>(
                         invocation = Some(started);
                     }
                     ModelStreamEvent::Delta(delta) => {
+                        if final_content.len() + delta.len() > MAX_RESPONSE_CHARS {
+                            return Err(ModelError::with_code(
+                                "response_too_large",
+                                format!(
+                                    "response exceeded {} characters, truncating",
+                                    MAX_RESPONSE_CHARS,
+                                ),
+                                true,
+                            ));
+                        }
                         final_content.push_str(&delta);
                         emitted_delta = true;
                         let event = runtime
