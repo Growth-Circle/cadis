@@ -37,6 +37,7 @@ use cadis_store::{
 };
 
 const EVENT_REPLAY_LIMIT: usize = 256;
+const MAX_LINE_LENGTH: usize = 1_000_000;
 
 fn main() {
     // Handle --stdio outside the tokio runtime so that blocking model providers
@@ -256,6 +257,9 @@ async fn verify_tcp_auth<R: tokio::io::AsyncBufRead + Unpin>(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut line = String::new();
     reader.read_line(&mut line).await?;
+    if line.len() > MAX_LINE_LENGTH {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "auth line too long").into());
+    }
     let value: serde_json::Value = serde_json::from_str(line.trim())
         .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "tcp auth failed"))?;
     match value.get("auth_token").and_then(|v| v.as_str()) {
@@ -446,6 +450,9 @@ where
 
     for line in reader.lines() {
         let line = line?;
+        if line.len() > MAX_LINE_LENGTH {
+            return Err(io::Error::other("request line too long").into());
+        }
         match dispatch_request(&line, &runtime)? {
             DispatchAction::Skip => continue,
             DispatchAction::ParseError(frame) | DispatchAction::UnsupportedVersion(frame) => {
@@ -521,6 +528,9 @@ where
     let mut lines = reader.lines();
 
     while let Some(line) = lines.next_line().await? {
+        if line.len() > MAX_LINE_LENGTH {
+            return Err(io::Error::other("request line too long").into());
+        }
         match dispatch_request(&line, &runtime)? {
             DispatchAction::Skip => continue,
             DispatchAction::ParseError(frame) | DispatchAction::UnsupportedVersion(frame) => {
