@@ -264,27 +264,6 @@ impl ToolDefinition {
         }
     }
 
-    pub(crate) fn policy_reason(&self) -> String {
-        match self.execution {
-            ToolExecutionMode::AutoExecute => format!(
-                "{}: {} | schema={:?} | timeout={}s | workspace={:?}",
-                self.name,
-                self.description,
-                self.input_schema,
-                self.timeout_secs,
-                self.workspace_behavior,
-            ),
-            ToolExecutionMode::ApprovalPlaceholder => format!(
-                "{}: {} | risk={:?} | schema={:?} | timeout={}s | workspace={:?}",
-                self.name,
-                self.description,
-                self.risk_class,
-                self.input_schema,
-                self.timeout_secs,
-                self.workspace_behavior,
-            ),
-        }
-    }
 
     pub(crate) fn approval_summary(&self) -> String {
         format!(

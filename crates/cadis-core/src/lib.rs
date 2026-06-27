@@ -810,9 +810,10 @@ impl Runtime {
                 false,
             );
         };
-        let risk_class = tool.risk_class;
-        let policy_decision = self.policy.decide(risk_class);
-        let policy_reason = tool.policy_reason();
+        let tool_policy_decision = self.policy.decide_tool(&request.tool_name);
+        let policy_decision = tool_policy_decision.decision;
+        let risk_class = tool_policy_decision.risk_class.unwrap_or(tool.risk_class);
+        let policy_reason = tool_policy_decision.reason;
         let approval_summary = tool.approval_summary();
 
         let (session_id, mut events) =
@@ -1407,10 +1408,11 @@ impl Runtime {
             );
         };
 
-        let risk_class = tool.risk_class;
-        let policy_decision = self.policy.decide(risk_class);
+        let tool_policy_decision = self.policy.decide_tool(&directive.tool_name);
+        let policy_decision = tool_policy_decision.decision;
+        let risk_class = tool_policy_decision.risk_class.unwrap_or(tool.risk_class);
         let is_auto_execute = tool.execution == ToolExecutionMode::AutoExecute;
-        let policy_reason = tool.policy_reason();
+        let policy_reason = tool_policy_decision.reason;
 
         // Only auto-execute safe-read tools in the loop.
         if policy_decision != PolicyDecision::Allow || !is_auto_execute {

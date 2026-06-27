@@ -569,6 +569,7 @@ fn classify_tool(tool_name: &str) -> Option<RiskClass> {
         }
         "file.write"
         | "file.patch"
+        | "worker.apply"
         | "git.diff"
         | "git.worktree.create"
         | "git.worktree.remove"
