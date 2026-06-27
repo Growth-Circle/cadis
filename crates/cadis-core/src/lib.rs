@@ -8450,16 +8450,13 @@ fn join_bounded_output(handle: Option<thread::JoinHandle<BoundedOutput>>) -> Bou
 fn terminate_child(child: &mut Child) {
     #[cfg(unix)]
     {
-        let process_group = format!("-{}", child.id());
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(&process_group)
-            .status();
+        use nix::sys::signal::{killpg, Signal};
+        use nix::unistd::Pid;
+
+        let pgid = Pid::from_raw(child.id() as i32);
+        let _ = killpg(pgid, Signal::SIGTERM);
         thread::sleep(StdDuration::from_millis(20));
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg(&process_group)
-            .status();
+        let _ = killpg(pgid, Signal::SIGKILL);
     }
 
     let _ = child.kill();
