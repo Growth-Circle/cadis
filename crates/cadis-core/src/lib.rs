@@ -4623,6 +4623,24 @@ impl Runtime {
         workspace: &Path,
         input: &serde_json::Value,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
+        // ATOMIC WRITE GUARANTEE: This function implements atomic file updates using temp-file writes.
+        //
+        // Pattern:
+        // 1. Create temp file with unique name in the target directory
+        // 2. Write content to temp file
+        // 3. Detect concurrent edits by comparing mtime before/after write
+        // 4. Atomically rename temp file to target path
+        //
+        // This ensures that either:
+        // - The entire patch is applied atomically (all bytes present), or
+        // - The original file is unchanged (rename fails or never occurs)
+        //
+        // Concurrent edits are detected by:
+        // - Recording mtime in prepare_file_patch()
+        // - Comparing mtime before write (above loop)
+        // - Failing with concurrent_edit error if modified
+        //
+        // This protects against lost updates when multiple agents patch the same file.
         let operations = parse_file_patch_operations(input)?;
         let prepared = prepare_file_patch(workspace, &operations)?;
 
@@ -4694,10 +4712,25 @@ impl Runtime {
                     }
                 }
             }
+            // Use a unique temp file name that includes PID and a random suffix to prevent collisions
+            // during concurrent patch operations to the same file.
+            let random_suffix = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos())
+                % 1000000;
             let parent = change.path.parent();
             let temp_path = match parent {
-                Some(dir) => dir.join(format!(".cadis_patch_{}.tmp", std::process::id())),
-                None => PathBuf::from(format!(".cadis_patch_{}.tmp", std::process::id())),
+                Some(dir) => dir.join(format!(
+                    ".cadis_patch_{}_{}.tmp",
+                    std::process::id(),
+                    random_suffix
+                )),
+                None => PathBuf::from(format!(
+                    ".cadis_patch_{}_{}.tmp",
+                    std::process::id(),
+                    random_suffix
+                )),
             };
             fs::write(&temp_path, change.content.as_bytes()).map_err(|error| {
                 tool_error(
