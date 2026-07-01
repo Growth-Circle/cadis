@@ -133,6 +133,38 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let event_log = EventLog::new(&config);
     let event_bus = EventBus::new(EVENT_REPLAY_LIMIT);
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let sig_shutdown = Arc::clone(&shutdown);
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        tokio::spawn(async move {
+            let mut term =
+                signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+            let mut int =
+                signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
+            tokio::select! {
+                _ = term.recv() => {
+                    eprintln!("cadisd received SIGTERM, shutting down");
+                }
+                _ = int.recv() => {
+                    eprintln!("cadisd received SIGINT, shutting down");
+                }
+            }
+            sig_shutdown.store(true, Ordering::SeqCst);
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("cadisd received Ctrl+C, shutting down");
+            sig_shutdown.store(true, Ordering::SeqCst);
+        });
+    }
+
     if use_tcp {
         let addr = config.effective_tcp_address();
         let addr = tcp_port.map(|p| format!("127.0.0.1:{p}")).unwrap_or(addr);
@@ -142,6 +174,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             event_log,
             event_bus,
             config.tcp_auth_token.clone(),
+            shutdown,
         )
         .await;
     }
@@ -150,7 +183,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     {
         let socket_path = socket_path
             .ok_or_else(|| invalid_input("socket path required (use --tcp-port on Windows)"))?;
-        run_socket(socket_path, runtime, event_log, event_bus).await
+        run_socket(socket_path, runtime, event_log, event_bus, shutdown).await
     }
 
     #[cfg(not(unix))]
@@ -164,6 +197,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             event_log,
             event_bus,
             config.tcp_auth_token.clone(),
+            shutdown,
         )
         .await
     }
@@ -201,11 +235,11 @@ async fn run_tcp(
     event_log: EventLog,
     event_bus: EventBus,
     tcp_auth_token: Option<String>,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn Error>> {
     let listener = TokioTcpListener::bind(addr).await?;
     eprintln!("cadisd listening on tcp://{addr}");
 
-    let shutdown = Arc::new(AtomicBool::new(false));
     let tcp_auth_token = tcp_auth_token.map(Arc::new);
 
     loop {
@@ -270,12 +304,11 @@ async fn run_socket(
     runtime: Arc<Mutex<Runtime>>,
     event_log: EventLog,
     event_bus: EventBus,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn Error>> {
     prepare_socket_path(&socket_path)?;
     let listener = TokioUnixListener::bind(&socket_path)?;
     eprintln!("cadisd listening on {}", socket_path.display());
-
-    let shutdown = Arc::new(AtomicBool::new(false));
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
