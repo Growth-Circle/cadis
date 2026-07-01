@@ -208,6 +208,7 @@ impl Error for ProtocolError {}
 
 /// Request envelope sent by a client to `cadisd`.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RequestEnvelope {
     /// Protocol version used by the client.
     pub protocol_version: ProtocolVersion,
@@ -488,6 +489,7 @@ pub enum ClientRequest {
 
 /// Payload for subscribing to daemon runtime events.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventSubscriptionRequest {
     /// Optional event ID. Buffered replay starts after this ID when still retained.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -512,6 +514,7 @@ impl Default for EventSubscriptionRequest {
 
 /// Payload for requesting a one-shot daemon-owned runtime state snapshot.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventsSnapshotRequest {}
 
 fn default_true() -> bool {
@@ -520,6 +523,7 @@ fn default_true() -> bool {
 
 /// Payload for creating a session.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionCreateRequest {
     /// Optional user-facing session title.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -531,6 +535,7 @@ pub struct SessionCreateRequest {
 
 /// Payload that targets one session.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionTargetRequest {
     /// Target session ID.
     pub session_id: SessionId,
@@ -538,6 +543,7 @@ pub struct SessionTargetRequest {
 
 /// Payload for subscribing to one session's event stream.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionSubscriptionRequest {
     /// Target session ID.
     pub session_id: SessionId,
@@ -554,6 +560,7 @@ pub struct SessionSubscriptionRequest {
 
 /// Payload for a user message.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MessageSendRequest {
     /// Optional existing session ID.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -569,6 +576,7 @@ pub struct MessageSendRequest {
 
 /// Payload for an approval response.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalResponseRequest {
     /// Target approval ID.
     pub approval_id: ApprovalId,
@@ -581,6 +589,7 @@ pub struct ApprovalResponseRequest {
 
 /// Payload for requesting daemon-owned tool execution.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCallRequest {
     /// Optional session this tool call belongs to.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -597,6 +606,7 @@ pub struct ToolCallRequest {
 
 /// Payload for agent rename.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentRenameRequest {
     /// Target agent ID.
     pub agent_id: AgentId,
@@ -606,6 +616,7 @@ pub struct AgentRenameRequest {
 
 /// Payload for selecting an agent model.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentModelSetRequest {
     /// Target agent ID.
     pub agent_id: AgentId,
@@ -615,6 +626,7 @@ pub struct AgentModelSetRequest {
 
 /// Payload for selecting an agent specialist persona.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentSpecialistSetRequest {
     /// Target agent ID.
     pub agent_id: AgentId,
@@ -628,6 +640,7 @@ pub struct AgentSpecialistSetRequest {
 
 /// Payload for agent spawn.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentSpawnRequest {
     /// Agent role identifier.
     pub role: String,
@@ -644,6 +657,7 @@ pub struct AgentSpawnRequest {
 
 /// Payload that targets one agent.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTargetRequest {
     /// Target agent ID.
     pub agent_id: AgentId,
@@ -651,6 +665,7 @@ pub struct AgentTargetRequest {
 
 /// Payload for tailing an agent's recent session events.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentTailRequest {
     /// Target agent ID.
     pub agent_id: AgentId,
@@ -661,6 +676,7 @@ pub struct AgentTailRequest {
 
 /// Payload for tailing worker output.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerTailRequest {
     /// Worker identifier.
     pub worker_id: String,
@@ -671,6 +687,7 @@ pub struct WorkerTailRequest {
 
 /// Payload for collecting a worker terminal result.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerResultRequest {
     /// Worker identifier.
     pub worker_id: String,
@@ -678,6 +695,7 @@ pub struct WorkerResultRequest {
 
 /// Payload for requesting worker worktree cleanup planning.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerCleanupRequest {
     /// Worker identifier.
     pub worker_id: String,
@@ -689,6 +707,7 @@ pub struct WorkerCleanupRequest {
 
 /// Payload for requesting approval-gated worker patch application.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerApplyRequest {
     /// Worker identifier.
     pub worker_id: String,
@@ -700,6 +719,7 @@ pub struct WorkerApplyRequest {
 
 /// Payload for reading a worker artifact file content.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerArtifactReadRequest {
     /// Worker identifier.
     pub worker_id: String,
@@ -722,6 +742,7 @@ pub struct WorkerArtifactReadResponse {
 
 /// Payload for listing registered workspaces.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceListRequest {
     /// Include active grants in the response.
     #[serde(default)]
@@ -730,6 +751,7 @@ pub struct WorkspaceListRequest {
 
 /// Payload for registering a project workspace root.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceRegisterRequest {
     /// Stable workspace identifier.
     pub workspace_id: WorkspaceId,
@@ -756,6 +778,7 @@ pub struct WorkspaceRegisterRequest {
 
 /// Payload for granting workspace access.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceGrantRequest {
     /// Agent receiving access. Missing means the default local runtime context.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -775,6 +798,7 @@ pub struct WorkspaceGrantRequest {
 
 /// Payload for revoking workspace grants.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceRevokeRequest {
     /// Revoke a specific grant.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -789,6 +813,7 @@ pub struct WorkspaceRevokeRequest {
 
 /// Payload for workspace registry health checks.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceDoctorRequest {
     /// Check a registered workspace by ID.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -800,6 +825,7 @@ pub struct WorkspaceDoctorRequest {
 
 /// Payload for patching UI preferences.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct UiPreferencesSetRequest {
     /// Partial preference object owned by `cadisd`.
     pub patch: serde_json::Value,
@@ -807,6 +833,7 @@ pub struct UiPreferencesSetRequest {
 
 /// Voice preview payload.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct VoicePreviewRequest {
     /// Text to preview.
     pub text: String,
@@ -830,6 +857,7 @@ pub struct VoicePreferences {
 
 /// Request payload for daemon-visible voice diagnostics.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct VoiceDoctorRequest {
     /// Include the last local bridge preflight in the result when available.
     #[serde(default = "default_true")]
@@ -846,6 +874,7 @@ impl Default for VoiceDoctorRequest {
 
 /// Request payload used by a local bridge to publish preflight results.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct VoicePreflightRequest {
     /// Client or bridge that performed the checks, for example `cadis-hud`.
     #[serde(skip_serializing_if = "Option::is_none")]
