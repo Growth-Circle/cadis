@@ -16,6 +16,10 @@ pub enum MemoryScope {
     Agent(String),
     Project(String),
     Global,
+    /// Read records whose `source_session_id` equals the given session id.
+    /// An empty `session_id` matches no records (defensive — the caller
+    /// forgot to plumb a session through).
+    Session(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -208,7 +212,7 @@ impl MemoryStore {
         let query_words = extract_keywords(query);
         let mut hits: Vec<MemoryHit> = records
             .into_iter()
-            .filter(|r| scope.is_none_or(|s| &r.scope == s))
+            .filter(|r| scope_match(scope, r))
             .filter_map(|r| {
                 let score = keyword_score(&r, &query_words);
                 if score > 0.0 {
@@ -236,7 +240,7 @@ impl MemoryStore {
         let confirmed: Vec<&MemoryRecord> = records
             .iter()
             .filter(|r| r.status == MemoryStatus::Confirmed)
-            .filter(|r| scope.is_none_or(|s| &r.scope == s))
+            .filter(|r| scope_match(scope, r))
             .collect();
         let mut entries = Vec::new();
         let mut total_chars = 0;
@@ -259,6 +263,29 @@ impl MemoryStore {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+/// Returns `true` if `record` matches `scope`. Adds two cases on top of
+/// the previous exact-equality check:
+///
+/// - `MemoryScope::Session(sid)` matches records whose `source_session_id`
+///   equals `Some(sid)`. An empty `sid` matches nothing (defensive: the
+///   caller forgot to plumb a session through, so we surface that as an
+///   empty result rather than silently returning every record).
+/// - All other variants use exact equality with `record.scope` so the
+///   previous behavior of `Agent` / `Project` / `Global` is preserved.
+fn scope_match(scope: Option<&MemoryScope>, record: &MemoryRecord) -> bool {
+    match scope {
+        None => true,
+        Some(MemoryScope::Session(sid)) => {
+            if sid.is_empty() {
+                false
+            } else {
+                record.source_session_id.as_deref() == Some(sid.as_str())
+            }
+        }
+        Some(other) => &record.scope == other,
+    }
+}
 
 const STOPWORDS: &[&str] = &[
     "a", "an", "the", "is", "it", "in", "on", "of", "to", "and", "or", "for", "with", "at", "by",
@@ -346,6 +373,90 @@ mod tests {
         assert_eq!(capsule.entries.len(), 1);
         assert!(!capsule.truncated);
         assert!(capsule.entries[0].contains("Always run tests"));
+    }
+
+    #[test]
+    fn search_by_session_returns_only_matching_records() {
+        let (_dir, store) = temp_store();
+        let mut a = sample_record("session A fact about cargo workspaces");
+        a.source_session_id = Some("ses_A".to_owned());
+        let mut b = sample_record("session B fact about cargo workspaces");
+        b.source_session_id = Some("ses_B".to_owned());
+        store.propose(a).unwrap();
+        store.propose(b).unwrap();
+
+        let hits_a = store
+            .search(
+                "cargo workspaces",
+                Some(&MemoryScope::Session("ses_A".to_owned())),
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits_a.len(), 1);
+        assert_eq!(hits_a[0].record.source_session_id.as_deref(), Some("ses_A"));
+
+        let hits_b = store
+            .search(
+                "cargo workspaces",
+                Some(&MemoryScope::Session("ses_B".to_owned())),
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits_b.len(), 1);
+        assert_eq!(hits_b[0].record.source_session_id.as_deref(), Some("ses_B"));
+
+        let hits_unknown = store
+            .search(
+                "cargo workspaces",
+                Some(&MemoryScope::Session("ses_X".to_owned())),
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits_unknown.len(), 0);
+    }
+
+    #[test]
+    fn search_by_session_with_empty_id_returns_empty() {
+        let (_dir, store) = temp_store();
+        let mut r = sample_record("a fact from session A");
+        r.source_session_id = Some("ses_A".to_owned());
+        store.propose(r).unwrap();
+
+        let hits = store
+            .search("fact", Some(&MemoryScope::Session(String::new())), 10)
+            .unwrap();
+        assert_eq!(hits.len(), 0);
+    }
+
+    #[test]
+    fn compile_capsule_by_session_respects_status_and_isolation() {
+        let (_dir, store) = temp_store();
+
+        // Candidate in ses_A — must NOT appear (only Confirmed in capsule)
+        let mut cand = sample_record("candidate fact session A");
+        cand.source_session_id = Some("ses_A".to_owned());
+        let cand = store.propose(cand).unwrap();
+
+        // Confirmed in ses_A — must appear when querying ses_A
+        let mut conf_a = sample_record("confirmed fact session A");
+        conf_a.source_session_id = Some("ses_A".to_owned());
+        let conf_a = store.propose(conf_a).unwrap();
+        store.promote(&conf_a.id).unwrap();
+        let _ = cand; // intentionally left as Candidate
+
+        // Confirmed in ses_B — must NOT appear when querying ses_A
+        let mut conf_b = sample_record("confirmed fact session B");
+        conf_b.source_session_id = Some("ses_B".to_owned());
+        let conf_b = store.propose(conf_b).unwrap();
+        store.promote(&conf_b.id).unwrap();
+
+        let capsule = store
+            .compile_capsule(Some(&MemoryScope::Session("ses_A".to_owned())), 4096)
+            .unwrap();
+        assert_eq!(capsule.entries.len(), 1);
+        assert!(capsule.entries[0].contains("confirmed fact session A"));
+        assert!(!capsule.entries[0].contains("session B"));
+        assert!(!capsule.truncated);
     }
 
     #[test]
