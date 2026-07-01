@@ -1067,7 +1067,7 @@ enum EventFilter {
 impl EventFilter {
     fn matches(&self, event: &EventEnvelope) -> bool {
         match self {
-            Self::All => true,
+            Self::All => event.session_id.is_none(),
             Self::Session(session_id) => event.session_id.as_ref() == Some(session_id),
         }
     }
