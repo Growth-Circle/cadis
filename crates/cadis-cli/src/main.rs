@@ -398,14 +398,14 @@ fn send_request(cli: &Cli, request: ClientRequest) -> Result<Vec<ServerFrame>, B
 
     if cli.use_tcp() {
         let addr = cli.tcp_address()?;
+        let auth_token = cli.tcp_auth_token()?;
         let mut stream = TcpStream::connect(&addr).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("could not connect to cadisd at tcp://{addr}: {error}. Start it with `cadisd --tcp-port <PORT>`."),
             )
         })?;
-        serde_json::to_writer(&mut stream, &envelope)?;
-        stream.write_all(b"\n")?;
+        write_tcp_request(&mut stream, &envelope, auth_token.as_deref())?;
         stream.shutdown(std::net::Shutdown::Write)?;
         return read_frames(BufReader::new(stream));
     }
@@ -448,19 +448,41 @@ fn stream_events(cli: &Cli, request: EventSubscriptionRequest) -> Result<(), Box
     stream_subscription(cli, ClientRequest::EventsSubscribe(request))
 }
 
+fn write_tcp_auth_preamble<W: Write>(
+    writer: &mut W,
+    auth_token: &str,
+) -> Result<(), Box<dyn Error>> {
+    serde_json::to_writer(writer, &serde_json::json!({ "auth_token": auth_token }))?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
+fn write_tcp_request<W: Write>(
+    writer: &mut W,
+    envelope: &RequestEnvelope,
+    auth_token: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(auth_token) = auth_token {
+        write_tcp_auth_preamble(writer, auth_token)?;
+    }
+    serde_json::to_writer(writer, envelope)?;
+    writer.write_all(b"\n")?;
+    Ok(())
+}
+
 fn stream_subscription(cli: &Cli, request: ClientRequest) -> Result<(), Box<dyn Error>> {
     let envelope = RequestEnvelope::new(next_request_id(), client_id(), request);
 
     if cli.use_tcp() {
         let addr = cli.tcp_address()?;
+        let auth_token = cli.tcp_auth_token()?;
         let mut stream = TcpStream::connect(&addr).map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("could not connect to cadisd at tcp://{addr}: {error}. Start it with `cadisd --tcp-port <PORT>`."),
             )
         })?;
-        serde_json::to_writer(&mut stream, &envelope)?;
-        stream.write_all(b"\n")?;
+        write_tcp_request(&mut stream, &envelope, auth_token.as_deref())?;
         stream.shutdown(std::net::Shutdown::Write)?;
         return stream_frames(BufReader::new(stream), cli.json);
     }
@@ -1483,6 +1505,10 @@ impl Cli {
             return Ok(format!("127.0.0.1:{port}"));
         }
         Ok(load_config()?.effective_tcp_address())
+    }
+
+    fn tcp_auth_token(&self) -> Result<Option<String>, Box<dyn Error>> {
+        Ok(load_config()?.tcp_auth_token)
     }
 
     #[cfg(unix)]
@@ -2698,5 +2724,44 @@ mod tests {
                 profile_id: "dev".to_owned()
             })
         );
+    }
+
+    #[test]
+    fn write_tcp_request_without_auth_writes_single_request_line() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_test"),
+            ClientId::from("cli_test"),
+            ClientRequest::DaemonStatus(EmptyPayload::default()),
+        );
+        let mut out = Vec::new();
+        write_tcp_request(&mut out, &envelope, None).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1);
+
+        let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(value["type"], "daemon.status");
+    }
+
+    #[test]
+    fn write_tcp_request_with_auth_writes_auth_then_request_lines() {
+        let envelope = RequestEnvelope::new(
+            RequestId::from("req_test"),
+            ClientId::from("cli_test"),
+            ClientRequest::DaemonStatus(EmptyPayload::default()),
+        );
+        let mut out = Vec::new();
+        write_tcp_request(&mut out, &envelope, Some("secret-token-123456")).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        let auth_line: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(auth_line["auth_token"], "secret-token-123456");
+
+        let request_line: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(request_line["type"], "daemon.status");
     }
 }
