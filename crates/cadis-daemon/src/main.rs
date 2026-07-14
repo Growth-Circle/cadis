@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::net::SocketAddr;
 
 #[cfg(all(test, unix))]
 use std::thread;
@@ -37,6 +40,73 @@ use cadis_store::{
 };
 
 const EVENT_REPLAY_LIMIT: usize = 256;
+
+// ── Rate Limiting ──────────────────────────────────────────────────────────
+
+/// Token bucket rate limiter for a single client.
+struct RateLimiter {
+    capacity: u32,
+    tokens: Mutex<f64>,
+    last_refill: Mutex<Instant>,
+    refill_duration: Duration,
+}
+
+impl RateLimiter {
+    fn new(capacity: u32, refill_duration: Duration) -> Self {
+        Self {
+            capacity,
+            tokens: Mutex::new(capacity as f64),
+            last_refill: Mutex::new(Instant::now()),
+            refill_duration,
+        }
+    }
+
+    fn check_and_update(&self) -> bool {
+        let mut tokens = self.tokens.lock().expect("rate limiter tokens lock");
+        let mut last_refill = self.last_refill.lock().expect("rate limiter refill lock");
+        
+        // Refill tokens based on elapsed time
+        let now = Instant::now();
+        let elapsed = now.duration_since(*last_refill);
+        let refill_amount = (elapsed.as_secs_f64() / self.refill_duration.as_secs_f64()) * self.capacity as f64;
+        
+        *tokens = (*tokens + refill_amount).min(self.capacity as f64);
+        *last_refill = now;
+        
+        // Check if we have at least 1 token
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Per-client rate limit tracker.
+struct ClientRateLimitTracker {
+    limiters: Mutex<HashMap<SocketAddr, RateLimiter>>,
+    capacity: u32,
+    refill_duration: Duration,
+}
+
+impl ClientRateLimitTracker {
+    fn new(capacity: u32, refill_duration: Duration) -> Self {
+        Self {
+            limiters: Mutex::new(HashMap::new()),
+            capacity,
+            refill_duration,
+        }
+    }
+
+    fn check_and_update(&mut self, client: &SocketAddr) -> bool {
+        let mut limiters = self.limiters.lock().expect("rate limit tracker lock");
+        let limiter = limiters
+            .entry(*client)
+            .or_insert_with(|| RateLimiter::new(self.capacity, self.refill_duration));
+        limiter.check_and_update()
+    }
+}
 
 fn main() {
     // Handle --stdio outside the tokio runtime so that blocking model providers
@@ -1971,6 +2041,64 @@ mod tests {
         let input = b"\n";
         let mut reader = tokio::io::BufReader::new(&input[..]);
         assert!(verify_tcp_auth(&mut reader, "secret123").await.is_err());
+    }
+
+    #[test]
+    fn rate_limiter_allows_requests_within_limit() {
+        let limiter = RateLimiter::new(10, Duration::from_secs(1));
+        
+        // Should allow first 10 requests
+        for _ in 0..10 {
+            assert!(limiter.check_and_update());
+        }
+    }
+
+    #[test]
+    fn rate_limiter_blocks_requests_over_limit() {
+        let limiter = RateLimiter::new(10, Duration::from_secs(1));
+        
+        // Fill bucket
+        for _ in 0..10 {
+            assert!(limiter.check_and_update());
+        }
+        
+        // 11th request should be blocked
+        assert!(!limiter.check_and_update());
+    }
+
+    #[test]
+    fn rate_limiter_refills_tokens_over_time() {
+        use std::thread;
+        let limiter = RateLimiter::new(5, Duration::from_millis(100));
+        
+        // Exhaust tokens
+        for _ in 0..5 {
+            assert!(limiter.check_and_update());
+        }
+        assert!(!limiter.check_and_update());
+        
+        // Wait for refill
+        thread::sleep(Duration::from_millis(150));
+        
+        // Should have at least 1 token refilled
+        assert!(limiter.check_and_update());
+    }
+
+    #[test]
+    fn rate_limiter_per_client_isolation() {
+        use std::net::SocketAddr;
+        let mut tracker = ClientRateLimitTracker::new(10, Duration::from_secs(1));
+        let client1: SocketAddr = "127.0.0.1:5001".parse().unwrap();
+        let client2: SocketAddr = "127.0.0.1:5002".parse().unwrap();
+        
+        // Client 1 exhausts their limit
+        for _ in 0..10 {
+            assert!(tracker.check_and_update(&client1));
+        }
+        assert!(!tracker.check_and_update(&client1));
+        
+        // Client 2 should still have their full quota
+        assert!(tracker.check_and_update(&client2));
     }
 }
 
