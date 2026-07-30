@@ -145,6 +145,9 @@ impl ClientRateLimitTracker {
 }
 const MAX_CONNECTIONS: usize = 64;
 
+/// Maximum number of characters accepted from a single model response.
+const MAX_RESPONSE_CHARS: usize = 1_000_000;
+
 fn main() {
     // Handle --stdio outside the tokio runtime so that blocking model providers
     // (e.g. reqwest::blocking inside AutoProvider/OllamaProvider) can create and
@@ -861,6 +864,15 @@ where
                             invocation = Some(started.clone());
                         }
                         ModelStreamEvent::Delta(delta) => {
+                            if final_content.len() + delta.len() > MAX_RESPONSE_CHARS {
+                                return Err(ModelError::with_code(
+                                    "response_too_large",
+                                    format!(
+                                        "response exceeded the {MAX_RESPONSE_CHARS} character limit"
+                                    ),
+                                    false,
+                                ));
+                            }
                             final_content.push_str(delta);
                             emitted_delta = true;
                         }
@@ -1082,6 +1094,15 @@ fn serve_pending_message_generation<W: Write>(
                         invocation = Some(started);
                     }
                     ModelStreamEvent::Delta(delta) => {
+                        if final_content.len() + delta.len() > MAX_RESPONSE_CHARS {
+                            return Err(ModelError::with_code(
+                                "response_too_large",
+                                format!(
+                                    "response exceeded the {MAX_RESPONSE_CHARS} character limit"
+                                ),
+                                false,
+                            ));
+                        }
                         final_content.push_str(&delta);
                         emitted_delta = true;
                         let event = runtime
