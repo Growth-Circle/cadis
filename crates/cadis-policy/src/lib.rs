@@ -176,16 +176,32 @@ impl CancellationToken {
 // ── Denied path enforcement (Track D item 6) ────────────────────────
 
 /// Checks whether a path is denied by the configured denied path list.
+///
+/// A denied prefix is honoured both literally and after symlink resolution:
+/// the literal check catches paths that do not exist yet, and the resolved
+/// check stops a symlink from being used to reach into a denied directory.
+/// Paths that do not exist are resolved through their nearest existing
+/// ancestor rather than denied outright, since denying every unresolvable
+/// path would block the creation of any new file.
 pub fn is_denied_path(path: &Path, denied_paths: &[PathBuf]) -> bool {
-    let Ok(canonical) = path.canonicalize() else {
-        // If we can't resolve, check raw prefix match.
-        return denied_paths.iter().any(|denied| path.starts_with(denied));
+    if denied_paths.iter().any(|denied| path.starts_with(denied)) {
+        return true;
+    }
+    let resolved = path.canonicalize().ok().or_else(|| {
+        path.ancestors()
+            .find(|ancestor| ancestor.exists())
+            .and_then(|ancestor| ancestor.canonicalize().ok())
+    });
+    let Some(resolved) = resolved else {
+        // Nothing along the path resolves, so there is nothing to check
+        // against. Fail closed rather than guessing.
+        return true;
     };
     denied_paths.iter().any(|denied| {
         if let Ok(denied_canonical) = denied.canonicalize() {
-            canonical.starts_with(&denied_canonical)
+            resolved.starts_with(&denied_canonical)
         } else {
-            canonical.starts_with(denied)
+            resolved.starts_with(denied)
         }
     })
 }
@@ -866,6 +882,42 @@ decision = "deny"
     fn denied_path_blocks_matching_prefix() {
         let denied = vec![PathBuf::from("/etc")];
         assert!(is_denied_path(Path::new("/etc/shadow"), &denied));
-        assert!(!is_denied_path(Path::new("/tmp/safe"), &denied));
+        assert!(!is_denied_path(Path::new("."), &denied));
+    }
+
+    #[test]
+    fn denied_path_blocks_paths_that_do_not_exist_yet() {
+        // A file about to be created inside a denied directory is still denied,
+        // even though it cannot be canonicalized.
+        let denied = vec![PathBuf::from("/etc")];
+        assert!(is_denied_path(Path::new("/etc/not-created-yet"), &denied));
+    }
+
+    #[test]
+    fn denied_path_allows_new_files_outside_denied_paths() {
+        // Creating a new file outside the denied list must stay allowed;
+        // denying every unresolvable path would block all file creation.
+        let root = std::env::temp_dir();
+        let denied = vec![root.join("cadis-denied-fixture")];
+        let target = root.join("cadis-allowed-fixture").join("new-file.txt");
+        assert!(!is_denied_path(&target, &denied));
+    }
+
+    #[test]
+    fn denied_path_resolves_symlink_into_denied_directory() {
+        // Symlink escape must still be caught by resolution, which is the
+        // reason the canonicalizing check exists at all.
+        let denied = vec![PathBuf::from("/etc")];
+        let link = std::env::temp_dir().join("cadis-policy-etc-link");
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        {
+            if std::os::unix::fs::symlink("/etc", &link).is_ok() {
+                assert!(is_denied_path(&link.join("shadow"), &denied));
+                let _ = std::fs::remove_file(&link);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = link;
     }
 }
