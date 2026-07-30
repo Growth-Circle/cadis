@@ -568,6 +568,7 @@ dependencies = [
  "cadis-protocol",
  "cadis-store",
  "chrono",
+ "nix",
  "serde",
  "serde_json",
  "tempfile",

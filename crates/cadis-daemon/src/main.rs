@@ -40,9 +40,21 @@ use cadis_store::{
 };
 
 const EVENT_REPLAY_LIMIT: usize = 256;
-/// Maximum allowed JSON request line size in bytes (10 MB).
-/// Requests exceeding this limit are rejected to prevent memory exhaustion.
-const MAX_REQUEST_LINE_BYTES: usize = 10 * 1024 * 1024;
+/// Maximum allowed JSON request line size in bytes (1 MB).
+///
+/// Requests exceeding this limit are rejected before `serde_json` parses them,
+/// which bounds per-connection memory use. One constant covers both the auth
+/// preamble and normal request lines so the two paths cannot drift apart.
+const MAX_REQUEST_LINE_BYTES: usize = 1024 * 1024;
+
+/// Maximum number of distinct client addresses tracked for rate limiting.
+const MAX_TRACKED_CLIENTS: usize = 1024;
+
+/// Connection attempts a single client address may burst within one window.
+const CONNECTIONS_PER_CLIENT_BURST: u32 = 32;
+
+/// Window over which a client's connection budget refills completely.
+const CONNECTION_RATE_WINDOW: Duration = Duration::from_secs(10);
 
 // ── Rate Limiting ──────────────────────────────────────────────────────────
 
@@ -84,6 +96,15 @@ impl RateLimiter {
             false
         }
     }
+
+    /// True when this bucket has refilled to capacity, meaning the client has
+    /// been quiet for a full refill window and the entry is safe to evict.
+    fn is_idle(&self) -> bool {
+        let tokens = self.tokens.lock().expect("rate limiter tokens lock");
+        let last_refill = self.last_refill.lock().expect("rate limiter refill lock");
+        *tokens >= self.capacity as f64
+            || Instant::now().duration_since(*last_refill) >= self.refill_duration
+    }
 }
 
 /// Per-client rate limit tracker.
@@ -102,8 +123,19 @@ impl ClientRateLimitTracker {
         }
     }
 
-    fn check_and_update(&mut self, client: &SocketAddr) -> bool {
+    /// Records one request for `client` and reports whether it is within budget.
+    ///
+    /// Takes `&self` so the tracker can be shared across connection tasks
+    /// behind an `Arc`; interior mutability lives in the `Mutex`.
+    fn check_and_update(&self, client: &SocketAddr) -> bool {
         let mut limiters = self.limiters.lock().expect("rate limit tracker lock");
+        // ponytail: bounded by evicting idle (full-bucket) clients once the map
+        // grows past MAX_TRACKED_CLIENTS, so a churn of source addresses cannot
+        // grow this map without limit. Upgrade path is an LRU with explicit
+        // last-seen timestamps if eviction accuracy ever matters.
+        if limiters.len() >= MAX_TRACKED_CLIENTS && !limiters.contains_key(client) {
+            limiters.retain(|_, limiter| !limiter.is_idle());
+        }
         let limiter = limiters
             .entry(*client)
             .or_insert_with(|| RateLimiter::new(self.capacity, self.refill_duration));
@@ -223,7 +255,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     {
         let socket_path = socket_path
             .ok_or_else(|| invalid_input("socket path required (use --tcp-port on Windows)"))?;
-        run_socket(socket_path, runtime, event_log, event_bus, config.tcp_auth_token.clone()).await
+        run_socket(socket_path, runtime, event_log, event_bus).await
     }
 
     #[cfg(not(unix))]
@@ -280,6 +312,10 @@ async fn run_tcp(
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let tcp_auth_token = tcp_auth_token.map(Arc::new);
+    let rate_limits = Arc::new(ClientRateLimitTracker::new(
+        CONNECTIONS_PER_CLIENT_BURST,
+        CONNECTION_RATE_WINDOW,
+    ));
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -288,7 +324,12 @@ async fn run_tcp(
         tokio::select! {
             result = listener.accept() => {
                 match result {
-                    Ok((stream, _)) => {
+                    Ok((stream, peer_addr)) => {
+                        if !rate_limits.check_and_update(&peer_addr) {
+                            eprintln!("cadisd rate limit exceeded, rejecting {peer_addr}");
+                            drop(stream);
+                            continue;
+                        }
                         let runtime = Arc::clone(&runtime);
                         let event_log = event_log.clone();
                         let event_bus = event_bus.clone();
@@ -329,6 +370,9 @@ async fn verify_tcp_auth<R: tokio::io::AsyncBufRead + Unpin>(
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut line = String::new();
     reader.read_line(&mut line).await?;
+    if line.len() > MAX_REQUEST_LINE_BYTES {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "auth line too long").into());
+    }
     let value: serde_json::Value = serde_json::from_str(line.trim())
         .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "tcp auth failed"))?;
     match value.get("auth_token").and_then(|v| v.as_str()) {
@@ -354,14 +398,12 @@ async fn run_socket(
     runtime: Arc<Mutex<Runtime>>,
     event_log: EventLog,
     event_bus: EventBus,
-    tcp_auth_token: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     prepare_socket_path(&socket_path)?;
     let listener = TokioUnixListener::bind(&socket_path)?;
     eprintln!("cadisd listening on {}", socket_path.display());
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let tcp_auth_token = tcp_auth_token.map(Arc::new);
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -375,16 +417,9 @@ async fn run_socket(
                         let event_log = event_log.clone();
                         let event_bus = event_bus.clone();
                         let shutdown = Arc::clone(&shutdown);
-                        let tcp_auth_token = tcp_auth_token.clone();
                         tokio::spawn(async move {
                             let (reader, writer) = stream.into_split();
-                            let mut reader = tokio::io::BufReader::new(reader);
-                            if let Some(ref expected) = tcp_auth_token {
-                                if let Err(error) = verify_tcp_auth(&mut reader, expected).await {
-                                    eprintln!("cadisd auth rejected: {error}");
-                                    return;
-                                }
-                            }
+                            let reader = tokio::io::BufReader::new(reader);
                             if let Err(error) = serve_connection(
                                 reader, writer, runtime, event_log, event_bus, shutdown,
                             ).await {
@@ -440,7 +475,10 @@ fn dispatch_request(
         return Ok(DispatchAction::Skip);
     }
 
-    // Reject requests exceeding size limit to prevent memory exhaustion.
+    // Reject oversized lines before handing them to serde_json. This bounds
+    // parse cost and how much request data the daemon retains; it does not
+    // bound the read itself, since `lines()` has already allocated the line.
+    // Bounding the reader is tracked separately.
     if line.len() > MAX_REQUEST_LINE_BYTES {
         let response = ResponseEnvelope::new(
             RequestId::from("req_too_large"),
@@ -2143,7 +2181,7 @@ mod tests {
     #[test]
     fn rate_limiter_per_client_isolation() {
         use std::net::SocketAddr;
-        let mut tracker = ClientRateLimitTracker::new(10, Duration::from_secs(1));
+        let tracker = ClientRateLimitTracker::new(10, Duration::from_secs(1));
         let client1: SocketAddr = "127.0.0.1:5001".parse().unwrap();
         let client2: SocketAddr = "127.0.0.1:5002".parse().unwrap();
         
