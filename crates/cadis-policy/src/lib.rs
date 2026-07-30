@@ -127,6 +127,19 @@ fn default_shell_env_allowlist() -> Vec<String> {
     .collect()
 }
 
+/// Check if an environment variable name is likely a secret.
+fn is_secret_env_var(name: &str) -> bool {
+    let name_upper = name.to_uppercase();
+    name_upper.contains("SECRET")
+        || name_upper.contains("PASSWORD")
+        || name_upper.contains("API_KEY")
+        || name_upper.contains("TOKEN")
+        || name_upper.contains("PRIVATE_KEY")
+        || name_upper.contains("AWS_SECRET")
+        || name_upper.contains("GITHUB_TOKEN")
+        || name_upper.contains("OPENAI_API_KEY")
+}
+
 // ── Cancellation token (Track D item 4) ──────────────────────────────
 
 /// Typed cancellation token for cooperative tool cancellation.
@@ -222,6 +235,30 @@ pub fn filtered_env(allowlist: &[String]) -> Vec<(String, String)> {
 /// Returns the default shell environment allowlist.
 pub fn shell_env_allowlist() -> Vec<String> {
     default_shell_env_allowlist()
+}
+
+/// Returns the effective shell environment allowlist from policy config,
+/// falling back to the default if not configured.
+///
+/// Validates that the configured allowlist does not contain secret env vars.
+pub fn effective_shell_env_allowlist(config: &PolicyConfig) -> Result<Vec<String>, String> {
+    let allowlist = if config.shell_env_allowlist.is_empty() {
+        default_shell_env_allowlist()
+    } else {
+        config.shell_env_allowlist.clone()
+    };
+
+    // Validate that the allowlist doesn't contain secret env vars
+    for var in &allowlist {
+        if is_secret_env_var(var) {
+            return Err(format!(
+                "shell_env_allowlist contains secret variable '{}' and would leak secrets to subprocesses",
+                var
+            ));
+        }
+    }
+
+    Ok(allowlist)
 }
 
 // ── Risk class matching ───────────────────────────────────────────────
@@ -759,6 +796,56 @@ decision = "deny"
         assert!(list.contains(&"LANG".to_owned()));
         assert!(list.contains(&"TERM".to_owned()));
         assert!(list.contains(&"SHELL".to_owned()));
+    }
+
+    #[test]
+    fn effective_shell_env_allowlist_defaults() {
+        let config = PolicyConfig::default();
+        let result = effective_shell_env_allowlist(&config);
+        assert!(result.is_ok());
+        let list = result.unwrap();
+        assert!(list.contains(&"PATH".to_owned()));
+        assert!(list.contains(&"HOME".to_owned()));
+    }
+
+    #[test]
+    fn effective_shell_env_allowlist_custom_safe() {
+        let config = PolicyConfig {
+            shell_env_allowlist: vec!["PATH".to_owned(), "HOME".to_owned(), "RUST_LOG".to_owned()],
+            ..PolicyConfig::default()
+        };
+        let result = effective_shell_env_allowlist(&config);
+        assert!(result.is_ok());
+        let list = result.unwrap();
+        assert_eq!(list.len(), 3);
+        assert!(list.contains(&"RUST_LOG".to_owned()));
+    }
+
+    #[test]
+    fn effective_shell_env_allowlist_rejects_secret_vars() {
+        let config = PolicyConfig {
+            shell_env_allowlist: vec![
+                "PATH".to_owned(),
+                "OPENAI_API_KEY".to_owned(), // Should be rejected!
+            ],
+            ..PolicyConfig::default()
+        };
+        let result = effective_shell_env_allowlist(&config);
+        assert!(result.is_err(), "Should reject secret env var in allowlist");
+        assert!(result.unwrap_err().contains("secret"));
+    }
+
+    #[test]
+    fn secret_env_vars_are_blocked() {
+        // Verify that common secret env vars are identified as such
+        assert!(is_secret_env_var("OPENAI_API_KEY"));
+        assert!(is_secret_env_var("AWS_SECRET_ACCESS_KEY"));
+        assert!(is_secret_env_var("GITHUB_TOKEN"));
+        assert!(is_secret_env_var("CADIS_TCP_AUTH_TOKEN"));
+        assert!(is_secret_env_var("DATABASE_PASSWORD"));
+        assert!(!is_secret_env_var("PATH"));
+        assert!(!is_secret_env_var("HOME"));
+        assert!(!is_secret_env_var("USER"));
     }
 
     // ── Track D: Denied path enforcement ─────────────────────────────
