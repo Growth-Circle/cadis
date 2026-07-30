@@ -10,6 +10,7 @@ import {
   _resetProcessedEventIds,
 } from "./cadisProtocolHandlers.js";
 import { pushSystem, asRecord, stringFrom } from "./cadisNormalizers.js";
+import { resetValidationFailureCount } from "./cadisProtocolSchemas.js";
 
 const CLIENT_ID = "cadis-hud";
 const PROTOCOL_VERSION = "0.2";
@@ -193,6 +194,7 @@ export function readSocketPath(): string | undefined {
 export function markConnected(): void {
   connected = true;
   reconnectAttempt = 0;
+  resetValidationFailureCount(); // Reset on successful connection
   useHud.getState().setGateway("connected");
 }
 
