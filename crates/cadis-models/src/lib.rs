@@ -1656,7 +1656,7 @@ impl ModelProvider for RoutingModelProvider {
 }
 
 /// Configuration used by the provider router.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ModelRouterConfig {
     /// Default provider from `[model].provider`.
     pub default_provider: String,
@@ -1670,6 +1670,19 @@ pub struct ModelRouterConfig {
     pub openai_model: String,
     /// Optional OpenAI API key from the environment.
     pub openai_api_key: Option<String>,
+}
+
+impl std::fmt::Debug for ModelRouterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelRouterConfig")
+            .field("default_provider", &self.default_provider)
+            .field("ollama_endpoint", &self.ollama_endpoint)
+            .field("ollama_model", &self.ollama_model)
+            .field("openai_base_url", &self.openai_base_url)
+            .field("openai_model", &self.openai_model)
+            .field("openai_api_key", &self.openai_api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
