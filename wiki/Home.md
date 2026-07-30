@@ -31,7 +31,7 @@ HUD / CLI / Voice / Telegram / Android
 
 ## Current status
 
-C.A.D.I.S. is in **beta** (v0.9). Linux desktop is the primary target. macOS has source-validation CI. Windows is limited to portable-crate validation.
+C.A.D.I.S. is in **v1.2.3** (beta). Linux desktop is the primary target. macOS has source-validation CI. Windows is limited to portable-crate validation.
 
 ## Resources
 
