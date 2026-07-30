@@ -54,6 +54,7 @@
   "pnpm": {
     "overrides": {
       "axios": "1.16.1",
+      "form-data": ">=4.0.6",
       "ws": "8.21.0",
       "uuid": "11.1.1"
     }
