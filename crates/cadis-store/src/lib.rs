@@ -2606,6 +2606,11 @@ fn set_private_file_permissions(path: &Path) -> Result<(), StoreError> {
 
 #[cfg(not(unix))]
 fn set_private_file_permissions(_path: &Path) -> Result<(), StoreError> {
+    // NOTE: Windows ACL APIs (SetNamedSecurityInfo) are not available through
+    // the standard library. The `windows` crate provides access but is a
+    // significant dependency addition that requires a decision record.
+    // On single-user Windows systems this is low risk. For multi-user systems,
+    // consider adding the `windows` crate and implementing proper ACL restriction.
     Ok(())
 }
 
@@ -2633,6 +2638,8 @@ fn set_private_permissions(path: &Path) -> Result<(), StoreError> {
 
 #[cfg(not(unix))]
 fn set_private_permissions(_path: &Path) -> Result<(), StoreError> {
+    // NOTE: Same as set_private_file_permissions — Windows ACL APIs require
+    // the `windows` crate which is not yet a project dependency.
     Ok(())
 }
 
