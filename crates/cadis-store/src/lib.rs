@@ -1919,6 +1919,20 @@ pub fn load_config() -> Result<CadisConfig, StoreError> {
         } else {
             file_config.cadis_home = expand_home(&file_config.cadis_home);
         }
+
+        // Validate tcp_auth_token from config file
+        if let Some(token) = &file_config.tcp_auth_token {
+            match validate_tcp_auth_token(token) {
+                Ok(validated_token) => {
+                    file_config.tcp_auth_token = Some(validated_token);
+                }
+                Err(error) => {
+                    eprintln!("warning: ignoring invalid tcp_auth_token in config.toml: {error}");
+                    file_config.tcp_auth_token = None;
+                }
+            }
+        }
+
         config = file_config;
     }
 
@@ -1935,13 +1949,58 @@ pub fn load_config() -> Result<CadisConfig, StoreError> {
     }
 
     if let Ok(token) = env::var("CADIS_TCP_AUTH_TOKEN") {
-        if !token.trim().is_empty() {
-            config.tcp_auth_token = Some(token);
+        match validate_tcp_auth_token(&token) {
+            Ok(validated_token) => {
+                config.tcp_auth_token = Some(validated_token);
+            }
+            Err(error) => {
+                eprintln!("warning: ignoring invalid CADIS_TCP_AUTH_TOKEN: {error}");
+            }
         }
     }
 
     ensure_layout(&config)?;
     Ok(config)
+}
+
+/// Validates TCP auth token format and length.
+///
+/// Returns the token if valid, otherwise returns an error message.
+///
+/// # Rules
+/// - Minimum length: 16 characters
+/// - Maximum length: 256 characters
+/// - Allowed characters: alphanumeric, hyphen, underscore, dot
+fn validate_tcp_auth_token(token: &str) -> Result<String, String> {
+    let trimmed = token.trim();
+
+    if trimmed.is_empty() {
+        return Err("token is empty".to_owned());
+    }
+
+    if trimmed.len() < 16 {
+        return Err(format!(
+            "token too short (minimum 16 characters, got {})",
+            trimmed.len()
+        ));
+    }
+
+    if trimmed.len() > 256 {
+        return Err(format!(
+            "token too long (maximum 256 characters, got {})",
+            trimmed.len()
+        ));
+    }
+
+    // Allow alphanumeric + hyphen + underscore + dot
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err("token contains invalid characters (only alphanumeric, hyphen, underscore, and dot allowed)".to_owned());
+    }
+
+    Ok(trimmed.to_owned())
 }
 
 /// Returns the OpenAI API key from CADIS-supported environment variables.
@@ -3987,5 +4046,51 @@ mod tests {
 
         let ids = manager.list().expect("list should succeed");
         assert!(ids.contains(&"cp_1".to_owned()));
+    }
+
+    #[test]
+    fn test_validate_tcp_auth_token_valid() {
+        assert!(validate_tcp_auth_token("abcdef1234567890").is_ok());
+        assert!(validate_tcp_auth_token("my-secret-token-12345").is_ok());
+        assert!(validate_tcp_auth_token("token_with_underscore").is_ok());
+        assert!(validate_tcp_auth_token("token.with.dots.ok").is_ok());
+        assert!(validate_tcp_auth_token("a".repeat(16).as_str()).is_ok());
+        assert!(validate_tcp_auth_token("a".repeat(256).as_str()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_tcp_auth_token_too_short() {
+        let result = validate_tcp_auth_token("short");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too short"));
+    }
+
+    #[test]
+    fn test_validate_tcp_auth_token_too_long() {
+        let long_token = "a".repeat(257);
+        let result = validate_tcp_auth_token(&long_token);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too long"));
+    }
+
+    #[test]
+    fn test_validate_tcp_auth_token_empty() {
+        assert!(validate_tcp_auth_token("").is_err());
+        assert!(validate_tcp_auth_token("   ").is_err());
+    }
+
+    #[test]
+    fn test_validate_tcp_auth_token_invalid_chars() {
+        assert!(validate_tcp_auth_token("token with spaces!!!").is_err());
+        assert!(validate_tcp_auth_token("token@with#special").is_err());
+        assert!(validate_tcp_auth_token("token/with/slash").is_err());
+        assert!(validate_tcp_auth_token("token\\with\\backslash").is_err());
+    }
+
+    #[test]
+    fn test_validate_tcp_auth_token_trims_whitespace() {
+        let result = validate_tcp_auth_token("  valid-token-1234567890  ");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "valid-token-1234567890");
     }
 }
