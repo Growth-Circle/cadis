@@ -193,7 +193,7 @@ impl Default for ProfileConfig {
 }
 
 /// CADIS daemon configuration loaded from env and `config.toml`.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct CadisConfig {
     /// Local CADIS state directory.
@@ -243,6 +243,26 @@ impl Default for CadisConfig {
             policy: cadis_policy::PolicyConfig::default(),
             tcp_auth_token: None,
         }
+    }
+}
+
+impl std::fmt::Debug for CadisConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CadisConfig")
+            .field("cadis_home", &self.cadis_home)
+            .field("log_level", &self.log_level)
+            .field("socket_path", &self.socket_path)
+            .field("tcp_port", &self.tcp_port)
+            .field("model", &self.model)
+            .field("hud", &self.hud)
+            .field("voice", &self.voice)
+            .field("agent_spawn", &self.agent_spawn)
+            .field("agent_runtime", &self.agent_runtime)
+            .field("orchestrator", &self.orchestrator)
+            .field("profile", &self.profile)
+            .field("policy", &self.policy)
+            .field("tcp_auth_token", &self.tcp_auth_token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
     }
 }
 
