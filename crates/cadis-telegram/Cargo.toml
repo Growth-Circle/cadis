@@ -7,6 +7,10 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 
+[[bin]]
+name = "cadis-telegram"
+path = "src/main.rs"
+
 [dependencies]
 cadis-protocol.workspace = true
 reqwest.workspace = true
