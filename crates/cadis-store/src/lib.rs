@@ -261,7 +261,10 @@ impl std::fmt::Debug for CadisConfig {
             .field("orchestrator", &self.orchestrator)
             .field("profile", &self.profile)
             .field("policy", &self.policy)
-            .field("tcp_auth_token", &self.tcp_auth_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "tcp_auth_token",
+                &self.tcp_auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }

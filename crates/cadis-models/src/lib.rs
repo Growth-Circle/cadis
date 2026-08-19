@@ -1680,7 +1680,10 @@ impl std::fmt::Debug for ModelRouterConfig {
             .field("ollama_model", &self.ollama_model)
             .field("openai_base_url", &self.openai_base_url)
             .field("openai_model", &self.openai_model)
-            .field("openai_api_key", &self.openai_api_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "openai_api_key",
+                &self.openai_api_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }

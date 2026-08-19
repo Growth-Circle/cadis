@@ -15,9 +15,13 @@ cadis-policy.workspace = true
 cadis-protocol.workspace = true
 cadis-store.workspace = true
 chrono.workspace = true
-nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# Signal delivery for terminating worker process groups. Unix only: `nix` does
+# not build on Windows, and the Windows CI job compiles the whole workspace.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", default-features = false, features = ["signal", "process"] }
 
 [lints]
 workspace = true

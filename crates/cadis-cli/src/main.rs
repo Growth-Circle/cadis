@@ -452,7 +452,10 @@ fn write_tcp_auth_preamble<W: Write>(
     writer: &mut W,
     auth_token: &str,
 ) -> Result<(), Box<dyn Error>> {
-    serde_json::to_writer(writer, &serde_json::json!({ "auth_token": auth_token }))?;
+    serde_json::to_writer(
+        &mut *writer,
+        &serde_json::json!({ "auth_token": auth_token }),
+    )?;
     writer.write_all(b"\n")?;
     Ok(())
 }
@@ -465,7 +468,7 @@ fn write_tcp_request<W: Write>(
     if let Some(auth_token) = auth_token {
         write_tcp_auth_preamble(writer, auth_token)?;
     }
-    serde_json::to_writer(writer, envelope)?;
+    serde_json::to_writer(&mut *writer, envelope)?;
     writer.write_all(b"\n")?;
     Ok(())
 }

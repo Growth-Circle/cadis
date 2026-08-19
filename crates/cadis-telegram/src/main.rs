@@ -39,8 +39,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     // Load daemon URL (defaults to localhost TCP)
-    let daemon_url = env::var("CADIS_DAEMON_URL")
-        .unwrap_or_else(|_| "127.0.0.1:7433".to_string());
+    let daemon_url = env::var("CADIS_DAEMON_URL").unwrap_or_else(|_| "127.0.0.1:7433".to_string());
 
     // Load allowed chat IDs (optional: empty = allow all)
     let allowed_chat_ids: Vec<i64> = env::var("CADIS_TELEGRAM_ALLOWED_CHATS")
@@ -52,7 +51,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 Some(
                     s.split(',')
                         .filter_map(|id| id.trim().parse::<i64>().ok())
-                        .collect()
+                        .collect(),
                 )
             }
         })
@@ -68,18 +67,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     eprintln!("✓ Daemon URL: {}", daemon_url);
-    eprintln!("✓ Bot token: {}...{}", &bot_token[..8], &bot_token[bot_token.len()-4..]);
+    eprintln!(
+        "✓ Bot token: {}...{}",
+        &bot_token[..8],
+        &bot_token[bot_token.len() - 4..]
+    );
     eprintln!();
     eprintln!("Starting CADIS Telegram bot...");
     eprintln!("Send /status to your bot to verify it's working.");
     eprintln!();
 
     // Create adapter and bridge
-    let adapter = TelegramAdapter::new(
-        daemon_url.clone(),
-        bot_token,
-        allowed_chat_ids,
-    );
+    let adapter = TelegramAdapter::new(daemon_url.clone(), bot_token, allowed_chat_ids);
     let bridge = DaemonBridge::new(daemon_url);
 
     // Start polling loop (blocks forever)

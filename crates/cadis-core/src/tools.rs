@@ -264,7 +264,6 @@ impl ToolDefinition {
         }
     }
 
-
     pub(crate) fn approval_summary(&self) -> String {
         format!(
             "{} requires approval before execution; side effects: {}; cancellation: {:?}; network: {}; secrets: {}",
@@ -1161,10 +1160,8 @@ mod tests {
 
     #[test]
     fn resolve_git_worktree_path_rejects_parent_dir_escape() {
-        let workspace = std::env::temp_dir().join(format!(
-            "cadis-worktree-path-test-{}",
-            std::process::id()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("cadis-worktree-path-test-{}", std::process::id()));
         fs::create_dir_all(&workspace).expect("workspace dir should exist");
         let error = resolve_git_worktree_path(&workspace, "../outside")
             .expect_err("parent dir path should be rejected");

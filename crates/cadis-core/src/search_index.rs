@@ -72,7 +72,10 @@ impl SearchIndex {
                         continue;
                     }
                     let trigrams = extract_trigrams(&content);
-                    entries.push(IndexEntry { path: canonical, trigrams });
+                    entries.push(IndexEntry {
+                        path: canonical,
+                        trigrams,
+                    });
                 }
             }
         }
