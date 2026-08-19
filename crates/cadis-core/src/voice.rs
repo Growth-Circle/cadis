@@ -229,7 +229,7 @@ impl TtsProvider for EdgeTtsProvider {
         let pitch_arg = format!("{:+}Hz", request.pitch);
         let volume_arg = format!("{:+}%", request.volume);
 
-        let output = Command::new("edge-tts")
+        let child = Command::new("edge-tts")
             .args(["--voice", request.voice_id])
             .args(["--rate", &rate_arg])
             .args(["--pitch", &pitch_arg])
@@ -240,7 +240,12 @@ impl TtsProvider for EdgeTtsProvider {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .output();
+            .spawn();
+
+        let output = match child {
+            Ok(child) => wait_with_timeout(child, TTS_SUBPROCESS_TIMEOUT_SECS),
+            Err(error) => Err(error),
+        };
 
         match output {
             Ok(result) if result.status.success() => Ok(TtsOutput {
@@ -260,6 +265,9 @@ impl TtsProvider for EdgeTtsProvider {
                     ),
                     true,
                 ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                Err(TtsError::new("edge_tts_timeout", error.to_string(), true))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Err(TtsError::new(
                 "edge_tts_not_found",
@@ -334,6 +342,9 @@ impl TtsProvider for SystemTtsProvider {
                     format!("system TTS failed: {}", redact(stderr.trim())),
                     true,
                 ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                Err(TtsError::new("system_tts_timeout", error.to_string(), true))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Err(TtsError::new(
                 "system_tts_not_found",
@@ -761,6 +772,9 @@ fn system_tts_command_plan(
     }
 }
 
+/// Maximum TTS subprocess execution time in seconds.
+const TTS_SUBPROCESS_TIMEOUT_SECS: u64 = 30;
+
 fn run_system_tts_command(plan: &SystemTtsCommandPlan) -> io::Result<std::process::Output> {
     let mut child = Command::new(plan.binary)
         .args(&plan.args)
@@ -783,7 +797,31 @@ fn run_system_tts_command(plan: &SystemTtsCommandPlan) -> io::Result<std::proces
         stdin.write_all(text.as_bytes())?;
     }
 
-    child.wait_with_output()
+    wait_with_timeout(child, TTS_SUBPROCESS_TIMEOUT_SECS)
+}
+
+fn wait_with_timeout(
+    mut child: std::process::Child,
+    timeout_secs: u64,
+) -> io::Result<std::process::Output> {
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+
+    loop {
+        match child.try_wait()? {
+            Some(_) => return child.wait_with_output(),
+            None => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("TTS subprocess timed out after {} seconds", timeout_secs),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
 }
 
 fn system_tts_voice_id(_voice_id: &str) -> &'static str {

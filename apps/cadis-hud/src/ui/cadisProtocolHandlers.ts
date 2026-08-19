@@ -26,12 +26,35 @@ import {
   agentDisplayName,
   ensureKnownAgent,
   pushSystem,
-  asRecord,
-  stringFrom,
-  numberFrom,
   isThemeKey,
   FALLBACK_MAIN_MODEL,
 } from "./cadisNormalizers.js";
+import {
+  validateSafe,
+  handleValidationFailure,
+  DaemonStatusSchema,
+  ModelsListSchema,
+  PreferencesSchema,
+  SessionStartedSchema,
+  MessageDeltaSchema,
+  MessageCompletedSchema,
+  VoiceStatusSchema,
+  VoiceDoctorSchema,
+  AgentSpawnedSchema,
+  AgentRenamedSchema,
+  AgentModelChangedSchema,
+  AgentSpecialistChangedSchema,
+  AgentStatusChangedSchema,
+  AgentListSchema,
+  AgentSessionEventSchema,
+  ApprovalRequestedSchema,
+  ApprovalResolvedSchema,
+  OrchestratorRouteSchema,
+  WorkerEventSchema,
+  RequestRejectedSchema,
+  PatchCreatedSchema,
+  TestResultSchema,
+} from "./cadisProtocolSchemas.js";
 
 type CadisEnvelope = {
   type?: unknown;
@@ -228,9 +251,11 @@ export function handleMessage(type: string, payload: unknown, sessionId?: string
 }
 
 export function handleDaemonStatus(payload: unknown): void {
-  const p = asRecord(payload);
-  const modelProvider = stringFrom(p.model_provider);
-  const uptimeSeconds = numberFrom(p.uptime_seconds) ?? 0;
+  const validated = validateSafe(DaemonStatusSchema, payload, "daemon.status");
+  if (!validated) return;
+
+  const modelProvider = validated.model_provider;
+  const uptimeSeconds = validated.uptime_seconds ?? 0;
   useHud.getState().setAgentTask("main", {
     verb: "ready",
     target: "CADIS daemon",
@@ -244,40 +269,41 @@ export function handleDaemonStatus(payload: unknown): void {
 }
 
 export function handleModelsList(payload: unknown): void {
-  const p = asRecord(payload);
-  const models = Array.isArray(p.models) ? normalizeModels(p.models) : [];
+  const validated = validateSafe(ModelsListSchema, payload, "models.list");
+  if (!validated) return;
+
+  const models = validated.models ? normalizeModels(validated.models) : [];
   const defaultModel = models[0] ?? useHud.getState().defaultModel ?? FALLBACK_MAIN_MODEL;
   useHud.getState().setAvailableModels(models, defaultModel);
 }
 
 export function handlePreferences(payload: unknown): void {
-  const envelope = asRecord(payload);
-  const preferences = asRecord(envelope.preferences ?? payload);
-  const hud = asRecord(preferences.hud);
-  const voice = asRecord(preferences.voice);
-  const chat = asRecord(preferences.chat);
+  const validated = validateSafe(PreferencesSchema, payload, "ui.preferences");
+  if (!validated) return;
 
-  const theme = stringFrom(hud.theme);
-  if (isThemeKey(theme)) useHud.getState().setTheme(theme);
+  const preferences = validated.preferences ?? {};
+  const hud = preferences.hud ?? {};
+  const voice = preferences.voice ?? {};
+  const chat = preferences.chat ?? {};
 
-  const avatarStyle = normalizeAvatarStyle(stringFrom(hud.avatar_style));
+  const theme = hud.theme;
+  if (theme && isThemeKey(theme)) useHud.getState().setTheme(theme);
+
+  const avatarStyle = normalizeAvatarStyle(hud.avatar_style);
   if (avatarStyle) useHud.getState().setAvatarStyle(avatarStyle);
 
-  const opacity = numberFrom(hud.background_opacity);
+  const opacity = hud.background_opacity;
   if (opacity !== undefined) useHud.getState().setBackgroundOpacity(opacity);
 
   const voicePatch: Partial<VoicePrefs> = {};
   if (typeof voice.enabled === "boolean") voicePatch.enabled = voice.enabled;
-  const provider = stringFrom(voice.provider);
-  if (provider === "edge" || provider === "elevenlabs") voicePatch.provider = provider;
-  const voiceId = stringFrom(voice.voice_id);
-  if (voiceId) voicePatch.voiceId = voiceId;
-  const rate = numberFrom(voice.rate);
-  const pitch = numberFrom(voice.pitch);
-  const volume = numberFrom(voice.volume);
-  if (rate !== undefined) voicePatch.rate = rate;
-  if (pitch !== undefined) voicePatch.pitch = pitch;
-  if (volume !== undefined) voicePatch.volume = volume;
+  if (voice.provider && (voice.provider === "edge" || voice.provider === "elevenlabs")) {
+    voicePatch.provider = voice.provider;
+  }
+  if (voice.voice_id) voicePatch.voiceId = voice.voice_id;
+  if (voice.rate !== undefined) voicePatch.rate = voice.rate;
+  if (voice.pitch !== undefined) voicePatch.pitch = voice.pitch;
+  if (voice.volume !== undefined) voicePatch.volume = voice.volume;
   if (typeof voice.auto_speak === "boolean") voicePatch.autoSpeak = voice.auto_speak;
   if (Object.keys(voicePatch).length) useHud.getState().updateVoicePrefs(voicePatch);
 
@@ -288,9 +314,11 @@ export function handlePreferences(payload: unknown): void {
 }
 
 export function handleSessionStarted(payload: unknown, sessionId?: string): void {
-  const p = asRecord(payload);
-  const sid = stringFrom(p.session_id) ?? sessionId;
-  const title = stringFrom(p.title);
+  const validated = validateSafe(SessionStartedSchema, payload, "session.started");
+  if (!validated) return;
+
+  const sid = validated.session_id ?? sessionId;
+  const title = validated.title;
   const label = title ?? sid;
   if (!label) return;
   useHud.getState().upsertChat({
@@ -303,17 +331,22 @@ export function handleSessionStarted(payload: unknown, sessionId?: string): void
 }
 
 export function handleVoiceStatus(payload: unknown): void {
-  const status = normalizeVoiceStatus(payload);
+  const validated = validateSafe(VoiceStatusSchema, payload, "voice.status");
+  if (!validated) return;
+
+  const status = normalizeVoiceStatus(validated);
   if (status) useHud.getState().setVoiceStatus(status);
 }
 
 export function handleVoiceDoctor(payload: unknown): void {
-  const p = asRecord(payload);
-  const status = normalizeVoiceStatus(p.status);
+  const validated = validateSafe(VoiceDoctorSchema, payload, "voice.doctor");
+  if (!validated) return;
+
+  const status = normalizeVoiceStatus(validated.status);
   if (status) useHud.getState().setVoiceStatus(status);
 
-  const checks = Array.isArray(p.checks)
-    ? p.checks
+  const checks = validated.checks
+    ? validated.checks
         .map(normalizeVoiceCheck)
         .filter((check): check is VoiceDiagnosticCheck => Boolean(check))
     : [];
@@ -324,8 +357,15 @@ export function handleVoiceDoctor(payload: unknown): void {
 }
 
 export function handleMessageDelta(payload: unknown, sessionId?: string): void {
-  const p = asRecord(payload);
-  const delta = stringFrom(p.delta);
+  const validated = validateSafe(
+    MessageDeltaSchema,
+    payload,
+    "message.delta",
+    (error) => handleValidationFailure("message.delta", error, true), // Notify user for message errors
+  );
+  if (!validated) return;
+
+  const delta = validated.delta;
   if (!delta) return;
   const sid = sessionId ?? "main";
   const stream = streamingBySession.get(sid) ?? { id: `m-${Date.now()}-${sid}`, text: "" };
@@ -337,16 +377,23 @@ export function handleMessageDelta(payload: unknown, sessionId?: string): void {
     text: stream.text,
     ts: Date.now(),
     final: false,
-    agentId: stringFrom(p.agent_id),
-    agentName: stringFrom(p.agent_name),
+    agentId: validated.agent_id,
+    agentName: validated.agent_name,
   });
 }
 
 export function handleMessageCompleted(payload: unknown, sessionId?: string): void {
-  const p = asRecord(payload);
+  const validated = validateSafe(
+    MessageCompletedSchema,
+    payload,
+    "message.completed",
+    (error) => handleValidationFailure("message.completed", error, true), // Notify user for message errors
+  );
+  if (!validated) return;
+
   const sid = sessionId ?? "main";
   const stream = streamingBySession.get(sid);
-  const finalText = stringFrom(p.content) ?? stringFrom(p.text) ?? stream?.text;
+  const finalText = validated.content ?? validated.text ?? stream?.text;
   if (!finalText) return;
   useHud.getState().upsertChat({
     id: stream?.id ?? `m-${Date.now()}-${sid}`,
@@ -354,67 +401,79 @@ export function handleMessageCompleted(payload: unknown, sessionId?: string): vo
     text: finalText,
     ts: Date.now(),
     final: true,
-    agentId: stringFrom(p.agent_id),
-    agentName: stringFrom(p.agent_name),
+    agentId: validated.agent_id,
+    agentName: validated.agent_name,
   });
   useHud.getState().setVoiceState("idle");
   streamingBySession.delete(sid);
 }
 
 export function handleAgentList(payload: unknown): void {
-  const p = asRecord(payload);
-  const agents = Array.isArray(p.agents) ? p.agents : [];
+  const validated = validateSafe(AgentListSchema, payload, "agent.list");
+  if (!validated) return;
+
+  const agents = validated.agents ?? [];
   for (const agent of agents) handleAgentSpawned(agent);
 }
 
 export function handleAgentSpawned(payload: unknown): void {
-  const p = asRecord(payload);
-  const agentId = stringFrom(p.agent_id) ?? stringFrom(p.id);
+  const validated = validateSafe(AgentSpawnedSchema, payload, "agent.spawned");
+  if (!validated) return;
+
+  const agentId = validated.agent_id ?? validated.id;
   if (!agentId) return;
 
-  const model = stringFrom(p.model);
-  const displayName = stringFrom(p.display_name) ?? stringFrom(p.name);
-  const role = stringFrom(p.role);
-  const parentAgentId = stringFrom(p.parent_agent_id);
-  const status = normalizeAgentStatus(stringFrom(p.status)) ?? "idle";
-  const specialist = readAgentSpecialist(p as Record<string, unknown>, role);
+  const model = validated.model;
+  const displayName = validated.display_name ?? validated.name;
+  const role = validated.role;
+  const parentAgentId = validated.parent_agent_id;
+  const status = normalizeAgentStatus(validated.status) ?? "idle";
+  const specialist = readAgentSpecialist(validated as Record<string, unknown>, role);
 
   upsertDaemonAgent({ agentId, displayName, role, parentAgentId, model, status, specialist });
   if (model) useHud.getState().setAgentModel(agentId, model);
 }
 
 export function handleAgentRenamed(payload: unknown): void {
-  const p = asRecord(payload);
-  const agentId = stringFrom(p.agent_id);
-  const displayName = stringFrom(p.display_name);
+  const validated = validateSafe(AgentRenamedSchema, payload, "agent.renamed");
+  if (!validated) return;
+
+  const agentId = validated.agent_id;
+  const displayName = validated.display_name;
   if (agentId && displayName) useHud.getState().renameAgent(agentId, displayName);
 }
 
 export function handleAgentModelChanged(payload: unknown): void {
-  const p = asRecord(payload);
-  const agentId = stringFrom(p.agent_id);
-  const model = stringFrom(p.model);
+  const validated = validateSafe(AgentModelChangedSchema, payload, "agent.model.changed");
+  if (!validated) return;
+
+  const agentId = validated.agent_id;
+  const model = validated.model;
   if (agentId && model) useHud.getState().setAgentModel(agentId, model);
 }
 
 export function handleAgentSpecialistChanged(payload: unknown): void {
-  const p = asRecord(payload);
-  const agentId = stringFrom(p.agent_id);
+  const validated = validateSafe(AgentSpecialistChangedSchema, payload, "agent.specialist.changed");
+  if (!validated) return;
+
+  const agentId = validated.agent_id;
   if (!agentId) return;
   const existing = useHud.getState().agents.find((agent) => agent.spec.id === agentId);
-  const specialist = readAgentSpecialist(p as Record<string, unknown>, existing?.spec.role);
+  const specialist = readAgentSpecialist(validated as Record<string, unknown>, existing?.spec.role);
   if (specialist) useHud.getState().setAgentSpecialist(agentId, specialist);
 }
 
 export function handleAgentStatusChanged(payload: unknown): void {
-  const p = asRecord(payload);
-  const agentId = stringFrom(p.agent_id);
+  const validated = validateSafe(AgentStatusChangedSchema, payload, "agent.status.changed");
+  if (!validated) return;
+
+  const agentId = validated.agent_id;
   if (!agentId) return;
 
-  const status = normalizeAgentStatus(stringFrom(p.status));
+  const status = normalizeAgentStatus(validated.status);
   if (status) useHud.getState().setAgentStatus(agentId, status);
 
-  const task = stringFrom(p.task);
+  const task = validated.task;
   if (task) {
     useHud.getState().setAgentTask(agentId, {
       verb: status === "working" ? "working" : "ready",
@@ -425,33 +484,35 @@ export function handleAgentStatusChanged(payload: unknown): void {
 }
 
 export function handleAgentSessionEvent(type: string, payload: unknown, sessionId?: string): void {
-  const p = asRecord(payload);
-  const sessionRecordId = stringFrom(p.agent_session_id) ?? stringFrom(p.id);
-  const agentId = stringFrom(p.agent_id);
+  const validated = validateSafe(AgentSessionEventSchema, payload, `agent.session.${type}`);
+  if (!validated) return;
+
+  const sessionRecordId = validated.agent_session_id ?? validated.id;
+  const agentId = validated.agent_id;
   if (!sessionRecordId || !agentId) return;
 
   const existing = useHud
     .getState()
     .agentSessions.find((candidate) => candidate.id === sessionRecordId);
   const status =
-    normalizeAgentSessionStatus(stringFrom(p.status)) ?? defaultAgentSessionStatus(type);
-  const task = stringFrom(p.task) ?? existing?.task ?? "agent session";
-  const budgetSteps = numberFrom(p.budget_steps) ?? existing?.budgetSteps ?? 0;
-  const stepsUsed = numberFrom(p.steps_used) ?? existing?.stepsUsed ?? 0;
-  const result = stringFrom(p.result);
-  const error = stringFrom(p.error) ?? stringFrom(p.error_code);
-  const parentAgentId = stringFrom(p.parent_agent_id) ?? existing?.parentAgentId;
+    normalizeAgentSessionStatus(validated.status) ?? defaultAgentSessionStatus(type);
+  const task = validated.task ?? existing?.task ?? "agent session";
+  const budgetSteps = validated.budget_steps ?? existing?.budgetSteps ?? 0;
+  const stepsUsed = validated.steps_used ?? existing?.stepsUsed ?? 0;
+  const result = validated.result;
+  const error = validated.error ?? validated.error_code;
+  const parentAgentId = validated.parent_agent_id ?? existing?.parentAgentId;
 
   ensureKnownAgent(agentId);
   useHud.getState().upsertAgentSession({
     id: sessionRecordId,
-    sessionId: stringFrom(p.session_id) ?? sessionId ?? existing?.sessionId ?? "main",
-    routeId: stringFrom(p.route_id) ?? existing?.routeId ?? "",
+    sessionId: validated.session_id ?? sessionId ?? existing?.sessionId ?? "main",
+    routeId: validated.route_id ?? existing?.routeId ?? "",
     agentId,
     parentAgentId,
     task,
     status,
-    timeoutAt: stringFrom(p.timeout_at) ?? existing?.timeoutAt,
+    timeoutAt: validated.timeout_at?.toString() ?? existing?.timeoutAt,
     budgetSteps,
     stepsUsed,
     result,
@@ -468,36 +529,47 @@ export function handleAgentSessionEvent(type: string, payload: unknown, sessionI
 }
 
 export function handleApprovalRequested(payload: unknown): void {
-  const p = asRecord(payload);
-  const approvalId = stringFrom(p.approval_id) ?? stringFrom(p.id);
+  const validated = validateSafe(
+    ApprovalRequestedSchema,
+    payload,
+    "approval.requested",
+    (error) => handleValidationFailure("approval.requested", error, true), // Critical: notify user
+  );
+  if (!validated) return;
+
+  const approvalId = validated.approval_id ?? validated.id;
   if (!approvalId) return;
   useHud.getState().pushApproval({
     id: approvalId,
-    ruleId: stringFrom(p.risk_class) ?? stringFrom(p.rule_id) ?? "approval",
-    reason: stringFrom(p.summary) ?? stringFrom(p.reason) ?? stringFrom(p.title) ?? "",
-    cmd: stringFrom(p.command) ?? stringFrom(p.cmd) ?? "",
-    cwd: stringFrom(p.workspace) ?? stringFrom(p.cwd) ?? "",
-    agentId: stringFrom(p.agent_id) ?? "main",
+    ruleId: validated.risk_class ?? validated.rule_id ?? "approval",
+    reason: validated.summary ?? validated.reason ?? validated.title ?? "",
+    cmd: validated.command ?? validated.cmd ?? "",
+    cwd: validated.workspace ?? validated.cwd ?? "",
+    agentId: validated.agent_id ?? "main",
     ts: Date.now(),
   });
 }
 
 export function handleApprovalResolved(payload: unknown): void {
-  const p = asRecord(payload);
-  const approvalId = stringFrom(p.approval_id) ?? stringFrom(p.id);
+  const validated = validateSafe(ApprovalResolvedSchema, payload, "approval.resolved");
+  if (!validated) return;
+
+  const approvalId = validated.approval_id ?? validated.id;
   if (approvalId) useHud.getState().removeApproval(approvalId);
 }
 
 export function handleOrchestratorRoute(payload: unknown): void {
-  const p = asRecord(payload);
-  const targetAgentId = stringFrom(p.target_agent_id) ?? stringFrom(p.target);
-  const targetAgentName = stringFrom(p.target_agent_name) ?? agentDisplayName(targetAgentId);
+  const validated = validateSafe(OrchestratorRouteSchema, payload, "orchestrator.route");
+  if (!validated) return;
+
+  const targetAgentId = validated.target_agent_id ?? validated.target;
+  const targetAgentName = validated.target_agent_name ?? agentDisplayName(targetAgentId);
   if (targetAgentId && !targetAgentName) ensureKnownAgent(targetAgentId);
 
-  const source = stringFrom(p.source) ?? "orchestrator";
+  const source = validated.source ?? "orchestrator";
   const target = targetAgentName ?? targetAgentId ?? "agent";
-  const reason = stringFrom(p.reason);
-  const routeId = stringFrom(p.id) ?? `route-${Date.now()}`;
+  const reason = validated.reason;
+  const routeId = validated.id ?? `route-${Date.now()}`;
   useHud.getState().upsertChat({
     id: `route-${routeId}`,
     who: "system",
@@ -510,16 +582,18 @@ export function handleOrchestratorRoute(payload: unknown): void {
 }
 
 export function handleWorkerEvent(type: string, payload: unknown): void {
-  const p = asRecord(payload);
-  const workerId = stringFrom(p.worker_id) ?? stringFrom(p.id) ?? stringFrom(p.agent_id);
+  const validated = validateSafe(WorkerEventSchema, payload, `worker.${type}`);
+  if (!validated) return;
+
+  const workerId = validated.worker_id ?? validated.id ?? validated.agent_id;
   if (!workerId) return;
   const existing = useHud.getState().workers.find((worker) => worker.id === workerId);
-  const agentId = stringFrom(p.agent_id);
-  const parentAgentId = stringFrom(p.parent_agent_id) ?? agentId ?? existing?.parentAgentId ?? "main";
-  const status = normalizeWorkerStatus(stringFrom(p.status)) ?? defaultWorkerStatus(type);
-  const summary = stringFrom(p.summary);
-  const delta = stringFrom(p.delta);
-  const text = delta ?? summary ?? stringFrom(p.text) ?? existing?.lastText;
+  const agentId = validated.agent_id;
+  const parentAgentId = validated.parent_agent_id ?? agentId ?? existing?.parentAgentId ?? "main";
+  const status = normalizeWorkerStatus(validated.status) ?? defaultWorkerStatus(type);
+  const summary = validated.summary;
+  const delta = validated.delta;
+  const text = delta ?? summary ?? validated.text ?? existing?.lastText;
   const logTail = nextWorkerLogTail(existing, delta);
   const logLineCount = existing ? existing.logLineCount + (delta ? 1 : 0) : delta ? 1 : 0;
   ensureKnownAgent(parentAgentId);
@@ -527,36 +601,42 @@ export function handleWorkerEvent(type: string, payload: unknown): void {
     id: workerId,
     agentId: agentId ?? existing?.agentId,
     parentAgentId,
-    cli: stringFrom(p.cli) ?? existing?.cli,
-    cwd: stringFrom(p.cwd) ?? existing?.cwd,
+    cli: validated.cli ?? existing?.cli,
+    cwd: validated.cwd ?? existing?.cwd,
     status,
     lastText: text,
     summary: summary ?? existing?.summary,
     logLineCount,
     logTail,
-    worktree: readWorkerWorktree(p.worktree) ?? existing?.worktree,
-    artifacts: readWorkerArtifacts(p.artifacts) ?? existing?.artifacts,
-    startedAt: numberFrom(p.started_at) ?? existing?.startedAt ?? Date.now(),
-    updatedAt: numberFrom(p.updated_at) ?? Date.now(),
+    worktree: readWorkerWorktree(validated.worktree) ?? existing?.worktree,
+    artifacts: readWorkerArtifacts(validated.artifacts) ?? existing?.artifacts,
+    startedAt: validated.started_at ?? existing?.startedAt ?? Date.now(),
+    updatedAt: validated.updated_at ?? Date.now(),
   });
 }
 
 export function handleRequestRejected(payload: unknown): void {
-  const p = asRecord(payload);
-  const message = stringFrom(p.message) ?? "CADIS request was rejected";
+  const validated = validateSafe(RequestRejectedSchema, payload, "request.rejected");
+  if (!validated) return;
+
+  const message = validated.message ?? "CADIS request was rejected";
   pushSystem(`(${message})`);
 }
 
 export function handlePatchCreated(payload: unknown): void {
-  const p = asRecord(payload);
-  const id = stringFrom(p.patch_id) ?? `patch-${Date.now()}`;
-  const summary = stringFrom(p.summary) ?? "patch created";
+  const validated = validateSafe(PatchCreatedSchema, payload, "patch.created");
+  if (!validated) return;
+
+  const id = validated.patch_id ?? `patch-${Date.now()}`;
+  const summary = validated.summary ?? "patch created";
   useHud.getState().pushPatch({ id, summary });
 }
 
 export function handleTestResult(payload: unknown): void {
-  const p = asRecord(payload);
-  const status = stringFrom(p.status) ?? "unknown";
-  const summary = stringFrom(p.summary) ?? status;
+  const validated = validateSafe(TestResultSchema, payload, "test.result");
+  if (!validated) return;
+
+  const status = validated.status ?? "unknown";
+  const summary = validated.summary ?? status;
   useHud.getState().pushTestResult({ id: `test-${Date.now()}`, summary: `[${status}] ${summary}` });
 }

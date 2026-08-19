@@ -127,6 +127,19 @@ fn default_shell_env_allowlist() -> Vec<String> {
     .collect()
 }
 
+/// Check if an environment variable name is likely a secret.
+fn is_secret_env_var(name: &str) -> bool {
+    let name_upper = name.to_uppercase();
+    name_upper.contains("SECRET")
+        || name_upper.contains("PASSWORD")
+        || name_upper.contains("API_KEY")
+        || name_upper.contains("TOKEN")
+        || name_upper.contains("PRIVATE_KEY")
+        || name_upper.contains("AWS_SECRET")
+        || name_upper.contains("GITHUB_TOKEN")
+        || name_upper.contains("OPENAI_API_KEY")
+}
+
 // ── Cancellation token (Track D item 4) ──────────────────────────────
 
 /// Typed cancellation token for cooperative tool cancellation.
@@ -163,16 +176,32 @@ impl CancellationToken {
 // ── Denied path enforcement (Track D item 6) ────────────────────────
 
 /// Checks whether a path is denied by the configured denied path list.
+///
+/// A denied prefix is honoured both literally and after symlink resolution:
+/// the literal check catches paths that do not exist yet, and the resolved
+/// check stops a symlink from being used to reach into a denied directory.
+/// Paths that do not exist are resolved through their nearest existing
+/// ancestor rather than denied outright, since denying every unresolvable
+/// path would block the creation of any new file.
 pub fn is_denied_path(path: &Path, denied_paths: &[PathBuf]) -> bool {
-    let Ok(canonical) = path.canonicalize() else {
-        // If we can't resolve, check raw prefix match.
-        return denied_paths.iter().any(|denied| path.starts_with(denied));
+    if denied_paths.iter().any(|denied| path.starts_with(denied)) {
+        return true;
+    }
+    let resolved = path.canonicalize().ok().or_else(|| {
+        path.ancestors()
+            .find(|ancestor| ancestor.exists())
+            .and_then(|ancestor| ancestor.canonicalize().ok())
+    });
+    let Some(resolved) = resolved else {
+        // Nothing along the path resolves, so there is nothing to check
+        // against. Fail closed rather than guessing.
+        return true;
     };
     denied_paths.iter().any(|denied| {
         if let Ok(denied_canonical) = denied.canonicalize() {
-            canonical.starts_with(&denied_canonical)
+            resolved.starts_with(&denied_canonical)
         } else {
-            canonical.starts_with(denied)
+            resolved.starts_with(denied)
         }
     })
 }
@@ -216,12 +245,40 @@ pub fn is_secret_file(path: &Path) -> bool {
 pub fn filtered_env(allowlist: &[String]) -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(key, _)| allowlist.iter().any(|allowed| allowed == key))
+        // Never hand a secret-bearing variable to a subprocess, even when it
+        // was explicitly allowlisted. This is the single point every subprocess
+        // environment passes through, so guarding here covers all callers.
+        .filter(|(key, _)| !is_secret_env_var(key))
         .collect()
 }
 
 /// Returns the default shell environment allowlist.
 pub fn shell_env_allowlist() -> Vec<String> {
     default_shell_env_allowlist()
+}
+
+/// Returns the effective shell environment allowlist from policy config,
+/// falling back to the default if not configured.
+///
+/// Validates that the configured allowlist does not contain secret env vars.
+pub fn effective_shell_env_allowlist(config: &PolicyConfig) -> Result<Vec<String>, String> {
+    let allowlist = if config.shell_env_allowlist.is_empty() {
+        default_shell_env_allowlist()
+    } else {
+        config.shell_env_allowlist.clone()
+    };
+
+    // Validate that the allowlist doesn't contain secret env vars
+    for var in &allowlist {
+        if is_secret_env_var(var) {
+            return Err(format!(
+                "shell_env_allowlist contains secret variable '{}' and would leak secrets to subprocesses",
+                var
+            ));
+        }
+    }
+
+    Ok(allowlist)
 }
 
 // ── Risk class matching ───────────────────────────────────────────────
@@ -293,8 +350,13 @@ impl PolicyEngine {
     }
 
     /// Returns the filtered environment for shell execution.
+    ///
+    /// Falls back to the default allowlist when the configured one is rejected,
+    /// so a misconfigured allowlist cannot widen what a subprocess receives.
     pub fn shell_env(&self) -> Vec<(String, String)> {
-        filtered_env(&self.config.shell_env_allowlist)
+        let allowlist = effective_shell_env_allowlist(&self.config)
+            .unwrap_or_else(|_| default_shell_env_allowlist());
+        filtered_env(&allowlist)
     }
 
     /// Decides the default behavior for a structured risk classification.
@@ -569,6 +631,7 @@ fn classify_tool(tool_name: &str) -> Option<RiskClass> {
         }
         "file.write"
         | "file.patch"
+        | "worker.apply"
         | "git.diff"
         | "git.worktree.create"
         | "git.worktree.remove"
@@ -750,6 +813,19 @@ decision = "deny"
     }
 
     #[test]
+    fn filtered_env_drops_secret_vars_even_when_allowlisted() {
+        // Guard against an allowlist that names a secret-bearing variable:
+        // filtered_env is the single path every subprocess environment takes.
+        std::env::set_var("CADIS_TEST_GITHUB_TOKEN", "must-not-leak");
+        let result = filtered_env(&["CADIS_TEST_GITHUB_TOKEN".to_owned()]);
+        std::env::remove_var("CADIS_TEST_GITHUB_TOKEN");
+        assert!(
+            result.is_empty(),
+            "secret-bearing variable leaked to subprocess env: {result:?}"
+        );
+    }
+
+    #[test]
     fn shell_env_allowlist_has_expected_entries() {
         let list = shell_env_allowlist();
         assert!(list.contains(&"PATH".to_owned()));
@@ -758,6 +834,56 @@ decision = "deny"
         assert!(list.contains(&"LANG".to_owned()));
         assert!(list.contains(&"TERM".to_owned()));
         assert!(list.contains(&"SHELL".to_owned()));
+    }
+
+    #[test]
+    fn effective_shell_env_allowlist_defaults() {
+        let config = PolicyConfig::default();
+        let result = effective_shell_env_allowlist(&config);
+        assert!(result.is_ok());
+        let list = result.unwrap();
+        assert!(list.contains(&"PATH".to_owned()));
+        assert!(list.contains(&"HOME".to_owned()));
+    }
+
+    #[test]
+    fn effective_shell_env_allowlist_custom_safe() {
+        let config = PolicyConfig {
+            shell_env_allowlist: vec!["PATH".to_owned(), "HOME".to_owned(), "RUST_LOG".to_owned()],
+            ..PolicyConfig::default()
+        };
+        let result = effective_shell_env_allowlist(&config);
+        assert!(result.is_ok());
+        let list = result.unwrap();
+        assert_eq!(list.len(), 3);
+        assert!(list.contains(&"RUST_LOG".to_owned()));
+    }
+
+    #[test]
+    fn effective_shell_env_allowlist_rejects_secret_vars() {
+        let config = PolicyConfig {
+            shell_env_allowlist: vec![
+                "PATH".to_owned(),
+                "OPENAI_API_KEY".to_owned(), // Should be rejected!
+            ],
+            ..PolicyConfig::default()
+        };
+        let result = effective_shell_env_allowlist(&config);
+        assert!(result.is_err(), "Should reject secret env var in allowlist");
+        assert!(result.unwrap_err().contains("secret"));
+    }
+
+    #[test]
+    fn secret_env_vars_are_blocked() {
+        // Verify that common secret env vars are identified as such
+        assert!(is_secret_env_var("OPENAI_API_KEY"));
+        assert!(is_secret_env_var("AWS_SECRET_ACCESS_KEY"));
+        assert!(is_secret_env_var("GITHUB_TOKEN"));
+        assert!(is_secret_env_var("CADIS_TCP_AUTH_TOKEN"));
+        assert!(is_secret_env_var("DATABASE_PASSWORD"));
+        assert!(!is_secret_env_var("PATH"));
+        assert!(!is_secret_env_var("HOME"));
+        assert!(!is_secret_env_var("USER"));
     }
 
     // ── Track D: Denied path enforcement ─────────────────────────────
@@ -778,6 +904,42 @@ decision = "deny"
     fn denied_path_blocks_matching_prefix() {
         let denied = vec![PathBuf::from("/etc")];
         assert!(is_denied_path(Path::new("/etc/shadow"), &denied));
-        assert!(!is_denied_path(Path::new("/tmp/safe"), &denied));
+        assert!(!is_denied_path(Path::new("."), &denied));
+    }
+
+    #[test]
+    fn denied_path_blocks_paths_that_do_not_exist_yet() {
+        // A file about to be created inside a denied directory is still denied,
+        // even though it cannot be canonicalized.
+        let denied = vec![PathBuf::from("/etc")];
+        assert!(is_denied_path(Path::new("/etc/not-created-yet"), &denied));
+    }
+
+    #[test]
+    fn denied_path_allows_new_files_outside_denied_paths() {
+        // Creating a new file outside the denied list must stay allowed;
+        // denying every unresolvable path would block all file creation.
+        let root = std::env::temp_dir();
+        let denied = vec![root.join("cadis-denied-fixture")];
+        let target = root.join("cadis-allowed-fixture").join("new-file.txt");
+        assert!(!is_denied_path(&target, &denied));
+    }
+
+    #[test]
+    fn denied_path_resolves_symlink_into_denied_directory() {
+        // Symlink escape must still be caught by resolution, which is the
+        // reason the canonicalizing check exists at all.
+        let denied = vec![PathBuf::from("/etc")];
+        let link = std::env::temp_dir().join("cadis-policy-etc-link");
+        let _ = std::fs::remove_file(&link);
+        #[cfg(unix)]
+        {
+            if std::os::unix::fs::symlink("/etc", &link).is_ok() {
+                assert!(is_denied_path(&link.join("shadow"), &denied));
+                let _ = std::fs::remove_file(&link);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = link;
     }
 }

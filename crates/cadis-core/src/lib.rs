@@ -810,9 +810,10 @@ impl Runtime {
                 false,
             );
         };
-        let risk_class = tool.risk_class;
-        let policy_decision = self.policy.decide(risk_class);
-        let policy_reason = tool.policy_reason();
+        let tool_policy_decision = self.policy.decide_tool(&request.tool_name);
+        let policy_decision = tool_policy_decision.decision;
+        let risk_class = tool_policy_decision.risk_class.unwrap_or(tool.risk_class);
+        let policy_reason = tool_policy_decision.reason;
         let approval_summary = tool.approval_summary();
 
         let (session_id, mut events) =
@@ -1407,10 +1408,11 @@ impl Runtime {
             );
         };
 
-        let risk_class = tool.risk_class;
-        let policy_decision = self.policy.decide(risk_class);
+        let tool_policy_decision = self.policy.decide_tool(&directive.tool_name);
+        let policy_decision = tool_policy_decision.decision;
+        let risk_class = tool_policy_decision.risk_class.unwrap_or(tool.risk_class);
         let is_auto_execute = tool.execution == ToolExecutionMode::AutoExecute;
-        let policy_reason = tool.policy_reason();
+        let policy_reason = tool_policy_decision.reason;
 
         // Only auto-execute safe-read tools in the loop.
         if policy_decision != PolicyDecision::Allow || !is_auto_execute {
@@ -4623,6 +4625,24 @@ impl Runtime {
         workspace: &Path,
         input: &serde_json::Value,
     ) -> Result<ToolExecutionResult, ErrorPayload> {
+        // ATOMIC WRITE GUARANTEE: This function implements atomic file updates using temp-file writes.
+        //
+        // Pattern:
+        // 1. Create temp file with unique name in the target directory
+        // 2. Write content to temp file
+        // 3. Detect concurrent edits by comparing mtime before/after write
+        // 4. Atomically rename temp file to target path
+        //
+        // This ensures that either:
+        // - The entire patch is applied atomically (all bytes present), or
+        // - The original file is unchanged (rename fails or never occurs)
+        //
+        // Concurrent edits are detected by:
+        // - Recording mtime in prepare_file_patch()
+        // - Comparing mtime before write (above loop)
+        // - Failing with concurrent_edit error if modified
+        //
+        // This protects against lost updates when multiple agents patch the same file.
         let operations = parse_file_patch_operations(input)?;
         let prepared = prepare_file_patch(workspace, &operations)?;
 
@@ -4694,10 +4714,25 @@ impl Runtime {
                     }
                 }
             }
+            // Use a unique temp file name that includes PID and a random suffix to prevent collisions
+            // during concurrent patch operations to the same file.
+            let random_suffix = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos())
+                % 1000000;
             let parent = change.path.parent();
             let temp_path = match parent {
-                Some(dir) => dir.join(format!(".cadis_patch_{}.tmp", std::process::id())),
-                None => PathBuf::from(format!(".cadis_patch_{}.tmp", std::process::id())),
+                Some(dir) => dir.join(format!(
+                    ".cadis_patch_{}_{}.tmp",
+                    std::process::id(),
+                    random_suffix
+                )),
+                None => PathBuf::from(format!(
+                    ".cadis_patch_{}_{}.tmp",
+                    std::process::id(),
+                    random_suffix
+                )),
             };
             fs::write(&temp_path, change.content.as_bytes()).map_err(|error| {
                 tool_error(
@@ -5168,7 +5203,7 @@ impl Runtime {
             ));
         }
 
-        let resolved = workspace.join(&path);
+        let resolved = resolve_git_worktree_path(workspace, &path)?;
 
         // Try with -b first (new branch); fall back to existing branch.
         let output = Command::new("git")
@@ -5246,7 +5281,7 @@ impl Runtime {
             )
         })?;
 
-        let resolved = workspace.join(&path);
+        let resolved = resolve_git_worktree_path(workspace, &path)?;
 
         let output = Command::new("git")
             .args(["worktree", "remove", &resolved.to_string_lossy(), "--force"])
@@ -5296,6 +5331,12 @@ impl Runtime {
         for entry in entries {
             let entry = entry.map_err(|e| tool_error("file_list_failed", e.to_string(), false))?;
             let meta = entry.metadata().ok();
+            // Skip entries whose canonical path escapes the workspace (symlink defense).
+            if let Ok(canonical) = entry.path().canonicalize() {
+                if !canonical.starts_with(workspace) {
+                    continue;
+                }
+            }
             let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
             let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
             let name = entry.file_name().to_string_lossy().to_string();
@@ -8450,16 +8491,13 @@ fn join_bounded_output(handle: Option<thread::JoinHandle<BoundedOutput>>) -> Bou
 fn terminate_child(child: &mut Child) {
     #[cfg(unix)]
     {
-        let process_group = format!("-{}", child.id());
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(&process_group)
-            .status();
+        use nix::sys::signal::{killpg, Signal};
+        use nix::unistd::Pid;
+
+        let pgid = Pid::from_raw(child.id() as i32);
+        let _ = killpg(pgid, Signal::SIGTERM);
         thread::sleep(StdDuration::from_millis(20));
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg(&process_group)
-            .status();
+        let _ = killpg(pgid, Signal::SIGKILL);
     }
 
     let _ = child.kill();
@@ -9899,6 +9937,87 @@ mod tests {
                 CadisEvent::ToolFailed(payload)
                     if payload.tool_name == "file.patch"
                         && payload.error.code == "workspace_grant_required"
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+    }
+
+    #[test]
+    fn git_worktree_create_rejects_outside_workspace_path() {
+        let workspace = test_workspace("git-worktree-create-outside");
+        fs::write(workspace.join("README.md"), "hello\n").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "git-worktree-create-outside", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "git-worktree-create-outside",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_git_worktree_create_outside"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "git.worktree.create".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "git-worktree-create-outside",
+                    "branch": "feature/escape",
+                    "path": "../outside-worktree"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "git.worktree.create"
+                        && payload.error.code == "outside_workspace"
+            )
+        }));
+        assert!(!outcome
+            .events
+            .iter()
+            .any(|event| matches!(event.event, CadisEvent::ApprovalRequested(_))));
+    }
+
+    #[test]
+    fn git_worktree_remove_rejects_outside_workspace_path() {
+        let workspace = test_workspace("git-worktree-remove-outside");
+        fs::write(workspace.join("README.md"), "hello\n").expect("test file should write");
+        let mut runtime = runtime();
+        register_workspace(&mut runtime, "git-worktree-remove-outside", &workspace);
+        grant_workspace(
+            &mut runtime,
+            "git-worktree-remove-outside",
+            vec![WorkspaceAccess::Write],
+        );
+
+        let outcome = runtime.handle_request(RequestEnvelope::new(
+            RequestId::from("req_git_worktree_remove_outside"),
+            ClientId::from("cli_1"),
+            ClientRequest::ToolCall(ToolCallRequest {
+                session_id: None,
+                agent_id: None,
+                tool_name: "git.worktree.remove".to_owned(),
+                input: serde_json::json!({
+                    "workspace_id": "git-worktree-remove-outside",
+                    "path": "../outside-worktree"
+                }),
+            }),
+        ));
+
+        assert!(outcome.events.iter().any(|event| {
+            matches!(
+                &event.event,
+                CadisEvent::ToolFailed(payload)
+                    if payload.tool_name == "git.worktree.remove"
+                        && payload.error.code == "outside_workspace"
             )
         }));
         assert!(!outcome

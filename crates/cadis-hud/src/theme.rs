@@ -128,7 +128,7 @@ pub(crate) fn draw_grid(painter: &eframe::egui::Painter, rect: Rect, theme: &Pal
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
             Stroke::new(
-                1.0,
+                1.0_f32,
                 Color32::from_rgba_premultiplied(
                     theme.faint.r(),
                     theme.faint.g(),
@@ -144,7 +144,7 @@ pub(crate) fn draw_grid(painter: &eframe::egui::Painter, rect: Rect, theme: &Pal
         painter.line_segment(
             [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
             Stroke::new(
-                1.0,
+                1.0_f32,
                 Color32::from_rgba_premultiplied(
                     theme.faint.r(),
                     theme.faint.g(),
@@ -189,7 +189,7 @@ pub(crate) fn glass_frame(theme: &Palette) -> Frame {
             200,
         ))
         .rounding(Rounding::same(12.0))
-        .stroke(Stroke::new(1.0, Color32::from_white_alpha(30)))
+        .stroke(Stroke::new(1.0_f32, Color32::from_white_alpha(30)))
         .inner_margin(Margin::same(16.0))
 }
 
