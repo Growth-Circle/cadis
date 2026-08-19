@@ -207,8 +207,12 @@ impl fmt::Display for ProtocolError {
 impl Error for ProtocolError {}
 
 /// Request envelope sent by a client to `cadisd`.
+///
+/// Note: `deny_unknown_fields` cannot be used here. Serde does not support it
+/// alongside `#[serde(flatten)]`, and the flattened `request` field carries the
+/// tagged request body, so denying unknown fields would reject every request.
+/// The individual payload structs below carry the attribute instead.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct RequestEnvelope {
     /// Protocol version used by the client.
     pub protocol_version: ProtocolVersion,

@@ -245,6 +245,10 @@ pub fn is_secret_file(path: &Path) -> bool {
 pub fn filtered_env(allowlist: &[String]) -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(key, _)| allowlist.iter().any(|allowed| allowed == key))
+        // Never hand a secret-bearing variable to a subprocess, even when it
+        // was explicitly allowlisted. This is the single point every subprocess
+        // environment passes through, so guarding here covers all callers.
+        .filter(|(key, _)| !is_secret_env_var(key))
         .collect()
 }
 
@@ -346,8 +350,13 @@ impl PolicyEngine {
     }
 
     /// Returns the filtered environment for shell execution.
+    ///
+    /// Falls back to the default allowlist when the configured one is rejected,
+    /// so a misconfigured allowlist cannot widen what a subprocess receives.
     pub fn shell_env(&self) -> Vec<(String, String)> {
-        filtered_env(&self.config.shell_env_allowlist)
+        let allowlist = effective_shell_env_allowlist(&self.config)
+            .unwrap_or_else(|_| default_shell_env_allowlist());
+        filtered_env(&allowlist)
     }
 
     /// Decides the default behavior for a structured risk classification.
@@ -801,6 +810,19 @@ decision = "deny"
     fn filtered_env_only_includes_allowlist() {
         let result = filtered_env(&["PATH".to_owned()]);
         assert!(result.iter().all(|(key, _)| key == "PATH"));
+    }
+
+    #[test]
+    fn filtered_env_drops_secret_vars_even_when_allowlisted() {
+        // Guard against an allowlist that names a secret-bearing variable:
+        // filtered_env is the single path every subprocess environment takes.
+        std::env::set_var("CADIS_TEST_GITHUB_TOKEN", "must-not-leak");
+        let result = filtered_env(&["CADIS_TEST_GITHUB_TOKEN".to_owned()]);
+        std::env::remove_var("CADIS_TEST_GITHUB_TOKEN");
+        assert!(
+            result.is_empty(),
+            "secret-bearing variable leaked to subprocess env: {result:?}"
+        );
     }
 
     #[test]
