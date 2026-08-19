@@ -141,14 +141,22 @@ pub(crate) fn orbital_hud(app: &mut HudApp, _ctx: &Context, ui: &mut Ui, theme: 
     let (rect, _response) = ui.allocate_exact_size(desired, Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, Rounding::same(8.0), theme.panel);
-    painter.rect_stroke(rect, Rounding::same(8.0), Stroke::new(1.0, theme.border));
+    painter.rect_stroke(
+        rect,
+        Rounding::same(8.0),
+        Stroke::new(1.0_f32, theme.border),
+    );
 
     draw_grid(&painter, rect, theme);
 
     let center = rect.center();
     let radius = rect.height().min(rect.width()) * 0.13;
-    painter.circle_stroke(center, radius * 1.8, Stroke::new(1.0, theme.border));
-    painter.circle_stroke(center, radius * 2.45, Stroke::new(1.0, theme.border_dark));
+    painter.circle_stroke(center, radius * 1.8, Stroke::new(1.0_f32, theme.border));
+    painter.circle_stroke(
+        center,
+        radius * 2.45,
+        Stroke::new(1.0_f32, theme.border_dark),
+    );
 
     // Animated pulsing orb
     let time = ui.input(|input| input.time) as f32;
@@ -176,7 +184,7 @@ pub(crate) fn orbital_hud(app: &mut HudApp, _ctx: &Context, ui: &mut Ui, theme: 
             (60.0 + pulse * 40.0) as u8,
         ),
     );
-    painter.circle_stroke(center, orb_radius, Stroke::new(2.0, orb_color));
+    painter.circle_stroke(center, orb_radius, Stroke::new(2.0_f32, orb_color));
 
     let main_name = app
         .agents
@@ -232,7 +240,7 @@ pub(crate) fn orbital_hud(app: &mut HudApp, _ctx: &Context, ui: &mut Ui, theme: 
         // Connection line
         painter.line_segment(
             [center, pos],
-            Stroke::new(1.0, Color32::from_rgba_premultiplied(120, 180, 220, 55)),
+            Stroke::new(1.0_f32, Color32::from_rgba_premultiplied(120, 180, 220, 55)),
         );
 
         let agent = app
@@ -246,7 +254,11 @@ pub(crate) fn orbital_hud(app: &mut HudApp, _ctx: &Context, ui: &mut Ui, theme: 
         let card_size = Vec2::new(210.0, 86.0);
         let card = Rect::from_center_size(pos, card_size);
         painter.rect_filled(card, Rounding::same(8.0), theme.panel2);
-        painter.rect_stroke(card, Rounding::same(8.0), Stroke::new(1.0, theme.border));
+        painter.rect_stroke(
+            card,
+            Rounding::same(8.0),
+            Stroke::new(1.0_f32, theme.border),
+        );
 
         let sc = status_color(agent.status, theme);
         painter.circle_filled(card.left_top() + Vec2::new(18.0, 18.0), 5.0, sc);
@@ -566,7 +578,7 @@ pub(crate) fn approval_stack(app: &mut HudApp, ctx: &Context, theme: &Palette) {
                 let approval_id = app.approvals[index].id.clone();
                 let approval = &mut app.approvals[index];
                 glass_frame(theme)
-                    .stroke(Stroke::new(1.0, theme.warn))
+                    .stroke(Stroke::new(1.0_f32, theme.warn))
                     .show(ui, |ui| {
                         ui.label(RichText::new(&approval.title).monospace().color(theme.warn));
                         ui.label(RichText::new(&approval.risk).monospace().small());
@@ -623,7 +635,7 @@ pub(crate) fn config_dialog(app: &mut HudApp, ctx: &Context, theme: &Palette) {
         .collapsible(false)
         .resizable(false)
         .default_width(620.0)
-        .frame(glass_frame(theme).stroke(Stroke::new(1.0, theme.border)))
+        .frame(glass_frame(theme).stroke(Stroke::new(1.0_f32, theme.border)))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 for tab in ConfigTab::all() {
@@ -720,7 +732,7 @@ pub(crate) fn appearance_tab(app: &mut HudApp, ui: &mut Ui, theme: &Palette) {
             let button = Button::new(key.label())
                 .fill(palette.accent)
                 .stroke(Stroke::new(
-                    if app.theme == key { 2.0 } else { 1.0 },
+                    if app.theme == key { 2.0_f32 } else { 1.0_f32 },
                     theme.text,
                 ));
             if ui.add(button).clicked() {
@@ -865,7 +877,7 @@ pub(crate) fn rename_dialog(app: &mut HudApp, ctx: &Context, theme: &Palette) {
         .collapsible(false)
         .resizable(false)
         .default_width(360.0)
-        .frame(glass_frame(theme).stroke(Stroke::new(1.0, theme.border)))
+        .frame(glass_frame(theme).stroke(Stroke::new(1.0_f32, theme.border)))
         .show(ctx, |ui| {
             ui.add(TextEdit::singleline(&mut app.rename_value).hint_text("agent display name"));
             ui.horizontal(|ui| {
