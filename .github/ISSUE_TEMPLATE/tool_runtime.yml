@@ -6,6 +6,12 @@ body:
   - type: markdown
     attributes:
       value: |
+        > [!WARNING]
+        > **CADIS is discontinued.** We do not triage new issues or discussions in this repository.
+        > Open your issue in [seira-bot/seira](https://github.com/seira-bot/seira) instead.
+  - type: markdown
+    attributes:
+      value: |
         Tool work is security-sensitive. CADIS tools must execute through `cadisd`, declare risk class, enforce workspace boundaries, redact output, and route risky actions through central approval.
   - type: dropdown
     id: tool

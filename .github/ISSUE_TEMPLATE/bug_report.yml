@@ -6,6 +6,12 @@ body:
   - type: markdown
     attributes:
       value: |
+        > [!WARNING]
+        > **CADIS is discontinued.** We do not triage new issues or discussions in this repository.
+        > Open your issue in [seira-bot/seira](https://github.com/seira-bot/seira) instead.
+  - type: markdown
+    attributes:
+      value: |
         Thanks for helping improve CADIS. Please keep logs redacted: no API keys, auth files, tokens, private prompts, or full secret-bearing paths.
   - type: textarea
     id: summary

@@ -6,6 +6,12 @@ body:
   - type: markdown
     attributes:
       value: |
+        > [!WARNING]
+        > **CADIS is discontinued.** We do not triage new issues or discussions in this repository.
+        > Open your issue in [seira-bot/seira](https://github.com/seira-bot/seira) instead.
+  - type: markdown
+    attributes:
+      value: |
         CADIS is Rust-first, local-first, and daemon-owned. UI, voice, Telegram, mobile, and CLI surfaces should remain protocol clients unless the architecture docs say otherwise.
   - type: textarea
     id: problem

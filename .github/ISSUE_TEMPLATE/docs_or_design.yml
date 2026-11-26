@@ -3,6 +3,12 @@ description: Update CADIS docs, standards, ADRs, or implementation plans
 title: "docs: "
 labels: ["documentation", "needs-triage"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        > [!WARNING]
+        > **CADIS is discontinued.** We do not triage new issues or discussions in this repository.
+        > Open your issue in [seira-bot/seira](https://github.com/seira-bot/seira) instead.
   - type: textarea
     id: summary
     attributes:
