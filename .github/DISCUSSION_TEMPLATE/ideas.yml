@@ -7,6 +7,12 @@ body:
   - type: markdown
     attributes:
       value: |
+        > [!WARNING]
+        > **CADIS is discontinued.** We do not triage new issues or discussions in this repository.
+        > Open your issue in [seira-bot/seira](https://github.com/seira-bot/seira) instead.
+  - type: markdown
+    attributes:
+      value: |
         Thanks for starting a C.A.D.I.S. discussion.
 
         Use this template for product ideas, architecture questions, workflow proposals, tool-runtime concepts, HUD/voice UX, or contributor process improvements.
@@ -69,7 +75,7 @@ body:
     attributes:
       label: Affected components
       description: List the parts of the repo or system this would likely touch.
-      placeholder: Example: cadis-core, cadis-policy, cadis-tools, docs/15_PROTOCOL_DRAFT.md, apps/cadis-hud
+      placeholder: "Example: cadis-core, cadis-policy, cadis-tools, docs/15_PROTOCOL_DRAFT.md, apps/cadis-hud"
 
   - type: textarea
     id: risks

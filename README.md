@@ -10,11 +10,19 @@
   Local-first multi-agent runtime for desktop work, native tools, approvals, voice, and isolated coding workflows.
 </p>
 
+> [!WARNING]
+> **CADIS is discontinued.** We do not maintain this repository anymore.
+> We do not accept new issues, pull requests, or releases here.
+>
+> Development continues in **[Seira](https://github.com/seira-bot/seira)**.
+> To contribute, go to [seira-bot/seira](https://github.com/seira-bot/seira) and read its
+> [contributing guide](https://github.com/seira-bot/seira/blob/main/CONTRIBUTING.md).
+
 <p align="center">
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <a href="https://github.com/Growth-Circle/cadis/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Growth-Circle/cadis/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/Growth-Circle/cadis/actions/workflows/platform-baseline.yml"><img alt="Platform" src="https://github.com/Growth-Circle/cadis/actions/workflows/platform-baseline.yml/badge.svg?branch=main"></a>
-  <img alt="Status: Beta" src="https://img.shields.io/badge/status-beta-blue.svg">
+  <img alt="Status: Discontinued" src="https://img.shields.io/badge/status-discontinued-red.svg">
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust&logoColor=white">
   <img alt="TypeScript" src="https://img.shields.io/badge/typescript-5.x-blue?logo=typescript&logoColor=white">
   <img alt="Tauri" src="https://img.shields.io/badge/tauri-2.x-24C8D8?logo=tauri&logoColor=white">
